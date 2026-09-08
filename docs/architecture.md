@@ -1,515 +1,411 @@
 # Framework 架构
 
-Framework 负责 Agent 的执行流程，内置 ReAct、串行工作流和 DAG，也支持自定义执行方式。
-Plugin Kernel 管理插件安装与资源释放。模型协议、存储和外部工具由插件接入。
+`agent-framework` 定义 Agent 的运行时模型：执行循环、模型与工具调用、上下文组装、预算、状态、交互、事件和资源关闭。
+`agent-plugin-kernel` 负责插件装配与资源生命周期。模型协议、存储、MCP、用户交互和遥测由配套插件提供。
 
-会话与上下文见[上下文窗口](context-windows.md)，问答与审批见[用户交互](interactions.md)，
-SQLite 分层与平台适配见[SQLite 存储](sqlite-storage.md)。
+本文只说明整体架构和运行语义。扩展点、默认行为以及现有实现见[Plugin 与扩展点](plugins.md)；可运行的场景和代码见[快速上手](quickstart.md)。
 
-## 分层
+## 总体结构
 
-下图箭头表示依赖关系。
+宿主应用负责业务边界，Framework 负责 Agent 运行时，插件负责接入外部能力。
 
 ```mermaid
 flowchart TD
-    App[应用，如 Tron] --> Framework[agent-framework]
-    App --> Plugins[模型、存储、工具等插件]
-    Plugins --> Framework
-    Plugins --> Kernel[agent-plugin-kernel]
-    Framework --> Kernel
+    Host[宿主应用\n身份、权限、订阅、凭据、UI] --> Builder[AgentBuilder\n服务装配]
+    Builder --> Agent[Agent\n运行入口、关闭、身份]
+    Agent --> Loop[AgentLoop\nReAct / Workflow / DAG]
+    Loop --> ModelInvoker[ModelInvoker\n模型步骤编排]
+    ModelInvoker --> ModelCatalog[ModelCatalog\n连接与模型目录]
+    ModelCatalog --> ModelSelection[ModelSelectionStrategy\n选择连接中的模型]
+    ModelInvoker --> ContextPipeline[Context Pipeline\n快照、贡献、预算、裁剪]
+    Loop --> ToolInvoker[ToolInvoker\n参数校验、撤销、执行]
+    Loop --> State[状态与会话\n完整聊天记录 / 任务进度 / 交互]
+    ContextPipeline --> ModelProvider[ModelProvider\n协议适配]
+    ModelSelection -.选择 connection/model.-> ModelProvider
+    ToolInvoker --> ToolProvider[ToolProvider\n宿主工具 / MCP]
+    State --> Storage[存储插件\nSQLite 或自定义实现]
+    Agent --> Events[EventSink\n实时事件与遥测]
+    Builder --> Kernel[agent-plugin-kernel\n依赖排序、服务注册、资源释放]
+    ModelProvider --> Kernel
+    ToolProvider --> Kernel
+    Storage --> Kernel
 ```
 
-| 模块 | 职责 |
-|---|---|
-| 应用 | 身份、权限、订阅、凭据、配置和 UI |
-| agent-plugin-kernel | 插件依赖排序、服务注册、安装回滚、资源关闭 |
-| agent-framework | Agent 运行、模型和工具调用、上下文、预算、状态与交互 |
-| 插件 | 实现模型适配、工具接入、存储、摘要和可观测功能 |
+### 模块职责
 
-Framework 不依赖 genai、SQLite、MCP 或 OTel。DAG 使用 petgraph 检查拓扑，使用 Tokio
-执行节点。Tron 通过适配层接入 Framework，业务类型留在 Tron。
+| 模块 | 职责 | 不负责的内容 |
+|---|---|---|
+| 宿主应用 | 业务身份、权限、订阅、凭据、配置、HTTP/UI、业务路由 | 不把业务策略下沉到通用 Framework |
+| `agent-plugin-kernel` | 插件依赖排序、类型服务注册、安装回滚、异步关闭和 Drop 兜底 | 不定义 Agent 执行语义 |
+| `agent-framework` | Agent、执行循环、模型/工具调用、上下文、预算、状态、交互和运行控制 | 不依赖具体模型协议、数据库、MCP 或 OTel |
+| 配套插件 | 实现模型协议、存储、工具、上下文、摘要、附件、AG-UI 和遥测 | 不替宿主管理业务权限和订阅 |
 
-## 创建 Agent
+Framework 不依赖 `genai`、SQLite、MCP 或 OpenTelemetry。DAG 使用 `petgraph` 校验拓扑，使用 Tokio 执行节点。
+宿主通过适配层接入 Framework，宿主自己的业务类型留在宿主内。
 
-先配置模型和 SQLite 文件，其余使用默认实现。下面使用现成的 GenaiProvider，无需编写模型适配器或 Plugin。
+## 服务装配
 
-```rust
-use agent_framework::{AgentBuilder, ModelDescriptor, RunRequest};
-use agent_model_genai::{AdapterKind, AuthData, GenaiProvider};
-use agent_storage_sqlite::SqliteStoragePlugin;
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let provider = Arc::new(GenaiProvider::new(
-        "default",                              // 连接名称
-        AdapterKind::OpenAI,                     // 使用 OpenAI 协议
-        std::env::var("MODEL_ENDPOINT")?,        // 接口地址
-        AuthData::from_env("MODEL_API_KEY"),     // 从环境变量读取密钥
-    )?);
-
-    let agent = AgentBuilder::new()
-        .plugin(SqliteStoragePlugin::new("agent.sqlite"))
-        .plugin(provider.plugin(vec![
-            ModelDescriptor::new(std::env::var("MODEL")?),
-        ]))
-        .build()
-        .await?;
-
-    let result = agent.run(RunRequest::new("chat-1", "你好")).await;
-    let shutdown = agent.close().await;
-    println!("{}", result?.output);
-    if !shutdown.is_success() {
-        return Err(format!("shutdown failed: {shutdown:?}").into());
-    }
-    Ok(())
-}
-```
-
-设置 `MODEL_ENDPOINT`、`MODEL_API_KEY`、`MODEL` 后即可运行
-[minimal.rs](../crates/agent-model-genai/examples/minimal.rs)：
-
-```sh
-cargo run -p agent-model-genai --example minimal
-```
-
-这个例子注册模型连接和 `SqliteStoragePlugin::new("agent.sqlite")`。存储插件创建会话、执行状态、交互、长期记忆、摘要和附件的 SQLite 表；ReAct 和单模型选择策略由框架补齐。缺少存储会在构建时报告错误。
-运行会调用配置的模型接口。`run().await` 等待运行结束，只返回最终结果；
-要边生成边显示，使用下面的[流式输出](#流式输出)示例。
-
-`agent.close()` 关闭整个 Agent，不是结束一次对话。这个命令行示例只运行一次，所以随后关闭。
-服务端通常复用 Agent 处理多次请求，在服务退出时再关闭。
-
-### 流式输出
-
-`run(request).await` 内部就是 `start(request)?.wait().await`。
-需要接收中间事件时，先用 `start()` 启动，再用 `take_events()` 取得事件接收器。
-将上面示例中从 `let result = agent.run(...)` 到 `Ok(())` 之前的代码替换为：
-
-```rust
-use agent_framework::AgentEvent;
-use tokio::sync::broadcast::error::RecvError;
-
-let mut handle = agent.start(RunRequest::new("chat-1", "你好"))?;
-let mut events = handle.take_events();
-
-let consume = async {
-    loop {
-        match events.recv().await {
-            Ok(envelope) => {
-                if let AgentEvent::TextDelta(text) = envelope.event {
-                    // HTTP 接口可以在这里将文本片段转换为 SSE 消息。
-                    println!("收到文本片段：{text}");
-                }
-            }
-            Err(RecvError::Lagged(count)) => {
-                eprintln!("消费过慢，丢失 {count} 条事件");
-            }
-            Err(RecvError::Closed) => break,
-        }
-    }
-};
-
-// 一边接收事件，一边等待最终结果；事件通道关闭后结束消费。
-let (result, ()) = tokio::join!(handle.wait(), consume);
-let shutdown = agent.close().await;
-println!("最终结果：{}", result?.output);
-if !shutdown.is_success() {
-    return Err(format!("shutdown failed: {shutdown:?}").into());
-}
-```
-
-GenaiProvider 读取模型的流式响应，并转换为 Framework 事件。
-Framework 提供 Rust 事件订阅；`AgUiPlugin` 提供标准 AG-UI 事件及 SSE 编码，
-HTTP 路由由应用层封装。需要接入 AG-UI 前端时，使用[AG-UI 示例](agui.md#注册与使用)。
+`AgentBuilder` 先收集插件，`build().await` 才安装插件并构造运行时服务。安装阶段不会提前调用模型接口。
 
 ```text
-模型服务 → GenaiProvider → Agent 事件 → 应用 HTTP 接口 → SSE → 前端
-```
-
-`take_events()` 取得启动时已创建的接收器，保留启动后、调用此方法前产生的事件；
-`subscribe()` 则只订阅调用之后的事件。两者都是有容量限制的实时通道，消费过慢时会丢失事件。
-示例只打印丢失数量；应用需要通知前端输出不完整，并用最终结果校正展示。
-`TextDelta` 是文本片段，工具执行和运行结束等信息通过其他事件类型传递。
-
-### 运行中追加指令
-
-`handle.control()` 返回可克隆的 `RunControl`。先取得控制句柄，再把 `RunHandle`
-交给其他任务等待结果；接收用户消息的任务可以继续调用 `steer()` 或 `cancel()`。
-
-```rust
-let mut handle = agent.start(RunRequest::new("chat-1", "分析项目"))?;
-let control = handle.control();
-let events = handle.take_events(); // 可以交给上面的 SSE 消费逻辑
-let waiting = tokio::spawn(handle.wait());
-
-// 示例模拟收到用户的追加指令。
-// 服务端可以按 run_id 保存 control.clone()，在收到消息时取出调用。
-control.steer("重点分析插件注册流程")?;
-
-let result = waiting.await??;
-println!("最终结果：{}", result.output);
-```
-
-控制句柄还提供 `cancel()`、`revoke_tools(&ids)`、`budget_usage()` 和 `run_id()`。
-原有 `handle.steer()` 等方法继续可用。
-
-```text
-RunHandle ── wait() ── 等待最终结果
-    │
-    └── control() ── RunControl ── clone() ── 接收用户操作
-```
-
-- 丢弃一个或全部外部 `RunControl` 不会取消运行；丢弃 `RunHandle` 或它的
-  `wait()` future 会取消运行。控制句柄不会延长事件通道的生命周期。
-- 控制句柄只控制获取时的那次执行。同一会话开始新 Run，或持久化 Run 恢复执行后，
-  都需要从新的 Handle 获取控制句柄；宿主应在执行结束后移除旧句柄。
-- `steer()` 成功只表示文本已进入内存队列。ReAct 和 Workflow 在模型/工具交互之间
-  追加 `user` 消息；不会中断当前模型请求或工具调用。取消、失败、限额或进程退出
-  仍可能使消息来不及被模型处理。
-- `Steered` 表示消息已保存到历史。Workflow 在模型步骤前和最终回复后消费指令时，
-  都先将消息与事件一起保存到 checkpoint，再发布实时事件；保存失败不发布。
-  实时事件仍可能因消费过慢丢失，持久化事件可从 checkpoint 的 journal 读取。
-- DAG 拒绝没有目标节点的文本 steering。当前没有等待下一次 Run 的 Queue 接口。
-
-### 注册过程
-
-`.plugin(...)` 将插件加入待安装列表；`.build().await` 才开始安装。
-
-```text
-provider.plugin(models)
-  └─ 创建 ModelConnectionPlugin
-       ↓
 AgentBuilder.plugin(...)
-  └─ 保存插件，尚未调用模型接口
-       ↓
-AgentBuilder.build()
-  ├─ PluginContainer 按依赖顺序调用各插件的 install
-  ├─ install 注册服务
-  ├─ SqliteStoragePlugin 打开数据库，注册各个存储服务
-  ├─ DefaultsPlugin 补齐 ReAct、空工具和上下文等默认实现
-  └─ AgentBuilder 读取服务，创建 ModelInvoker 等组件
+        │
+        ▼
+PluginContainer.build
+  ├─ 按依赖顺序安装插件
+  ├─ 注册唯一服务和多个贡献
+  ├─ 安装失败时回滚已安装资源
+  └─ 注册关闭与清理回调
+        │
+        ▼
+AgentBuilder 读取服务
+  ├─ 创建 ModelInvoker / ToolInvoker
+  ├─ 选择 AgentLoop
+  ├─ 装配上下文、状态和事件服务
+  └─ 返回可运行的 Agent
 ```
 
-ModelConnectionPlugin 的 `install` 将连接注册到容器，内部代码如下：
+服务有两种数量语义：
 
-```rust
-async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-    context.contribute(ModelConnectionService(self.connection.clone()))
-}
-```
+| 语义 | 注册方式 | 读取方式 | 典型用途 |
+|---|---|---|---|
+| 唯一服务 | `provide(T)` | `get<T>()` | 一个会话存储、一个执行循环、一个模型选择策略 |
+| 多个贡献 | `contribute(T)` | `all<T>()` | 多个模型连接、工具来源、Middleware、EventSink |
 
-两种注册方式分别用于单个实现和多个实现：
+同一个服务类型不能同时使用两种注册语义。插件依赖、来源追踪、安装回滚和资源释放的具体入口见[Plugin 与扩展点](plugins.md)。
 
-| 注册 | 框架如何读取 | 例子 |
-|---|---|---|
-| `context.provide(ConversationStoreService(memory))` | `registry.get::<ConversationStoreService>()` | 一个 Agent 使用一个 ConversationStore |
-| `context.contribute(ModelConnectionService(connection))` | `registry.all::<ModelConnectionService>()` | 一个 Agent 可以使用多个模型连接 |
+### 装配边界
 
-存储组合插件内部用 `provide(...)` 注册服务，应用只需配置一次数据库路径：
-
-```rust
-let agent = AgentBuilder::new()
-    .plugin(SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
-    .build()
-    .await?;
-
-// 查询交互存储，例如恢复页面上的待回答卡片。
-let service = agent.service::<agent_framework::InteractionStoreService>().unwrap();
-let pending = service.0.pending("chat-1").await?;
-```
-
-`SqliteStoragePlugin` 自己打开并关闭数据库连接。若应用需要共享或替换某一种存储，
-可以分别注册 `ConversationStorePlugin`、`StateStorePlugin`、`InteractionStorePlugin` 等。
-组合插件与单项插件不能重复提供同一种服务。框架没有内存存储回退，也不隐式选择数据库路径。
-
-后面的代码展示对创建代码的不同改法，`provider` 沿用上面的配置，不需要连续执行这些片段。
-
-## 执行流程
+Framework 根据已注册的服务构造运行时，不负责创建模型连接、数据库、内存存储或网络客户端。
+内置执行器需要持久化状态时，宿主必须显式安装对应存储插件。
 
 ```text
-RunLifecycleHook.on_started
-RunMiddleware
-└─ AgentLoop
-   ├─ ModelInvoker → ModelMiddleware → ModelProvider
-   ├─ ToolInvoker  → ToolMiddleware  → Tool
-   └─ DAG 节点     → WorkflowNodeMiddleware → WorkflowNode
-RunLifecycleHook.on_finished
+宿主和插件注册运行所需服务
+            │
+            ▼
+Framework 读取服务并构造运行时
+            │
+            ▼
+Agent 开始执行
 ```
 
-AgentLoop 决定执行顺序，模型和工具调用器负责参数检查、预算、超时和取消。
-DAG 节点也通过这些调用器使用模型和工具。
+扩展点、默认行为和现有实现统一维护在[plugins.md](plugins.md)。
 
-Middleware 用 `intercept + next` 包装执行。Hook 只接收生命周期通知，不修改结果。
-运行结束后完成资源清理和中间件处理，再调用结束 Hook、发送终态事件并返回结果。
+## 执行模型
 
-| 执行器 | 用途 | 持久化 |
-|---|---|---|
-| ReactAgentLoop | 模型与工具循环，支持问答、审批和恢复 | StateStore 检查点，完整消息同步到 ConversationStore |
-| WorkflowLoop | 串行 ReAct 阶段，支持交互和审批 | 需要 StateStore |
-| DagWorkflowLoop | 并行节点、条件分支和汇合 | 需要 StateStore |
-| 自定义 AgentLoop | 实现其他执行方式 | 由实现决定 |
+一次运行从生命周期通知开始，经过执行循环和调用器，最后完成清理并发布终态事件。
 
-DAG 内置 `ReactWorkflowNode`，类型名为 `framework.react`。路由、转换等节点通过
-`WorkflowNodePlugin` 注册。更换整个执行器则使用 `AgentLoopPlugin`。
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant H as RunLifecycleHook
+    participant L as AgentLoop
+    participant M as ModelInvoker
+    participant C as ContextAssembler
+    participant T as ToolInvoker
+    participant S as StateStore / ConversationStore
+    participant E as EventSink
 
-### 连续对话
-
-同一个 session ID 使用同一份会话历史。在 Agent 创建后、调用 `close()` 前连续发送两条消息：
-
-```rust
-let first = agent.run(RunRequest::new("chat-1", "我叫小明")).await?;
-let second = agent.run(RunRequest::new("chat-1", "我叫什么？")).await?;
-println!("{}\n{}", first.output, second.output);
+    A->>H: on_started
+    A->>L: 执行 RunRequest
+    loop 模型与工具交互
+        L->>M: 生成模型请求
+        M->>S: 读取会话和任务进度
+        M->>C: 组装 ContextWindow
+        C-->>M: messages + assembly report
+        M->>E: 发布模型事件
+        M-->>L: 文本或工具调用
+        L->>T: 校验并执行工具
+        T->>E: 发布工具事件
+        T->>S: 保存工具记录和状态
+        T-->>L: 工具结果
+    end
+    L->>S: 保存终态
+    A->>H: on_finished
+    A->>E: 发布终态事件
 ```
 
-### 使用内置 DAG
+`AgentLoop` 决定执行顺序；`ModelInvoker` 协调模型选择、Context Pipeline、预算、超时、取消和模型中间件；`ToolInvoker` 负责工具参数检查、撤销、超时、取消和工具中间件。
+DAG 节点也必须通过这些调用器访问模型和工具。
 
-需要固定执行顺序时，指定 DAG 和存储即可；节点仍使用内置 ReAct。
-这个例子只有一个模型，两个节点共用它。
-
-```rust
-use agent_framework::{
-    AgentLoopPlugin, DagEdge, DagNode, DagWorkflowDefinition, DagWorkflowLoop,
-    Message, WorkflowStage,
-};
-let mut outline = WorkflowStage::new("outline");
-outline.instructions.push(Message::system("根据用户主题列出文章提纲。"));
-let mut write = WorkflowStage::new("write");
-write.instructions.push(Message::system("根据前一个节点的提纲写出完整文章。"));
-let definition = DagWorkflowDefinition {
-    id: "write-article".into(),
-    version: 1,
-    nodes: vec![
-        DagNode::react(outline),
-        DagNode::react(write),
-    ],
-    edges: vec![DagEdge::new("outline", "write")],
-    max_parallel_nodes: 1,
-};
-let agent = AgentBuilder::new()
-    .plugin(SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
-    .plugin(AgentLoopPlugin::new(DagWorkflowLoop::new(definition)?))
-    .build()
-    .await?;
-
-let result = agent.run(RunRequest::new(
-    "article-1", "写一篇介绍 Rust 的短文",
-)).await;
-agent.close().await;
-println!("{}", result?.output);
-```
-
-两个节点依次执行，后一个节点会收到前一个节点的输出。
-复杂分支见[完整 DAG 示例](../crates/agent-state-sqlite/examples/dag.rs)。
-
-## 扩展点与默认实现
-
-扩展接口是 Rust trait，自定义功能时实现对应接口。“默认行为”说明不配置时如何运行；
-“框架提供的默认实现”列出 Framework 及配套插件已提供的实现，其中部分需要配置后启用。
-
-| 功能 | 扩展接口（trait） | 默认行为 | 框架提供的默认实现 |
+| 执行器 | 执行结构 | 状态要求 | 适用场景 |
 |---|---|---|---|
-| 执行器 | `AgentLoop` | 使用 `ReactAgentLoop` | `ReactAgentLoop`、`WorkflowLoop`、`DagWorkflowLoop` |
-| 工作流节点 | `WorkflowNode` | 节点注册表内置 `ReactWorkflowNode` | `ReactWorkflowNode` |
-| 会话历史 | `ConversationStore` | 必须配置；SQLite 存储插件注册会话存储 | `SqliteConversationStore` |
-| 长期记忆 | `LongTermMemory` | SQLite 插件注册；检索和写入按需接入 | `SqliteLongTermMemory` |
-| 工具来源 | `ToolProvider` | 使用空的 `StaticToolProvider` | `StaticToolProvider`、`McpClient`、`MemoryTools` |
-| 单个工具 | `Tool` | 不注册工具 | `AskUserTool`、`ArtifactReadTool`；MCP 工具由 `McpClient` 适配 |
-| 固定上下文 | `ContextProvider` | 使用空的 `FixedContext` | `FixedContext` |
-| 动态上下文 | `ContextContributor` | 贡献者列表为空 | `FixedContextContributor`、`MemoryContributor` |
-| 上下文组装 | `ContextAssembler` | 使用 `DefaultContextAssembler` | `DefaultContextAssembler` |
-| 块预算 | `ContextBudgetPolicy` | 使用 `IndependentBlockBudget`，各块额度独立 | `IndependentBlockBudget` |
-| 事件处理 | `EventSink` | 使用 `NoopEvents`，不额外处理事件 | `NoopEvents`；`TelemetryPlugin` 提供诊断观测；`AgUiPlugin` 提供 AG-UI 事件与 SSE |
-| 模型协议适配 | `ModelProvider` | 需要配置模型连接 | `GenaiProvider` |
-| 模型发现 | `ModelDiscovery` | 不自动发现模型 | `GenaiProvider` |
-| 模型选择 | `ModelSelectionStrategy` | 单模型时使用 `FixedModelStrategy`；多模型时需要配置策略 | `FixedModelStrategy`、`StageModelStrategy`、`RoutingStrategy` |
-| Token 估算 | `TokenEstimator` | 使用 `ConservativeTokenEstimator` | `ConservativeTokenEstimator` |
-| 执行状态 | `StateStore` | 内置执行器必须配置；SQLite 插件注册 | `SqliteStateStore` |
-| 用户交互 | `InteractionStore` | 内置模型执行器必须配置；SQLite 插件注册独立交互表 | `SqliteStateStore` |
-| 块处理 | `ContextReducer` | 历史使用 `RecentConversation`，其他块使用 `KeepContext` | `RecentConversation`、`KeepContext`、`SelectContextEntries`、`ModelCompressor` |
-| 摘要保存 | `SummaryStore` | SQLite 插件注册；压缩按需启用 | `SqliteSummaryStore` |
-| 工具策略 | `ToolPolicy` | 策略列表为空 | 无，需自行实现 |
-| 运行拦截 | `RunMiddleware` | 中间件列表为空 | `TelemetryPlugin` 提供观测实现 |
-| 节点拦截 | `WorkflowNodeMiddleware` | 中间件列表为空 | `TelemetryPlugin` 提供观测实现 |
-| 模型调用拦截 | `ModelMiddleware` | 中间件列表为空 | `TelemetryPlugin` 提供观测实现 |
-| 工具调用拦截 | `ToolMiddleware` | 中间件列表为空 | `ToolOutputOffloader`；`TelemetryPlugin` 提供观测实现 |
-| 生命周期通知 | `RunLifecycleHook` | Hook 列表为空 | 无，需自行实现 |
-| 附件存储 | `ArtifactStore` | SQLite 插件注册；转存和读取按需启用 | `SqliteArtifactStore`、`FileArtifactStore` |
-| 错误正文脱敏 | `ErrorRedactor` | 使用 `OmitErrorMessages`，省略错误正文 | `OmitErrorMessages` |
+| `ReactAgentLoop` | 模型与工具循环 | `StateStore` + `ConversationStore` | 默认对话 Agent、问答和审批 |
+| `WorkflowLoop` | 串行 ReAct 阶段 | `StateStore` | 固定阶段和阶段级模型选择 |
+| `DagWorkflowLoop` | 节点、并行、条件分支和汇合 | `StateStore` | 多步骤任务和可恢复编排 |
+| 自定义 `AgentLoop` | 由实现决定 | 由实现声明 | 其他执行模型 |
 
-`ModelConnection` 是组合模型适配器、模型目录和 Token 估算器的结构体；扩展协议实现的是
-`ModelProvider`。旧的 `Model` 接口仍可通过 `ModelPlugin` 接入。
-`TelemetryPlugin` 注册四类中间件和诊断事件观测，并不是中间件接口本身。
-`ArtifactStore` 和 `SummaryStore` 定义在 `agent-context`；其他表中接口定义在 `agent-framework`。
-各接口的注册类型和 Plugin 入口见 [Plugin 与扩展点](plugins.md#framework-服务扩展点)。
+Middleware 使用 `intercept + next` 包装调用；生命周期 Hook 是独立的通知接口，不参与执行链。
+调用顺序、错误处理和现有实现见[Middleware 与 Hook](extensions.md)。
 
-默认 ReAct 需要模型。纯计算执行器或 DAG 节点可以不使用模型。
-多模型目录需要指定选择策略。SqliteStateStore 保存工作流检查点，SqliteConversationStore 保存原始会话，SqliteSummaryStore 保存派生摘要。
-这些实现分别位于配套插件 crate，Framework 不依赖 SQLite。
+两者的边界如下：
 
-例如，只想给默认 Agent 加一条系统指令，增加 ContextPlugin 即可：
+| 机制 | 接收内容 | 能否进入执行链 | 返回值语义 |
+|---|---|---|---|
+| `RunLifecycleHook` | 只读的 `RunLifecycleContext`；结束通知另外接收 `&Result<RunResult, AgentError>` | 不能，没有 `next` | 回调没有返回值；panic、超时和中断会被隔离并记录事件，不改变运行结果 |
+| `RunMiddleware` | `RunRequest`、`RunContext` 和 `RunNext` | 可以，调用 `next.run()` 前后包裹一次运行 | 返回 `Result<RunResult, AgentError>`，可以拒绝执行、观察结果或处理清理错误 |
 
-```rust
-use agent_framework::{ContextPlugin, FixedContext};
+因此，“生命周期 Hook 只接收开始和结束通知，不替换执行结果”不是说 Hook 没有结束结果可读，而是说：
 
-let agent = AgentBuilder::new()
-    .plugin(SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
-    .plugin(ContextPlugin::new("prompt", FixedContext::new("用简短的中文回答。")))
-    .build()
-    .await?;
+```text
+on_started(context)
+    │ 只读身份通知
+    ▼
+RunMiddleware → AgentLoop → ... → RunResult
+    ▲                                  │
+    └──── on_finished(context, &result) ┘
+         只能观察，不能返回新的 result
 ```
 
-这里仍使用默认 ReAct、ConversationStore 和模型选择策略。
+Hook 的 `on_finished` 会看到成功结果或错误结果，但它没有 `RunNext`、可变结果或 `Result` 返回值；它适合统计、审计和通知，不适合鉴权、改写结果或实现清理。需要包裹执行、提前拒绝或参与清理时，应使用 Middleware 或资源生命周期接口。
 
-分块预算、拼接顺序和工具结果引用见[会话与上下文窗口](context-windows.md)。
+### ReAct 与工具
+
+```text
+用户消息
+   │
+   ▼
+模型生成
+   ├─ 文本 → 保存回复并结束
+   └─ 工具调用
+        │
+        ▼
+参数 Schema 校验 → 策略检查/审批 → ToolMiddleware → Tool.call
+        │                                      │
+        └────────────── 工具结果保存 ◄─────────┘
+                       │
+                       ▼
+                   回到模型生成
+```
+
+工具在真正派发前会再次检查撤销状态。已开始的外部副作用不能回滚；副作用发生后结果处理失败时，调用会标记为 `Indeterminate`，不能当作未执行。
+
+### 一次模型步骤的 Context Pipeline
+
+`ModelInvoker` 是模型步骤的编排者，但上下文处理由独立的 `ContextAssembler` 完成。它不是把历史直接交给模型，也不是把所有上下文规则藏在模型适配器中。
+
+```mermaid
+flowchart TD
+    Call[AgentLoop 的 ModelCall\nstage / step / instructions / tools / options] --> Select[ModelSelectionStrategy\n选择 ModelRef]
+    History[ConversationSession.snapshot\n不可变原始历史] --> Assemble
+    Select --> Capacity[ModelDescriptor + TokenEstimator\n计算输入容量与协议开销]
+    Capacity --> Assemble[ContextAssembler.assemble]
+    Call --> Assemble
+    Assemble --> Builtin[内置块\ninstructions / history]
+    Assemble --> Contributors[ContextContributor\n按 stage、step、model、current input 获取数据]
+    Builtin --> Layout[ContextLayout\n确定块顺序与块配置]
+    Contributors --> Layout
+    Layout --> Policy[ContextBudgetPolicy\n为每个块分配独立额度]
+    Policy --> Reduce[ContextReducer\nKeep / Recent / Select / Summary]
+    Reduce --> Validate[校验消息、工具轮次、额度和失败策略]
+    Validate --> Window[ContextWindow\nmessages + ContextAssemblyReport]
+    Window --> Request[ModelRequest\nmessages + tools + options + extensions]
+    Request --> Middleware[ModelMiddleware\nintercept + next]
+    Middleware --> Provider[ModelProvider\n协议适配器]
+```
+
+上下文处理按以下顺序发生：
+
+1. `ModelSelectionStrategy` 根据阶段、步骤、尝试次数、工具和原始历史选择模型。
+2. `ModelDescriptor` 和 `TokenEstimator` 计算模型输入容量，并预留工具定义和生成选项占用的协议空间。
+3. `ConversationSession.snapshot()` 提供不可变的原始历史；本次模型调用不会改写它。
+4. `ContextAssembler` 生成上下文块。简单 Agent 默认有 `instructions` 和 `history` 两个内置块；显式布局可以加入长期记忆、检索结果或宿主数据块。
+5. 每个 `ContextContributor` 在自己的额度内生成数据，`ContextBudgetPolicy` 为所有块分配独立预算，块之间不借用剩余额度。
+6. 每个块交给自己的 `ContextReducer`，可以保留、按消息/轮次裁剪、选择条目或调用摘要模型压缩；工具调用和工具结果必须保持完整关系。
+7. 组装器校验最终消息、指令不可变性、历史投影合法性和模型特定额度，输出 `ContextWindow` 与 `ContextAssemblyReport`。
+8. 只有组装完成后的 `window.messages` 才会进入 `ModelRequest`，随后经过 `ModelMiddleware`，最后交给 `ModelProvider`。
+
+上下文失败、成功、压缩恢复都会发布对应事件；因此 UI、Telemetry 或调试工具可以观察每个块的原始额度、最终额度和处理结果，而不需要解析模型适配器内部状态。
+
+相关代码入口：[context.rs](../crates/agent-framework/src/context.rs)、[models.rs](../crates/agent-framework/src/models.rs)。配置层扩展点见[Plugin 与扩展点](plugins.md#工具上下文与事件)。
 
 ## 模型与订阅
 
+`ModelConnection` 是 Framework 的标准模型接入结构。它复用协议客户端、地址和认证，并暴露一个或多个模型描述符；`ModelSelectionStrategy` 决定每个阶段实际使用哪个模型。即使应用只有一个模型，也只需要注册一个只包含该模型的 `ModelConnection`。
+
 ```text
 ModelConnection
-├─ ModelProvider：共享客户端、地址和认证
-├─ ModelDescriptor[]：可用模型
-└─ TokenEstimator：Token 估算
+├─ ModelProvider：协议客户端、地址、认证
+├─ ModelDescriptor[]：可用模型及能力
+└─ TokenEstimator：上下文估算与预算预留
+        │
+        ▼
+ModelSelectionStrategy
+├─ FixedModelStrategy：固定模型
+├─ StageModelStrategy：按阶段选择
+└─ RoutingStrategy：按候选顺序回退
+        │
+        ▼
+ModelInvoker
 ```
 
-一个连接可以包含多个模型，不必为每个模型创建客户端。应用可以手动配置模型目录，
-也可以调用 ModelDiscovery 获取模型后再筛选注册。
+`ModelProvider` 是连接内部的协议适配器：它负责把 Framework 的 `ModelRequest` 转换成供应商请求，再把结果写回 Framework。`ModelConnection` 则负责把这个适配器、可用模型列表和 token 估算器放到模型目录中。也就是说，`ModelProvider` 说明“怎么调用”，`ModelConnection` 说明“通过哪个连接可以调用哪些模型”。
 
-FixedModelStrategy 固定使用一个模型，StageModelStrategy 按阶段选择，RoutingStrategy
-在暂时性失败后按顺序切换模型。订阅归属、计费和账号配额由应用管理；Framework 管理运行预算。
-
-例如，同一个连接注册两个模型，但当前 Agent 固定使用其中一个：
-
-```rust
-use agent_framework::{FixedModelStrategy, ModelRef, ModelStrategyPlugin};
-
-let planner = std::env::var("PLANNER_MODEL")?;
-let writer = std::env::var("WRITER_MODEL")?;
-let agent = AgentBuilder::new()
-    .plugin(SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(vec![
-        ModelDescriptor::new(planner),
-        ModelDescriptor::new(writer.clone()),
-    ]))
-    .plugin(ModelStrategyPlugin(Arc::new(FixedModelStrategy(
-        ModelRef::new("default", writer),
-    ))))
-    .build()
-    .await?;
-```
-
-两个模型名称应不同，且都能通过该连接访问。模型引用中的 `default` 要与连接名称一致。
-按阶段选择不同模型见[shared_connection.rs](../crates/agent-model-genai/examples/shared_connection.rs)。
-
-## 状态与观测
-
-| 数据 | 作用 |
-|---|---|
-| Transcript | 完整对话历史 |
-| 模型输入 | 根据预算裁剪历史、加入上下文或摘要；保留原始历史 |
-| Checkpoint | 保存执行位置、节点结果、工具记录、交互和预算，用于恢复 |
-| 实时事件 | 供 UI 等消费者订阅；可能丢失，需要处理积压 |
-| Journal | 与检查点一起保存的事件，序列独立于实时事件 |
-| OTel | 记录调用关系、耗时、用量和错误 |
-
-TelemetryPlugin 生成以下 DAG 调用链。普通 ReAct 的模型和工具直接挂在 run 下。
+`Model` 是旧的单模型简化接口，只接收一个 `ModelRequest` 并生成结果。通过 `ModelPlugin` 注册它时，Framework 会把它包装为 `ModelConnection("legacy", ["default"])`，以便继续复用同一套模型目录和选择流程。新代码不需要同时注册 `Model` 和 `ModelConnection`，推荐直接使用 `ModelConnectionPlugin`。
 
 ```text
-agent.run
-└─ agent.workflow.node
-   ├─ agent.model
-   └─ agent.tool
+新代码：ModelConnectionPlugin → ModelConnection → ModelCatalog → ModelInvoker
+旧代码：ModelPlugin → Model → Framework 包装为 legacy/default 连接
 ```
 
-恢复时保留 run ID，并记录本次和前次 execution / attempt 的关联。
-工具结果不确定时，需要应用核对结果或明确重试。错误报告默认省略正文，可配置脱敏器。
+模型连接、模型目录和选择策略属于运行时配置；订阅归属、账号权限、计费和凭据轮换由宿主管理。
+`ModelInvoker` 协调 `ContextAssembler`，并负责超时、重试、预算预留和结果验证。模型已输出增量后不自动重试；不确定失败按已预留额度保守计入预算。
 
-### 读取检查点和恢复
+## 会话记录、任务进度与持久化
 
-沿用前面的 DAG 创建代码，将运行部分换成下面的代码：通过 `start()` 取得 run ID，
-等运行结束后读取状态，最后再关闭 Agent 和存储。
+一次 Agent 运行同时产生三类数据。把它们分开，是为了让“聊天内容”“任务进度”和“实时输出”各自承担一种职责。
 
-```rust
-use agent_framework::StateStore;
+```mermaid
+flowchart LR
+    Input[用户消息 / 工具结果]
+    Input --> Conversation[ConversationStore\n完整聊天记录]
+    Conversation --> Context[ContextAssembler\n为当前模型请求裁剪、摘要、拼接上下文]
+    Context --> Model[ModelProvider\n本次模型输入]
 
-let handle = agent.start(RunRequest::new("article-2", "介绍 Rust"))?;
-let run_id = handle.run_id;
-let result = handle.wait().await?;
-let checkpoint = store.load(run_id).await?;
-println!("{:?}: {}", checkpoint.status, result.output);
+    Loop[AgentLoop\n当前执行到哪一步] --> State[StateStore\n任务进度与恢复信息]
+    State --> Resume[进程中断后继续]
+
+    Model --> Live[EventSink\n实时事件]
+    Live -.尽力交付.-> UI[UI / SSE]
 ```
 
-重建同一 DAG Agent、重新打开同一数据库后，用原 session ID 和 run ID 恢复：
+### 1. 完整聊天记录
 
-```rust
-use agent_framework::ResumeRequest;
+`ConversationStore` 保存会话的原始消息，例如用户问题、模型回复、工具调用和工具结果。
+这些消息是追加保存的源数据。为了控制模型输入长度，Framework 可以在发送给模型前裁剪旧消息、加入摘要或加入检索结果，但不会因此删除或改写原始会话。
 
-let mut request = RunRequest::new("article-2", "");
-request.resume = Some(ResumeRequest { run_id, ..Default::default() });
-let result = agent.run(request).await?;
-```
+### 2. 当前任务进度
 
-已完成的运行直接返回保存的结果。等待审批的运行需要附上审批回复，不能只传 run ID；
-见[审批示例](../crates/agent-state-sqlite/examples/durable_approval.rs)。
+`StateStore` 保存一次运行的进度，例如：
 
-### 开启 OTel
+- 当前执行器、阶段或 DAG 节点；
+- 已完成的模型步骤和工具调用；
+- 正在等待的用户回答或工具审批；
+- 预算、重试次数和恢复所需的运行身份。
 
-先创建 TelemetryPlugin，然后把它放在其他中间件之前。下面把 span 保存在内存中，便于查看：
+这份数据不是聊天记录，而是“任务做到哪里了”。进程崩溃后，Framework 读取它判断应该继续、直接复用已完成结果，还是要求宿主核对一个可能已经产生外部副作用的调用。
 
-```rust
-use agent_observability::{TelemetryConfig, TelemetryPlugin};
-use opentelemetry_sdk::{
-    metrics::SdkMeterProvider,
-    trace::{InMemorySpanExporter, SdkTracerProvider},
-};
+### 3. 本次模型输入和实时事件
 
-let exporter = InMemorySpanExporter::default();
-let traces = SdkTracerProvider::builder().with_simple_exporter(exporter.clone()).build();
-let metrics = SdkMeterProvider::default();
-let telemetry = TelemetryPlugin::new("telemetry", &traces, &metrics, TelemetryConfig::default())?;
-let agent = AgentBuilder::new()
-    .plugin(SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(telemetry)
-    .plugin(provider.plugin(vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
-    .build()
-    .await?;
-
-let result = agent.run(RunRequest::new("trace-1", "你好")).await;
-agent.close().await;
-traces.force_flush()?;
-for span in exporter.get_finished_spans()? {
-    println!("{}", span.name);
-}
-traces.shutdown()?;
-metrics.shutdown()?;
-println!("{}", result?.output);
-```
-
-此例使用默认 ReAct，会看到 `agent.run` 和 `agent.model`。加上 DAG 才有节点 span；
-调用工具时才有工具 span。InMemorySpanExporter 需要 opentelemetry_sdk 的 `trace` 和 `testing` feature。
-
-扩展接口和插件见 [plugins.md](plugins.md)。详细说明见
-[Middleware 与 Hook](extensions.md)、[DAG](dag-workflows.md)、[可观测](observability.md)。
-[执行约束](execution-contracts.md)和[测试记录](implementation-status.md)列出了行为限制与验证范围。
-
-## 用户问答与工具审批
-
-ReAct、Workflow 和 DAG 内置 ReAct 节点共用持久化执行代码及 `InteractionManager`。
-`HumanInteractionPlugin` 注册默认 `AskUserTool`，`ToolPolicyPlugin` 注册审批规则。
-问题、选项、答案和原始调用分别保存在交互记录中，应用负责身份验证和 UI。
+Context Pipeline 每次模型调用都会重新运行：
 
 ```text
-ask_user → 保存问题和工具结果 → RUN_FINISHED(interrupt)
-                                   ↓ 用户提交答案
-                              保存答案 → 新一轮执行 → 模型重新判断
-
-RequireApproval → 保存原始调用 → RUN_FINISHED(interrupt)
-                                   ↓ 用户提交 true / false
-                              保存决定 → 执行原调用或记录拒绝 → 模型
+ConversationStore.snapshot()
+        │
+        ▼
+ContextAssembler
+  ├─ 加入固定指令、长期记忆或检索结果
+  ├─ 为每个上下文块分配额度
+  ├─ 裁剪历史、选择数据或调用摘要模型
+  └─ 校验工具调用和工具结果仍然成组
+        │
+        ▼
+ContextWindow → ModelRequest → ModelProvider
 ```
 
-数据库结构、默认工具、审批示例与恢复代码见[用户交互](interactions.md)。
+`ContextWindow` 只是本次请求的临时输入，不是另一份会话历史。具体的块顺序、额度、Reducer 和摘要规则见[上下文窗口](context-windows.md)。
+
+模型和工具产生的实时事件通过 `EventSink` 发给 UI、SSE 或观测系统。实时事件是“通知”，不是可靠的恢复依据；消费者过慢时可能丢事件。需要恢复时读取 `ConversationStore` 和 `StateStore`，而不是依赖实时事件流。
+
+SQLite 中的职责对应如下：
+
+| 数据 | 保存内容 | 主要用途 |
+|---|---|---|
+| `ConversationStore` | 完整会话消息 | 下次对话继续使用历史 |
+| `StateStore` | 运行进度、节点状态、审批和预算 | 崩溃恢复、跨进程继续执行 |
+| `SummaryStore` | 从历史生成的摘要 | 减少上下文长度，原始消息仍保留 |
+| `ArtifactStore` | 大工具结果和附件 | 用引用替代超大的内联结果 |
+
+`SqliteStoragePlugin` 可以一次注册这些存储，但不会把它们合并成同一种数据。
+
+### 恢复运行：为什么需要“租约”
+
+假设一个任务运行到一半，进程 A 崩溃了。进程 B 需要继续它。此时必须防止进程 A 的残留任务和进程 B 同时调用模型、执行工具或写回进度。
+
+Framework 因此在数据库中记录一项短期的“执行权”，代码中称为 execution lease。它类似一个带过期时间的分布式锁：
+
+```text
+进程 A：取得执行权 → 读取进度 → 执行一步 → 写回进度
+进程 B：                 拿不到执行权，等待或返回冲突
+
+进程 A 崩溃
+    │
+    ▼ 执行权过期
+
+进程 B：取得新的执行权 → 读取最新进度 → 继续执行
+旧的进程 A：即使恢复运行，也不能再写入进度
+```
+
+这里有三个关键点：
+
+- 同一个 `run_id` 同时只有一个进程可以推进状态；
+- 进程正常运行时需要续期，进程崩溃后执行权最终会过期；
+- 新进程取得执行权时会生成更高的 `generation`。旧进程写回时发现自己的 generation 已过期，写入会被拒绝。
+
+因此，租约不是业务概念，也不是模型调用的一部分。它只解决“谁有权修改这次运行的持久化进度”。
+
+会话追加也有类似保护：同一个会话同时只能有一个写入者，追加消息时会检查 `revision` 是否仍是读取时的版本。版本不一致表示另一个请求已经写入，当前追加会失败，而不会覆盖新消息。
+
+如果取消一个 SQLite 写操作，不能直接假设数据库已经回滚。宿主需要重新读取状态，确认这一步是未写入、已完成，还是处于需要人工核对的未知状态。
+
+## 用户交互与审批
+
+ReAct、Workflow 和 DAG 内置 ReAct 节点共用持久化交互机制。用户问题、选项、答案和原始调用保存在交互记录中，宿主负责身份验证和 UI。
+
+```text
+ask_user / RequireApproval
+          │
+          ▼
+保存交互与任务进度 → RUN_FINISHED(interrupt)
+          │
+          ▼
+宿主展示 UI，提交回答或审批决定
+          │
+          ▼
+恢复同一 run → 保存答案 → 继续模型或执行工具
+```
+
+工具审批由 `ToolPolicy` 决定；执行器必须显式支持策略检查。数据库结构、默认问答工具和跨进程示例见[用户交互](interactions.md)。
+
+## 事件、观测与身份
+
+事件身份是 `(run_id, scope, sequence)`。`EventScope::Live { execution_id }` 区分每次执行或恢复尝试；持久化 Journal 使用独立序列，不能把实时流序号当作恢复游标。
+
+`EventSink` 有三类观测入口：
+
+| 入口 | 语义 | 约束 |
+|---|---|---|
+| `on_event` | 在有界异步队列中消费普通事件 | 消费者必须处理积压和丢失 |
+| `on_diagnostic` | 同步记录上下文组装和最终发送元数据 | 必须快速，不能 I/O |
+| `on_published` | 按实时发布顺序交接完整事件 | 不能 I/O 或再次发布事件 |
+
+`TelemetryPlugin` 使用宿主注入的 OpenTelemetry provider 记录 run、node、model、tool、关联关系、耗时、结果和用量；默认不输出提示词、参数、结果、session 或错误正文。
+错误报告默认省略正文，可显式配置 `ErrorRedactor`。AG-UI 插件在 `on_published` 上转换输出事件和 SSE，HTTP 路由仍由宿主提供。
+
+## 资源生命周期
+
+插件在安装时登记异步关闭和同步清理回调。`ResourceScope` 按注册顺序的逆序释放资源，并收集错误、panic 和超时。
+
+```mermaid
+flowchart LR
+    Install[安装插件] --> Register[注册服务和资源]
+    Register --> Run[多次 Agent.run]
+    Run --> Close[Agent.close]
+    Close --> StopRuns[关闭新的运行入口并等待运行清理]
+    StopRuns --> Shutdown[异步 shutdown]
+    Shutdown --> Cleanup[同步 cleanup / Drop 兜底]
+```
+
+`Agent::close` 关闭所有克隆的新运行入口，等待运行清理后关闭插件，并返回 `ShutdownReport`。
+显式共享的 SQLite store、MCP client 和 OTel provider 仍由宿主关闭；关闭一个 Agent 不应关闭其他 Agent 共享的服务。
+`McpToolsPlugin::owned` 只负责它自己创建的连接。
+
+## 延伸阅读
+
+- [快速上手](quickstart.md)：按场景运行 Agent，并查看 Rust 代码。
+- [Plugin 与扩展点](plugins.md)：扩展接口、默认行为、注册类型和现有实现。
+- [Middleware 与 Hook](extensions.md)：执行拦截和生命周期通知的调用契约。
+- [DAG 工作流](dag-workflows.md)：节点、并行、条件分支和恢复。
+- [上下文窗口](context-windows.md)：上下文布局、预算、摘要和附件引用。
+- [可观测](observability.md)：OTel span、metrics 和恢复身份。
+- [执行约束](execution-contracts.md)：运行时行为保证与限制。

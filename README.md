@@ -10,7 +10,7 @@ flowchart TD
     Loop --> Nodes[WorkflowNode 插件：ReAct、路由、转换等]
     Loop --> Models[ModelInvoker：选择、上下文、中间件、预算、验证]
     Loop --> Tools[ToolInvoker：参数验证、中间件、撤销、执行]
-    Models --> ModelPlugins[genai / 自定义 ModelProvider]
+    Models --> ModelPlugins[ModelConnectionPlugin / 自定义 ModelProvider]
     Tools --> ToolPlugins[MCP / 宿主工具 / 子 Agent]
     Loop --> State[ConversationStore / StateStore / ContextReducer]
     State --> Implementations[SQLite / 模型摘要 / 附件存储]
@@ -19,7 +19,8 @@ flowchart TD
 
 ## 架构导航与默认装配
 
-- [架构总览](docs/architecture.md)：分层、装配、执行链和默认行为。
+- [快速上手](docs/quickstart.md)：按场景运行 Agent，并查看 Rust 代码。
+- [架构总览](docs/architecture.md)：分层、装配、执行链、状态和生命周期。
 - [扩展点与实现清单](docs/plugins.md)：抽象、注册入口、数量约束及现有实现。
 - [Middleware 与 Hook](docs/extensions.md)：执行拦截和生命周期通知的独立机制。
 - [DAG 工作流](docs/dag-workflows.md) / [可观测](docs/observability.md)：具体接入方法。
@@ -81,7 +82,7 @@ StageModelStrategy
 
 `ModelConnection::with_token_estimator` 将模型估算用于上下文组装、最终请求检查与用量预留。默认按字节保守估算；没有估算值的媒体默认拒绝。ConversationStore 提供原始快照，ContextAssembler 负责窗口裁剪，见[会话与上下文窗口](docs/context-windows.md)。
 
-`Model` / `ModelPlugin` 是简单接入的兼容入口，会映射为 `legacy/default`。新循环使用 `AgentServices.models`，无需依赖 genai 类型。
+新代码通过 `ModelConnectionPlugin` 注册模型连接；连接内包含协议适配器、可用模型描述和 token 估算器。`Model` / `ModelPlugin` 只保留给已有的单模型实现，会被 Framework 包装为 `legacy/default` 连接，因此两者不需要同时注册。
 
 ## 执行方式
 
@@ -102,7 +103,7 @@ DAG 使用 `petgraph` 校验拓扑和环，Tokio `JoinSet` 管理节点任务；
 `Agent::start` 返回可订阅事件、steer、cancel、revoke_tools 的 `RunHandle`；`run` 等待结果。
 在 `wait()` 前调用 `handle.control()` 可取得可克隆的 `RunControl`，用于在另一任务等待结果时
 继续 steer、cancel、revoke_tools 和查询 budget_usage。丢弃控制句柄不会取消运行；
-丢弃 `RunHandle` 或它的 `wait()` future 会取消该次运行。用法见[运行中追加指令](docs/architecture.md#运行中追加指令)。
+丢弃 `RunHandle` 或它的 `wait()` future 会取消该次运行。用法见[运行中追加指令](docs/quickstart.md#控制运行)。
 同一 Agent 的同一 Session 同时只有一个 Run；SQLite 会话与持久化工作流分别通过各自租约协调多个实例。
 
 `Agent::run_child(request, parent_context)` 创建独立子运行，继承根身份、取消、剩余时间和更严格的委派限制。父运行先预留子运行的完整额度，结束后按子账本结算；并发子任务不能重复花费同一份容量。父运行退出时取消并等待已登记的子运行清理。子运行的持久化恢复由宿主显式协调；该 API 拒绝隐式重新挂接已有的 resume。
@@ -201,7 +202,7 @@ cargo run -p agent-tools-mcp --example discover
 ## Hook 与 Middleware
 
 Plugin 可以分别贡献生命周期 Hook 和执行 Middleware。Run、节点、模型、工具的
-Middleware 都采用 `intercept + next` 包装执行；`RunLifecycleHook` 只接收开始/结束通知，
+Middleware 都采用 `intercept + next` 包装执行；`RunLifecycleHook` 只接收开始/结束通知，结束通知只读最终结果，
 不持有 next，也不修改运行结果。二者的注册类型与调用入口分开，详见
 [扩展机制](docs/extensions.md)。
 

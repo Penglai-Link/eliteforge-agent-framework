@@ -283,5 +283,5 @@ cargo run -p agent-memory --example memory_context -- Rust
 ```
 
 设置 MODEL_ENDPOINT、MODEL_API_KEY、MODEL 后运行会调用真实模型。MEMORY_DIR 指定本地数据目录；
-再次运行使用同一目录即可继续同一示例会话。流式接入继续使用[架构文档中的 start/take_events](architecture.md#流式输出)，
+再次运行使用同一目录即可继续同一示例会话。流式接入继续使用[快速上手中的 start/take_events](quickstart.md#流式输出)，
 持久化和分块配置不改变事件消费方式。
