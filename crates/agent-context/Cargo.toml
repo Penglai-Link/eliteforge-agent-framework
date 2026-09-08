@@ -1,0 +1,24 @@
+[package]
+name = "agent-context"
+version.workspace = true
+edition.workspace = true
+description = "Model-backed context reduction and bounded artifact offload for agent-framework"
+[dependencies]
+sqlite-extensions = { path = "../sqlite-extensions" }
+agent-framework = { path = "../agent-framework", version = "0.1.0" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }
+cap-std = "3"
+cap-fs-ext = "3"
+base64 = "0.22"
+sha2 = "0.10"
+tokio-rusqlite = { version = "0.7.0", features = ["bundled"] }
+[dev-dependencies]
+agent-test-support = { path = "../agent-test-support" }
+tempfile = "3"
+agent-state-sqlite = { path = "../agent-state-sqlite" }

@@ -1,0 +1,26 @@
+[package]
+name = "agent-storage-sqlite"
+version.workspace = true
+edition.workspace = true
+description = "Default SQLite storage plugin for agent execution, interactions, conversations and memory"
+
+[features]
+default = []
+bundled-native = ["sqlite-extensions/bundled-native"]
+
+[dependencies]
+sqlite-extensions = { path = "../sqlite-extensions" }
+agent-framework = { path = "../agent-framework" }
+agent-state-sqlite = { path = "../agent-state-sqlite" }
+agent-memory = { path = "../agent-memory" }
+agent-context = { path = "../agent-context" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+agent-tools-human = { path = "../agent-tools-human" }
+agent-agui = { path = "../agent-agui" }
+tempfile = "3"
+tokio.workspace = true
+tokio-util.workspace = true

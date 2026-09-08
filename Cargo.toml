@@ -1,0 +1,30 @@
+[workspace]
+members = [
+    "crates/agent-plugin-kernel",
+    "crates/agent-framework",
+    "crates/agent-model-genai",
+    "crates/agent-state-sqlite",
+    "crates/agent-tools-mcp",
+    "crates/agent-context",
+    "crates/agent-memory",
+    "crates/agent-observability",
+    "crates/agent-agui",
+    "crates/agent-tools-human",
+    "crates/agent-storage-sqlite",
+    "crates/sqlite-extensions",
+    "crates/agent-test-support",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+async-trait = "0.1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }

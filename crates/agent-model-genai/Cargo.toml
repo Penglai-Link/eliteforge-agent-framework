@@ -1,0 +1,19 @@
+[package]
+name = "agent-model-genai"
+description = "genai protocol adapters for agent-framework model connections"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+agent-framework = { path = "../agent-framework", version = "0.1.0" }
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+genai = "=0.7.0-beta.21"
+
+[dev-dependencies]
+agent-storage-sqlite = { path = "../agent-storage-sqlite" }
+agent-test-support = { path = "../agent-test-support" }
+agent-state-sqlite = { path = "../agent-state-sqlite" }
+tokio = { workspace = true, features = ["net", "io-util"] }

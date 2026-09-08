@@ -1,0 +1,1384 @@
+//! Shared persistent model/tool execution for ReAct and workflow stages.
+use crate::*;
+use async_trait::async_trait;
+use futures::{StreamExt, stream};
+use std::{
+    collections::{BTreeSet, HashSet},
+    sync::Arc,
+    time::Duration,
+};
+pub(crate) struct ModelExecutionLoop {
+    pub(crate) conversation: bool,
+    definition: WorkflowDefinition,
+    lease_duration: Duration,
+}
+impl ModelExecutionLoop {
+    pub fn new(definition: WorkflowDefinition) -> Result<Self, AgentError> {
+        definition.validate()?;
+        Ok(Self {
+            definition,
+            conversation: false,
+            lease_duration: Duration::from_secs(30),
+        })
+    }
+    pub fn with_lease_duration(mut self, duration: Duration) -> Result<Self, AgentError> {
+        if duration < Duration::from_millis(30) {
+            return Err(AgentError::InvalidConfiguration(
+                "workflow lease must be at least 30 milliseconds".into(),
+            ));
+        }
+        self.lease_duration = duration;
+        Ok(self)
+    }
+}
+
+#[async_trait]
+impl AgentLoop for ModelExecutionLoop {
+    fn supports_resume(&self) -> bool {
+        true
+    }
+    fn requires_interactions(&self) -> bool {
+        true
+    }
+    fn supports_tool_policy(&self) -> bool {
+        true
+    }
+    fn requires_model(&self) -> bool {
+        true
+    }
+    fn requires_state(&self) -> bool {
+        true
+    }
+    fn cooperative_cancellation(&self) -> bool {
+        true
+    }
+    async fn run(
+        &self,
+        request: &RunRequest,
+        context: &RunContext,
+        services: &AgentServices,
+    ) -> Result<RunResult, AgentError> {
+        let store = services
+            .state
+            .clone()
+            .ok_or(AgentError::MissingService("StateStore"))?;
+        let mut conversation = if self.conversation {
+            Some(services.conversations.open(&request.session_id).await?)
+        } else {
+            None
+        };
+        let mut initial_tools = if request.resume.is_none() {
+            Some(crate::react::ToolSet::load(&services.tools, context).await?)
+        } else {
+            None
+        };
+        let mut checkpoint = if let Some(resume) = &request.resume {
+            let checkpoint = store.load(resume.run_id).await?;
+            if checkpoint.session_id != request.session_id
+                || checkpoint.loop_id != self.definition.id
+                || checkpoint.loop_version != self.definition.version
+            {
+                return Err(AgentError::InvalidConfiguration(
+                    "resume identity or workflow version mismatch".into(),
+                ));
+            }
+            checkpoint
+        } else {
+            let previous = store.latest(&request.session_id).await?;
+            let mut saved_request = request.clone();
+            saved_request.resume = None;
+            saved_request.extensions = Extensions::default();
+            let initial_snapshot = if let Some(session) = &mut conversation {
+                let snapshot = session.snapshot().await?;
+                if let Some(previous) = &previous
+                    && previous.loop_id == self.definition.id
+                    && previous.status.is_terminal()
+                {
+                    let prior: WorkflowState =
+                        serde_json::from_value(previous.state.clone()).map_err(state_encoding)?;
+                    if prior.conversation_generation.as_deref() == Some(&snapshot.generation) {
+                        sync_transcript(
+                            session.as_mut(),
+                            &previous.transcript,
+                            prior.conversation_generation.as_deref(),
+                        )
+                        .await?;
+                    }
+                }
+                Some(session.snapshot().await?)
+            } else {
+                None
+            };
+            let state = WorkflowState {
+                definition: self.definition.clone(),
+                request: saved_request,
+                conversation_generation: initial_snapshot.as_ref().map(|s| s.generation.clone()),
+                stage: 0,
+                steps: 0,
+                tool_calls: 0,
+                cursor: WorkflowCursor::Model,
+                visible_tools: initial_tools
+                    .as_ref()
+                    .expect("new run catalog")
+                    .descriptors()
+                    .into_iter()
+                    .map(|t| t.id)
+                    .collect(),
+                revoked_tools: BTreeSet::new(),
+                interactions: Vec::new(),
+                answers: Vec::new(),
+                output: Content::default(),
+                structured: None,
+                usage: Usage::default(),
+                budget_usage: Usage::default(),
+                child_runs: 0,
+                outcome: None,
+            };
+            let mut checkpoint = Checkpoint::new(
+                context.run_id,
+                &request.session_id,
+                &self.definition.id,
+                self.definition.version,
+                serde_json::to_value(state).map_err(state_encoding)?,
+            );
+            if let Some(snapshot) = initial_snapshot {
+                checkpoint.transcript = snapshot.messages;
+            } else if let Some(previous) = &previous {
+                checkpoint.transcript = previous.transcript.clone();
+            }
+            checkpoint.transcript.push(Message::user(&request.input));
+            store.create(checkpoint, previous.map(|p| p.run_id)).await?
+        };
+        let state: WorkflowState =
+            serde_json::from_value(checkpoint.state.clone()).map_err(state_encoding)?;
+        if state.definition != self.definition || state.stage >= self.definition.stages.len() {
+            return Err(AgentError::InvalidConfiguration(
+                "persisted workflow definition differs from installed workflow".into(),
+            ));
+        }
+        state.request.limits.validate()?;
+        if checkpoint.status.is_terminal() {
+            if let Some(resume) = &request.resume
+                && (!resume.resolutions.is_empty()
+                    || resume
+                        .response
+                        .as_ref()
+                        .is_some_and(|response| !state.answers.contains(response)))
+            {
+                return Err(AgentError::InvalidConfiguration(
+                    "terminal run cannot accept a new answer or reconciliation".into(),
+                ));
+            }
+            if let Some(session) = &mut conversation {
+                sync_transcript(
+                    session.as_mut(),
+                    &checkpoint.transcript,
+                    state.conversation_generation.as_deref(),
+                )
+                .await?;
+            }
+            let result = match checkpoint.status {
+                ExecutionStatus::Cancelled => Err(AgentError::Cancelled),
+                ExecutionStatus::Failed => Err(AgentError::Run("persisted workflow failed".into())),
+                _ => Ok(RunResult {
+                    output: state.output.text(),
+                    content: state.output,
+                    structured: state.structured,
+                    interactions: state.interactions,
+                    status: state.outcome.ok_or_else(|| {
+                        AgentError::Run("terminal workflow is missing its outcome".into())
+                    })?,
+                    usage: state.usage,
+                    steps: state.steps,
+                    tool_calls: state.tool_calls,
+                }),
+            };
+            if let Some(session) = &mut conversation {
+                let finished = session.finish(ConversationOutcome::Stopped).await;
+                return finish_with_cleanup(result, finished.map_err(Into::into));
+            }
+            return result;
+        }
+        let mut tools = match initial_tools.take() {
+            Some(tools) => tools,
+            None => crate::react::ToolSet::load(&services.tools, context).await?,
+        };
+        let lease = store
+            .claim(checkpoint.run_id, RunId::new_v4(), self.lease_duration)
+            .await?;
+        let guard = WorkflowLease::new(
+            store.clone(),
+            lease.clone(),
+            self.lease_duration,
+            request.limits.cleanup_timeout,
+            context.clone(),
+        );
+        let result = async {
+            // Reload under the acquired fencing token: state may have advanced after
+            // the optimistic read but before claim. Resume always acts on that state.
+            checkpoint = store.load(checkpoint.run_id).await?;
+            let mut state: WorkflowState =
+                serde_json::from_value(checkpoint.state.clone()).map_err(state_encoding)?;
+            if let WorkflowCursor::Tools {
+                assistant,
+                executions,
+            } = &mut state.cursor
+            {
+                // The durable invocation remains authoritative, including when
+                // loading a checkpoint written before ToolCall carried its ID.
+                for execution in executions {
+                    execution.call.invocation_id = execution.invocation_id;
+                    if let Some(call) = assistant
+                        .tool_calls
+                        .iter_mut()
+                        .find(|call| call.id == execution.call.id)
+                    {
+                        call.invocation_id = execution.invocation_id;
+                    }
+                }
+            }
+            // The optimistic snapshot can be replaced before we acquire the
+            // lease. Never execute its successor without validating it again.
+            checkpoint.validate()?;
+            if checkpoint.run_id != context.run_id
+                || checkpoint.session_id != request.session_id
+                || checkpoint.loop_id != self.definition.id
+                || checkpoint.loop_version != self.definition.version
+                || state.definition != self.definition
+                || state.stage >= self.definition.stages.len()
+                || state.request.session_id != checkpoint.session_id
+                || checkpoint.status.is_terminal()
+            {
+                return Err(AgentError::InvalidConfiguration(
+                    "acquired checkpoint does not match the installed workflow and run".into(),
+                ));
+            }
+            state.request.limits.validate()?;
+            state.request.generation.validate()?;
+            let mut execution_context = context.clone();
+            execution_context.token_ceiling = context
+                .token_ceiling
+                .min(state.request.limits.max_total_tokens);
+            execution_context.max_child_runs = context
+                .max_child_runs
+                .min(state.request.limits.max_child_runs);
+            execution_context.max_child_depth = context
+                .max_child_depth
+                .min(state.request.limits.max_delegation_depth);
+            execution_context.deadline = context
+                .deadline
+                .min(tokio::time::Instant::now() + state.request.limits.run_timeout);
+            let context = &execution_context;
+            // An embedded workflow shares its parent's restored ledger. Resetting
+            // it here would erase reservations held by concurrent DAG siblings.
+            if context.budget_journal.is_none() {
+                context
+                    .usage
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .usage = state.budget_usage.clone();
+            }
+            context
+                .child_runs
+                .fetch_max(state.child_runs, std::sync::atomic::Ordering::AcqRel);
+            context.revoke_tools(&state.revoked_tools.iter().cloned().collect::<Vec<_>>())?;
+            for binding in tools.by_name.values_mut() {
+                binding.exposed = state.visible_tools.contains(&binding.descriptor.id);
+            }
+            let mut incoming = request.clone();
+            if incoming.resume.as_ref().is_some_and(|r| !r.resolutions.is_empty()) {
+                let mut resolutions = incoming.clone();
+                resolutions.resume.as_mut().unwrap().response = None;
+                apply_resume(&resolutions, &mut state, &mut checkpoint, &tools)?;
+                incoming.resume.as_mut().unwrap().resolutions.clear();
+            }
+            if !state.interactions.is_empty() {
+                let manager = services.interactions.as_ref().ok_or(AgentError::MissingService("InteractionStore"))?;
+                manager.publish(&state.interactions, &state.cursor, context).await?;
+                if let Some(response) = incoming.resume.as_ref().and_then(|r| r.response.as_ref())
+                    && let Some(interaction) = state.interactions.iter().find(|i|i.id == response.interaction_id) {
+                        interaction.validate_response(response, 0)?;
+                        manager.0.answer(&context.session_id, response).await?;
+                        incoming.resume.as_mut().unwrap().response = None;
+                }
+                // Apply committed answers only when their tool batch is reconciled.
+                for interaction in state.interactions.clone() {
+                    let unfinished = matches!(&state.cursor, WorkflowCursor::Tools { executions, .. } if executions.iter().any(|e| !matches!(e.state, ToolExecutionState::Finished(_))));
+                    if matches!(interaction.kind, InteractionKind::Input) && unfinished { continue; }
+                    if let Some(response) = manager.0.get(&context.session_id, interaction.id).await?.response {
+                        let mut answered = incoming.clone();
+                        answered.resume = Some(ResumeRequest {run_id:context.run_id,response:Some(response),resolutions:vec![]});
+                        apply_resume(&answered, &mut state, &mut checkpoint, &tools)?;
+                    }
+                }
+            }
+            let resumed = apply_resume(&incoming, &mut state, &mut checkpoint, &tools);
+            for binding in tools.by_name.values_mut() { binding.exposed = state.visible_tools.contains(&binding.descriptor.id); }
+            context.revoke_tools(&state.revoked_tools.iter().cloned().collect::<Vec<_>>())?;
+            match resumed {
+                Err(error) => Err(error),
+                Ok(()) => {
+                    checkpoint.status = ExecutionStatus::Running;
+                    let mut runtime = ModelExecutionRuntime {
+                        store: store.as_ref(),
+                        lease: &lease,
+                        checkpoint,
+                        state,
+                        tools,
+                        context,
+                        services,
+                        conversation: conversation
+                            .as_mut()
+                            .map(|s| s.as_mut() as &mut dyn ConversationSession),
+                    };
+                    runtime.save(None).await?;
+                    let result = runtime.execute().await;
+                    if let Err(error) = &result {
+                        // Storage failures have an unknown write outcome. Never
+                        // overwrite them with a guessed terminal transition.
+                        if !error.contains_state_error() {
+                            runtime.checkpoint.status =
+                                if matches!(runtime.state.cursor, WorkflowCursor::Tools { .. }) {
+                                    ExecutionStatus::RecoveryRequired
+                                } else if matches!(error.primary(), AgentError::Cancelled) {
+                                    ExecutionStatus::Cancelled
+                                } else {
+                                    ExecutionStatus::Failed
+                                };
+                            let saved = runtime
+                                .save(Some(AgentEvent::RunFailed(error.to_string())))
+                                .await;
+                            return finish_with_cleanup(result, saved);
+                        }
+                    }
+                    result
+                }
+            }
+        }
+        .await;
+        let released = guard.close().await;
+        let result = finish_with_cleanup(result, released.map_err(Into::into));
+        if let Some(session) = &mut conversation {
+            let outcome = match &result {
+                Ok(r) if r.status == RunStatus::Completed => ConversationOutcome::Completed,
+                Ok(r) if r.status == RunStatus::AwaitingInput => ConversationOutcome::AwaitingInput,
+                Ok(_) => ConversationOutcome::Stopped,
+                Err(e) if matches!(e.primary(), AgentError::Cancelled) => {
+                    ConversationOutcome::Cancelled
+                }
+                Err(_) => ConversationOutcome::Failed,
+            };
+            let finished = session.finish(outcome).await;
+            return finish_with_cleanup(result, finished.map_err(Into::into));
+        }
+        result
+    }
+}
+
+async fn sync_transcript(
+    session: &mut dyn ConversationSession,
+    transcript: &[Message],
+    generation: Option<&str>,
+) -> Result<(), AgentError> {
+    let snapshot = session.snapshot().await?;
+    if generation.is_some_and(|g| g != snapshot.generation)
+        || !transcript.starts_with(&snapshot.messages)
+    {
+        return Err(ConversationError::Conflict.into());
+    }
+    if snapshot.messages.len() < transcript.len() {
+        session
+            .append_at(snapshot.revision, &transcript[snapshot.messages.len()..])
+            .await?;
+    }
+    Ok(())
+}
+
+fn state_encoding(_: serde_json::Error) -> AgentError {
+    AgentError::State(StateError::Invalid(
+        "workflow state cannot be encoded or decoded".into(),
+    ))
+}
+
+fn apply_resume(
+    request: &RunRequest,
+    state: &mut WorkflowState,
+    checkpoint: &mut Checkpoint,
+    tools: &crate::react::ToolSet,
+) -> Result<(), AgentError> {
+    let Some(resume) = &request.resume else {
+        return Ok(());
+    };
+    if let Some(response) = &resume.response {
+        if let Some(previous) = state
+            .answers
+            .iter()
+            .find(|a| a.interaction_id == response.interaction_id)
+        {
+            if previous != response {
+                return Err(AgentError::InvalidConfiguration(
+                    "conflicting answer for resolved interaction".into(),
+                ));
+            }
+        } else {
+            let index = state
+                .interactions
+                .iter()
+                .position(|i| i.id == response.interaction_id)
+                .ok_or_else(|| {
+                    AgentError::InvalidConfiguration(
+                        "interaction is not pending on this run".into(),
+                    )
+                })?;
+            let interaction = &state.interactions[index];
+            // Expiry is enforced atomically by InteractionStore when accepting an answer.
+            // A committed answer remains valid when recovery happens after expiry.
+            interaction.validate_response(response, 0)?;
+            match interaction.kind {
+                InteractionKind::Input => {
+                    if let WorkflowCursor::Tools {
+                        assistant,
+                        executions,
+                    } = &state.cursor
+                    {
+                        if !executions.iter().any(|e| matches!(&e.state, ToolExecutionState::Finished(output) if matches!(&output.effect, ToolEffect::RequestInput(r) if r.id == interaction.id))) {
+                            return Err(AgentError::InvalidConfiguration("input interaction has no matching tool result".into()));
+                        }
+                        let mut batch = vec![assistant.as_ref().clone()];
+                        for execution in executions {
+                            let ToolExecutionState::Finished(output) = &execution.state else {
+                                return Err(AgentError::InvalidConfiguration(
+                                    "reconcile unfinished tools before applying an input answer"
+                                        .into(),
+                                ));
+                            };
+                            let mut output = output.clone();
+                            match &output.effect {
+                                ToolEffect::ExposeTools(ids) => {
+                                    if ids.iter().all(|id| {
+                                        tools.by_name.values().any(|b| &b.descriptor.id == id)
+                                    }) {
+                                        state.visible_tools.extend(ids.iter().cloned());
+                                    } else {
+                                        output = ToolOutput::error(
+                                            "Tool exposure contains an unauthorized ID",
+                                        );
+                                    }
+                                }
+                                ToolEffect::RevokeTools(ids) => {
+                                    state.revoked_tools.extend(ids.iter().cloned())
+                                }
+                                _ => {}
+                            }
+                            let mut message = Message::tool(&execution.call.id, &output.content);
+                            message.tool_result = Some(ToolResultMetadata {
+                                is_error: output.is_error,
+                                structured: output.structured.clone(),
+                                result_reference: output.result_reference.clone(),
+                            });
+                            batch.push(message);
+                        }
+                        checkpoint.transcript.extend(batch);
+                        state.cursor = WorkflowCursor::Model;
+                    }
+                    checkpoint.transcript.push(Message::user(Content(vec![ContentBlock::Json {
+                        value: serde_json::json!({"interaction_id":response.interaction_id,"answer":response.value}),
+                    }])));
+                }
+                InteractionKind::Approval { invocation_id } => {
+                    let WorkflowCursor::Tools { executions, .. } = &mut state.cursor else {
+                        return Err(AgentError::InvalidConfiguration(
+                            "approval has no pending tool batch".into(),
+                        ));
+                    };
+                    let execution = executions.iter_mut().find(|e| e.invocation_id == invocation_id && matches!(e.state,ToolExecutionState::WaitingApproval { interaction_id } if interaction_id == interaction.id)).ok_or_else(||AgentError::InvalidConfiguration("approval no longer matches pending invocation".into()))?;
+                    execution.state = if response.value == serde_json::Value::Bool(true) {
+                        ToolExecutionState::Approved
+                    } else {
+                        ToolExecutionState::Finished(ToolOutput::error(
+                            "Tool denied by approval response",
+                        ))
+                    };
+                }
+            }
+            state.interactions.remove(index);
+            state.answers.push(response.clone());
+        }
+    }
+    let mut resolved = HashSet::new();
+    for resolution in &resume.resolutions {
+        let id = match resolution {
+            CallResolution::RecordNode { .. } | CallResolution::RetryNode { .. } => {
+                return Err(AgentError::InvalidConfiguration(
+                    "node reconciliation requires a DAG loop".into(),
+                ));
+            }
+            CallResolution::Record { invocation_id, .. }
+            | CallResolution::Retry { invocation_id } => *invocation_id,
+        };
+        if !resolved.insert(id) {
+            return Err(AgentError::InvalidConfiguration(
+                "duplicate tool reconciliation".into(),
+            ));
+        }
+        let WorkflowCursor::Tools { executions, .. } = &mut state.cursor else {
+            return Err(AgentError::InvalidConfiguration(
+                "no tool batch to reconcile".into(),
+            ));
+        };
+        let execution = executions
+            .iter_mut()
+            .find(|e| e.invocation_id == id && matches!(e.state, ToolExecutionState::Started))
+            .ok_or_else(|| {
+                AgentError::InvalidConfiguration(
+                    "reconciliation requires an indeterminate invocation".into(),
+                )
+            })?;
+        execution.state = match resolution {
+            CallResolution::RecordNode { .. } | CallResolution::RetryNode { .. } => unreachable!(),
+            CallResolution::Record { output, .. } => ToolExecutionState::Finished(output.clone()),
+            CallResolution::Retry { .. } => ToolExecutionState::Planned,
+        };
+    }
+    Ok(())
+}
+
+struct ModelExecutionRuntime<'a> {
+    store: &'a dyn StateStore,
+    lease: &'a ExecutionLease,
+    checkpoint: Checkpoint,
+    state: WorkflowState,
+    tools: crate::react::ToolSet,
+    context: &'a RunContext,
+    services: &'a AgentServices,
+    conversation: Option<&'a mut dyn ConversationSession>,
+}
+impl ModelExecutionRuntime<'_> {
+    fn has_started_tools(&self) -> bool {
+        matches!(&self.state.cursor,WorkflowCursor::Tools { executions,.. } if executions.iter().any(|e|matches!(e.state,ToolExecutionState::Started)))
+    }
+    fn result(&self, status: RunStatus) -> RunResult {
+        RunResult {
+            output: self.state.output.text(),
+            content: self.state.output.clone(),
+            structured: self.state.structured.clone(),
+            interactions: self.state.interactions.clone(),
+            status,
+            usage: self.state.usage.clone(),
+            steps: self.state.steps,
+            tool_calls: self.state.tool_calls,
+        }
+    }
+    async fn save(&mut self, event: Option<AgentEvent>) -> Result<(), AgentError> {
+        self.state.revoked_tools = self
+            .context
+            .revoked_tools
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        self.state.budget_usage = self
+            .context
+            .usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .including_reservations();
+        self.state.child_runs = self
+            .context
+            .child_runs
+            .load(std::sync::atomic::Ordering::Acquire);
+        self.checkpoint.state = serde_json::to_value(&self.state).map_err(state_encoding)?;
+        if let Some(event) = &event {
+            self.checkpoint.events.push(EventEnvelope {
+                scope: EventScope::Journal,
+                schema_version: 1,
+                run_id: self.checkpoint.run_id,
+                session_id: self.checkpoint.session_id.clone(),
+                node_execution: self.context.node_execution().cloned(),
+                sequence: self.checkpoint.events.last().map_or(1, |e| e.sequence + 1),
+                timestamp_unix_ms: unix_time_ms(),
+                event: event.clone(),
+            });
+        }
+        self.checkpoint = self
+            .store
+            .commit(
+                self.lease,
+                self.checkpoint.revision,
+                self.checkpoint.clone(),
+            )
+            .await?;
+        if !self.state.interactions.is_empty() {
+            self.services
+                .interactions
+                .as_ref()
+                .ok_or(AgentError::MissingService("InteractionStore"))?
+                .publish(&self.state.interactions, &self.state.cursor, self.context)
+                .await?;
+        }
+        self.sync_conversation().await?;
+        if let Some(event) = event {
+            // Agent owns the sole live terminal event; checkpoints keep a separate journal.
+            if !matches!(
+                event,
+                AgentEvent::RunFailed(_)
+                    | AgentEvent::RunCancelled
+                    | AgentEvent::RunFinished { .. }
+            ) {
+                self.context.emit(event).await;
+            }
+        }
+        Ok(())
+    }
+    async fn sync_conversation(&mut self) -> Result<(), AgentError> {
+        if let Some(session) = &mut self.conversation {
+            sync_transcript(
+                *session,
+                &self.checkpoint.transcript,
+                self.state.conversation_generation.as_deref(),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+    async fn record_steering(&mut self, pending: Vec<String>) -> Result<(), AgentError> {
+        for input in pending {
+            self.checkpoint.transcript.push(Message::user(&input));
+            // Persist the message and its journal event together before
+            // publishing the live event, including at the final reply boundary.
+            self.save(Some(AgentEvent::Steered(input))).await?;
+        }
+        Ok(())
+    }
+    async fn stop(
+        &mut self,
+        status: RunStatus,
+        execution: ExecutionStatus,
+    ) -> Result<RunResult, AgentError> {
+        if status == RunStatus::AwaitingInput {
+            self.state.output = self
+                .state
+                .interactions
+                .first()
+                .map(|r| r.prompt.clone())
+                .unwrap_or_default();
+            self.state.structured = None;
+        }
+        self.checkpoint.status = execution;
+        self.state.outcome = Some(status.clone());
+        self.save(None).await?;
+        if let WorkflowCursor::Tools { executions, .. } = &self.state.cursor {
+            for execution in executions {
+                if let ToolExecutionState::Finished(output) = &execution.state {
+                    self.context.emit_output(OutputEvent::ToolResult {
+                        call: execution.call.clone(),
+                        output: output.clone(),
+                    });
+                }
+            }
+        }
+        Ok(self.result(status))
+    }
+    async fn execute(&mut self) -> Result<RunResult, AgentError> {
+        loop {
+            self.context.check_cancelled()?;
+            if self.has_started_tools() {
+                return self
+                    .stop(
+                        RunStatus::RecoveryRequired,
+                        ExecutionStatus::RecoveryRequired,
+                    )
+                    .await;
+            }
+            if !self.state.interactions.is_empty() {
+                return self
+                    .stop(RunStatus::AwaitingInput, ExecutionStatus::Waiting)
+                    .await;
+            }
+            match &self.state.cursor {
+                WorkflowCursor::Model => {
+                    if self.state.steps >= self.state.request.limits.max_steps
+                        || self.context.execution_counters.as_ref().is_some_and(|c| {
+                            !crate::budget::ExecutionCounters::admit(
+                                &c.steps,
+                                1,
+                                self.state.request.limits.max_steps,
+                            )
+                        })
+                    {
+                        return self
+                            .stop(RunStatus::StepLimit, ExecutionStatus::Completed)
+                            .await;
+                    }
+                    self.record_steering(self.context.take_steering()).await?;
+                    let stage = &self.state.definition.stages[self.state.stage];
+                    let mut instructions = stage.instructions.clone();
+                    for provider in &self.services.context {
+                        instructions.extend(provider.context(self.context).await?);
+                    }
+                    if instructions.iter().any(|m| {
+                        !matches!(m.role, Role::System | Role::Developer)
+                            || !m.tool_calls.is_empty()
+                            || m.tool_call_id.is_some()
+                            || m.tool_result.is_some()
+                    }) {
+                        return Err(AgentError::InvalidConfiguration(
+                            "legacy context must provide trusted instructions".into(),
+                        ));
+                    }
+                    let descriptors: Vec<_> = self
+                        .tools
+                        .descriptors()
+                        .into_iter()
+                        .filter(|t| {
+                            !self.context.is_tool_revoked(&t.id)
+                                && stage
+                                    .tools
+                                    .as_ref()
+                                    .is_none_or(|allowed| allowed.contains(&t.id))
+                        })
+                        .collect();
+                    let mut memory = if let Some(session) = &mut self.conversation {
+                        TranscriptProjection::from_snapshot(session.snapshot().await?)
+                    } else {
+                        TranscriptProjection::new(self.checkpoint.transcript.clone()).with_key(
+                            ConversationKey::new(&self.context.session_id).branch(
+                                serde_json::to_string(&(
+                                    self.context.run_id,
+                                    &self.state.definition.id,
+                                    &stage.name,
+                                ))
+                                .expect("workflow identity is serializable"),
+                            ),
+                        )
+                    };
+                    let journal = Arc::new(WorkflowBudgetJournal {
+                        store: self.services.state.clone().expect("validated state store"),
+                        lease: self.lease.clone(),
+                        checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
+                    });
+                    let mut model_context = self.context.clone();
+                    model_context.budget_journal = Some(journal.clone());
+                    let response = self
+                        .services
+                        .models
+                        .as_ref()
+                        .ok_or(AgentError::MissingService("Model"))?
+                        .invoke(
+                            ModelCall {
+                                stage: &stage.name,
+                                step: self.state.steps + 1,
+                                instructions: &instructions,
+                                tools: &descriptors,
+                                limits: &self.state.request.limits,
+                                options: stage
+                                    .generation
+                                    .as_ref()
+                                    .unwrap_or(&self.state.request.generation),
+                            },
+                            &mut memory,
+                            &model_context,
+                        )
+                        .await;
+                    self.checkpoint = journal.checkpoint.lock().await.clone();
+                    let response = response?;
+                    self.state.steps += 1;
+                    self.state.usage.add(&response.usage);
+                    self.state.output = response.content.clone();
+                    self.state.structured = response.structured;
+                    let mut assistant = Message::assistant(response.content);
+                    assistant.structured = self.state.structured.clone();
+                    assistant.tool_calls = response.tool_calls;
+                    assistant.model_context = response.model_context;
+                    if assistant.tool_calls.is_empty() {
+                        if assistant.content.is_empty() {
+                            return Err(AgentError::Run("model returned empty content".into()));
+                        }
+                        self.checkpoint.transcript.push(assistant);
+                        if self.state.stage + 1 == self.state.definition.stages.len() {
+                            let steering = self.context.pending_or_seal();
+                            if steering.is_empty() {
+                                return self
+                                    .stop(RunStatus::Completed, ExecutionStatus::Completed)
+                                    .await;
+                            }
+                            self.record_steering(steering).await?;
+                        } else {
+                            self.state.stage += 1;
+                            self.save(None).await?;
+                        }
+                    } else {
+                        if assistant.tool_calls.len()
+                            > self
+                                .state
+                                .request
+                                .limits
+                                .max_tool_calls
+                                .saturating_sub(self.state.tool_calls)
+                            || self.context.execution_counters.as_ref().is_some_and(|c| {
+                                !crate::budget::ExecutionCounters::admit(
+                                    &c.tools,
+                                    assistant.tool_calls.len(),
+                                    self.state.request.limits.max_tool_calls,
+                                )
+                            })
+                        {
+                            return self
+                                .stop(RunStatus::ToolCallLimit, ExecutionStatus::Completed)
+                                .await;
+                        }
+                        let mut ids = HashSet::new();
+                        let mut executions = Vec::new();
+                        for call in &assistant.tool_calls {
+                            if call.id.is_empty() || !ids.insert(&call.id) {
+                                return Err(AgentError::Run(
+                                    "model returned invalid tool call IDs".into(),
+                                ));
+                            }
+                            let binding = self
+                                .tools
+                                .by_name
+                                .get(&call.call_name)
+                                .filter(|b| descriptors.contains(&b.descriptor));
+                            let (descriptor, state) = match binding {
+                                Some(binding) => {
+                                    (binding.descriptor.clone(), ToolExecutionState::Planned)
+                                }
+                                None => (
+                                    ToolDescriptor::new(
+                                        "unavailable",
+                                        &call.call_name,
+                                        "Unavailable tool",
+                                        serde_json::json!({}),
+                                    ),
+                                    ToolExecutionState::Finished(ToolOutput::error(
+                                        "Tool is not exposed for this stage",
+                                    )),
+                                ),
+                            };
+                            executions.push(ToolExecution {
+                                invocation_id: call.invocation_id,
+                                tool_id: descriptor.id.clone(),
+                                descriptor,
+                                call: call.clone(),
+                                state,
+                            });
+                        }
+                        self.state.tool_calls += executions.len();
+                        self.state.cursor = WorkflowCursor::Tools {
+                            assistant: Box::new(assistant),
+                            executions,
+                        };
+                        self.save(None).await?;
+                    }
+                }
+                WorkflowCursor::Tools { .. } => {
+                    if let Some(result) = self.execute_tools().await? {
+                        return Ok(result);
+                    }
+                }
+            }
+        }
+    }
+    async fn execute_tools(&mut self) -> Result<Option<RunResult>, AgentError> {
+        if let WorkflowCursor::Tools { executions, .. } = &self.state.cursor {
+            for execution in executions {
+                if let ToolExecutionState::Finished(output) = &execution.state
+                    && let ToolEffect::RevokeTools(ids) = &output.effect
+                {
+                    self.context.revoke_tools(ids)?;
+                }
+            }
+        }
+        let WorkflowCursor::Tools { executions, .. } = &self.state.cursor else {
+            unreachable!()
+        };
+        let count = executions.len();
+        // Evaluate the entire batch before effects. An approval-gated sibling
+        // cannot be overtaken by a supposedly parallel-safe tool.
+        for index in 0..count {
+            let execution = self.execution(index).clone();
+            if matches!(
+                execution.state,
+                ToolExecutionState::Finished(_) | ToolExecutionState::WaitingApproval { .. }
+            ) {
+                continue;
+            }
+            let binding = self
+                .tools
+                .by_name
+                .get(&execution.call.call_name)
+                .filter(|b| b.exposed && b.descriptor == execution.descriptor)
+                .ok_or_else(|| {
+                    AgentError::InvalidConfiguration(
+                        "pending tool contract is no longer available".into(),
+                    )
+                })?;
+            if !compile_schema(&binding.descriptor.input_schema)?
+                .is_valid(&execution.call.arguments)
+            {
+                self.execution_mut(index).state = ToolExecutionState::Finished(ToolOutput::error(
+                    "Tool arguments do not match input schema",
+                ));
+                continue;
+            }
+            let invocation_id = execution.invocation_id.to_string();
+            let invocation = ToolInvocationContext {
+                invocation_id: &invocation_id,
+                call: &execution.call,
+                descriptor: &execution.descriptor,
+                run: self.context,
+            };
+            for policy in &self.services.tool_policy {
+                match policy.evaluate(&invocation).await? {
+                    ToolPolicyDecision::Allow => {}
+                    ToolPolicyDecision::Deny(reason) => {
+                        self.execution_mut(index).state =
+                            ToolExecutionState::Finished(ToolOutput::error(reason));
+                        break;
+                    }
+                    ToolPolicyDecision::RequireApproval(prompt)
+                        if !matches!(execution.state, ToolExecutionState::Approved) =>
+                    {
+                        let interaction =
+                            InteractionRequest::approval(execution.invocation_id, prompt);
+                        self.execution_mut(index).state = ToolExecutionState::WaitingApproval {
+                            interaction_id: interaction.id,
+                        };
+                        self.state.interactions.push(interaction);
+                        break;
+                    }
+                    ToolPolicyDecision::RequireApproval(_) => {}
+                }
+            }
+        }
+        self.save(None).await?;
+        if !self.state.interactions.is_empty() {
+            return self
+                .stop(RunStatus::AwaitingInput, ExecutionStatus::Waiting)
+                .await
+                .map(Some);
+        }
+        let mut parallel_results = self.execute_parallel(count).await?;
+        let parallel_dispatch = !parallel_results.is_empty();
+        for index in 0..count {
+            if matches!(self.execution(index).state, ToolExecutionState::Finished(_)) {
+                continue;
+            }
+            self.context.check_cancelled()?;
+            let execution = self.execution(index).clone();
+            let result = if let Some(result) = parallel_results.remove(&index) {
+                result
+            } else {
+                self.execution_mut(index).state = ToolExecutionState::Started;
+                self.save(Some(AgentEvent::ToolStarted {
+                    tool_id: execution.tool_id.clone(),
+                    call_id: execution.call.id.clone(),
+                }))
+                .await?;
+                let binding = &self.tools.by_name[&execution.call.call_name];
+                let journal = Arc::new(WorkflowBudgetJournal {
+                    store: self.services.state.clone().expect("validated state store"),
+                    lease: self.lease.clone(),
+                    checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
+                });
+                let mut tool_context = self.context.clone();
+                tool_context.budget_journal = Some(journal.clone());
+                let result = self
+                    .services
+                    .tool_invoker
+                    .invoke(
+                        &execution.invocation_id.to_string(),
+                        &execution.call,
+                        binding,
+                        &tool_context,
+                        self.state.request.limits.tool_timeout,
+                    )
+                    .await;
+                self.checkpoint = journal.checkpoint.lock().await.clone();
+                result
+            };
+            let mut output = match result {
+                Ok(output) => output,
+                Err(ToolError::Indeterminate(_)) => {
+                    if parallel_dispatch {
+                        continue;
+                    }
+                    return self
+                        .stop(
+                            RunStatus::RecoveryRequired,
+                            ExecutionStatus::RecoveryRequired,
+                        )
+                        .await
+                        .map(Some);
+                }
+                Err(error) => ToolOutput::error(error.to_string()),
+            };
+            if output.effect == ToolEffect::AwaitInput {
+                output.effect = ToolEffect::RequestInput(Box::new(InteractionRequest::input(
+                    &output.content,
+                    serde_json::json!({"type":"string"}),
+                )?));
+            }
+            if let ToolEffect::RequestInput(interaction) = &output.effect {
+                if !matches!(interaction.kind, InteractionKind::Input)
+                    || interaction.id.is_nil()
+                    || self
+                        .state
+                        .interactions
+                        .iter()
+                        .any(|i| i.id == interaction.id)
+                    || self
+                        .state
+                        .answers
+                        .iter()
+                        .any(|a| a.interaction_id == interaction.id)
+                {
+                    return Err(AgentError::Run(
+                        "tool returned invalid interaction identity/kind".into(),
+                    ));
+                }
+                compile_schema(&interaction.response_schema)?;
+                self.state.interactions.push(interaction.as_ref().clone());
+                // An answer can change the intended arguments. Remaining calls
+                // from this pre-answer batch are observations of non-execution;
+                // the model must replan after receiving the answer.
+                for remaining in index + 1..count {
+                    if parallel_results.contains_key(&remaining) {
+                        continue;
+                    }
+                    if !matches!(
+                        self.execution(remaining).state,
+                        ToolExecutionState::Finished(_)
+                    ) {
+                        self.execution_mut(remaining).state =
+                            ToolExecutionState::Finished(ToolOutput::error(
+                                "Tool not executed: awaiting input; replan after the answer",
+                            ));
+                    }
+                }
+            }
+            let is_error = output.is_error;
+            self.execution_mut(index).state = ToolExecutionState::Finished(output);
+            self.save(Some(AgentEvent::ToolFinished {
+                tool_id: execution.tool_id,
+                call_id: execution.call.id,
+                is_error,
+            }))
+            .await?;
+            if !self.state.interactions.is_empty()
+                && parallel_results.is_empty()
+                && !self.has_started_tools()
+            {
+                self.complete_tool_batch().await?;
+                return self
+                    .stop(RunStatus::AwaitingInput, ExecutionStatus::Waiting)
+                    .await
+                    .map(Some);
+            }
+        }
+        if self.has_started_tools() {
+            return self
+                .stop(
+                    RunStatus::RecoveryRequired,
+                    ExecutionStatus::RecoveryRequired,
+                )
+                .await
+                .map(Some);
+        }
+        self.complete_tool_batch().await?;
+        if !self.state.interactions.is_empty() {
+            return self
+                .stop(RunStatus::AwaitingInput, ExecutionStatus::Waiting)
+                .await
+                .map(Some);
+        }
+        Ok(None)
+    }
+    async fn execute_parallel(
+        &mut self,
+        count: usize,
+    ) -> Result<std::collections::BTreeMap<usize, Result<ToolOutput, ToolError>>, AgentError> {
+        let indices: Vec<_> = (0..count)
+            .filter(|&i| !matches!(self.execution(i).state, ToolExecutionState::Finished(_)))
+            .collect();
+        if self.state.request.limits.max_parallel_tools < 2
+            || indices.len() < 2
+            || indices
+                .iter()
+                .any(|&i| !self.tools.by_name[&self.execution(i).call.call_name].parallel_safe)
+        {
+            return Ok(Default::default());
+        }
+        for &index in &indices {
+            self.execution_mut(index).state = ToolExecutionState::Started;
+        }
+        // All dispatch intents are durable before the first side effect.
+        self.save(None).await?;
+        let journal = Arc::new(WorkflowBudgetJournal {
+            store: self.services.state.clone().expect("validated state store"),
+            lease: self.lease.clone(),
+            checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
+        });
+        let mut context = self.context.clone();
+        context.budget_journal = Some(journal.clone());
+        let work: Vec<_> = indices
+            .into_iter()
+            .map(|index| {
+                let execution = self.execution(index).clone();
+                let binding = self.tools.by_name[&execution.call.call_name].clone();
+                let context = context.clone();
+                let invoker = self.services.tool_invoker.clone();
+                let timeout = self.state.request.limits.tool_timeout;
+                async move {
+                    context
+                        .emit(AgentEvent::ToolStarted {
+                            tool_id: execution.tool_id.clone(),
+                            call_id: execution.call.id.clone(),
+                        })
+                        .await;
+                    let result = invoker
+                        .invoke(
+                            &execution.invocation_id.to_string(),
+                            &execution.call,
+                            &binding,
+                            &context,
+                            timeout,
+                        )
+                        .await;
+                    (index, result)
+                }
+            })
+            .collect();
+        let results = stream::iter(work)
+            .buffered(self.state.request.limits.max_parallel_tools)
+            .collect()
+            .await;
+        self.checkpoint = journal.checkpoint.lock().await.clone();
+        Ok(results)
+    }
+    async fn complete_tool_batch(&mut self) -> Result<(), AgentError> {
+        let WorkflowCursor::Tools {
+            assistant,
+            executions,
+        } = self.state.cursor.clone()
+        else {
+            unreachable!()
+        };
+        let mut batch = vec![*assistant];
+        let mut outputs = Vec::new();
+        for execution in executions {
+            let ToolExecutionState::Finished(mut output) = execution.state else {
+                return Err(AgentError::Run("unfinished tool in completed batch".into()));
+            };
+            match &output.effect {
+                ToolEffect::ExposeTools(ids) => {
+                    if let Err(error) = self.tools.apply_exposure(ids) {
+                        output = ToolOutput::error(error);
+                    } else {
+                        self.state.visible_tools.extend(ids.iter().cloned());
+                    }
+                }
+                ToolEffect::RequestInput(_) | ToolEffect::AwaitInput => {}
+                ToolEffect::RevokeTools(ids) => {
+                    self.context.revoke_tools(ids)?;
+                }
+                ToolEffect::Continue => {}
+            }
+            outputs.push(OutputEvent::ToolResult {
+                call: execution.call.clone(),
+                output: output.clone(),
+            });
+            let mut message = Message::tool(execution.call.id, output.content);
+            message.tool_result = Some(ToolResultMetadata {
+                is_error: output.is_error,
+                structured: output.structured,
+                result_reference: output.result_reference,
+            });
+            batch.push(message);
+        }
+        self.checkpoint.transcript.extend(batch);
+        self.state.cursor = WorkflowCursor::Model;
+        self.save(None).await?;
+        for output in outputs {
+            self.context.emit_output(output);
+        }
+        Ok(())
+    }
+    fn execution(&self, index: usize) -> &ToolExecution {
+        let WorkflowCursor::Tools { executions, .. } = &self.state.cursor else {
+            unreachable!()
+        };
+        &executions[index]
+    }
+    fn execution_mut(&mut self, index: usize) -> &mut ToolExecution {
+        let WorkflowCursor::Tools { executions, .. } = &mut self.state.cursor else {
+            unreachable!()
+        };
+        &mut executions[index]
+    }
+}
+
+/// A model projection backed by an immutable transcript snapshot. Store writes
+/// remain exclusively in the workflow's atomic checkpoint transition.
+pub struct TranscriptProjection {
+    key: ConversationKey,
+    generation: Option<String>,
+    original: Vec<Message>,
+}
+impl TranscriptProjection {
+    pub fn new(messages: Vec<Message>) -> Self {
+        Self {
+            key: ConversationKey::new("projection"),
+            generation: None,
+            original: messages,
+        }
+    }
+    pub fn from_snapshot(snapshot: ConversationSnapshot) -> Self {
+        Self {
+            key: snapshot.key,
+            generation: Some(snapshot.generation),
+            original: snapshot.messages,
+        }
+    }
+    pub fn with_key(mut self, key: ConversationKey) -> Self {
+        self.key = key;
+        self
+    }
+}
+#[async_trait]
+impl ConversationSession for TranscriptProjection {
+    async fn snapshot(&mut self) -> Result<ConversationSnapshot, ConversationError> {
+        Ok(ConversationSnapshot::new(
+            self.key.clone(),
+            self.generation
+                .clone()
+                .unwrap_or_else(|| self.key.branch.clone()),
+            self.original.clone(),
+        ))
+    }
+
+    async fn append(&mut self, _: &[Message]) -> Result<(), ConversationError> {
+        Err(ConversationError::Other(
+            "transcript projection is read-only".into(),
+        ))
+    }
+}
+
+pub(crate) struct WorkflowLease {
+    store: Arc<dyn StateStore>,
+    lease: ExecutionLease,
+    heartbeat: tokio::task::JoinHandle<()>,
+    cleanup_timeout: Duration,
+    closed: bool,
+}
+impl WorkflowLease {
+    pub(crate) fn new(
+        store: Arc<dyn StateStore>,
+        lease: ExecutionLease,
+        ttl: Duration,
+        cleanup_timeout: Duration,
+        context: RunContext,
+    ) -> Self {
+        let database = store.clone();
+        let token = lease.clone();
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(ttl / 3).await;
+                // Renewal refreshes advisory expiry only. The fencing identity
+                // remains valid for commits/releases throughout this ownership.
+                if database.renew(&token, ttl).await.is_err() {
+                    context.cancellation.cancel();
+                    break;
+                }
+            }
+        });
+        Self {
+            store,
+            lease,
+            heartbeat,
+            cleanup_timeout,
+            closed: false,
+        }
+    }
+    pub(crate) async fn close(mut self) -> Result<(), StateError> {
+        self.heartbeat.abort();
+        let result = release_lease(self.store.as_ref(), &self.lease, self.cleanup_timeout).await;
+        // Controlled cleanup is complete, including any reported failure. Drop
+        // is only a fallback for cancellation/panic before that result exists.
+        self.closed = true;
+        result
+    }
+}
+impl Drop for WorkflowLease {
+    fn drop(&mut self) {
+        self.heartbeat.abort();
+        if self.closed {
+            return;
+        }
+        let store = self.store.clone();
+        let lease = self.lease.clone();
+        let timeout = self.cleanup_timeout;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = release_lease(store.as_ref(), &lease, timeout).await;
+            });
+        }
+    }
+}
+
+async fn release_lease(
+    store: &dyn StateStore,
+    lease: &ExecutionLease,
+    timeout: Duration,
+) -> Result<(), StateError> {
+    let result = tokio::time::timeout(timeout, async {
+        match store.release(lease).await {
+            Err(StateError::Backend(_)) => {
+                // Release is fenced and safe to retry even if the first write
+                // committed before returning an error. Never retry indefinitely.
+                tokio::time::sleep(Duration::from_millis(10).min(timeout / 4)).await;
+                store.release(lease).await
+            }
+            result => result,
+        }
+    })
+    .await
+    .map_err(|_| StateError::Backend("execution lease release timed out".into()))?;
+    match result {
+        Ok(()) | Err(StateError::LeaseLost) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+struct WorkflowBudgetJournal {
+    store: Arc<dyn StateStore>,
+    lease: ExecutionLease,
+    checkpoint: tokio::sync::Mutex<Checkpoint>,
+}
+#[async_trait]
+impl crate::budget::BudgetJournal for WorkflowBudgetJournal {
+    async fn save(
+        &self,
+        ledger: Arc<std::sync::Mutex<crate::budget::UsageLedger>>,
+        child_runs: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Result<(), StateError> {
+        let mut current = self.checkpoint.lock().await;
+        let mut next = current.clone();
+        let mut state: WorkflowState = serde_json::from_value(next.state.clone())
+            .map_err(|_| StateError::Invalid("invalid workflow budget state".into()))?;
+        // Read the ledger after acquiring the journal lock. Concurrent callers
+        // cannot commit an older, smaller reservation snapshot after a newer one.
+        state.budget_usage = ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .including_reservations();
+        state.child_runs = child_runs.load(std::sync::atomic::Ordering::Acquire);
+        next.state = serde_json::to_value(state)
+            .map_err(|_| StateError::Invalid("invalid workflow budget state".into()))?;
+        *current = self
+            .store
+            .commit(&self.lease, current.revision, next)
+            .await?;
+        Ok(())
+    }
+}

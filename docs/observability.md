@@ -1,0 +1,140 @@
+# 节点观测与恢复身份
+
+Framework 定义执行中间件、身份和结构化错误契约；`agent-observability` 将这些契约转换为
+OpenTelemetry span、事件和指标。宿主配置 tracer/meter provider、exporter、采样、存储和查询界面。
+Framework 本身不依赖 OpenTelemetry 或 SQLite。
+
+## 装配与链路
+
+先安装 `TelemetryPlugin`，再安装其他执行中间件，让观测包装器看到内层执行和收尾的结果：
+
+```rust,ignore
+let telemetry = TelemetryPlugin::new(
+    "telemetry", &tracer_provider, &meter_provider, TelemetryConfig::default(),
+)?;
+let agent = AgentBuilder::new()
+    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(telemetry)
+    // StateStore、模型、工具、节点插件……
+    .plugin(AgentLoopPlugin::new(DagWorkflowLoop::new(definition)?))
+    .build().await?;
+```
+
+```text
+agent.run                     一次启动或恢复执行
+├─ agent.workflow.node        当前节点 attempt
+│  ├─ agent.model             一次模型调用；step/attempt 属性标识步骤和重试
+│  └─ agent.tool              一次工具执行；Link 指向发起它的模型 span
+└─ agent.workflow.node        可并行执行的另一个节点
+   └─ agent.model
+```
+
+纯路由或转换节点同样有 node span；没有模型调用就没有 model span。
+普通 `ReactLoop` 和旧 `WorkflowLoop` 没有 DAG 节点，因此模型和工具仍直接归属 `agent.run`。
+通过 DAG 内置 `framework.react` 执行 ReAct 时使用图中的节点层级。
+宿主可在请求 extensions 中传入 `TraceParent`，让 `agent.run` 归属现有请求链路。
+
+节点包装器通过克隆后的 RunContext 显式传递父 span，并只在 future 被 poll 时附加 OTel
+context。跨 Tokio 任务的模型和工具定位不依赖线程本地状态，也不依赖异步事件消费。
+工具拦截器也在 poll 执行器时附加工具 span 上下文，工具内部的遥测可以继承它。
+模型到工具的 Link 按节点 attempt 与供应商 call ID 关联；并行节点可以使用相同 call ID。
+旧进程的模型 span 不会在恢复时伪造成当前工具的发起者，找不到当前执行的模型记录时省略 Link。
+
+## 节点执行中间件
+
+```rust,ignore
+#[async_trait]
+impl WorkflowNodeMiddleware for MyNodeMiddleware {
+    async fn intercept(
+        &self,
+        input: WorkflowNodeInput,
+        context: &WorkflowNodeContext,
+        next: WorkflowNodeNext<'_>,
+    ) -> Result<WorkflowNodeResult, AgentError> {
+        let identity = context.run.node_execution().expect("admitted node");
+        // 可根据 identity 和输入决定是否拒绝执行。
+        let result = next.run(input, context).await;
+        // 可检查结果并返回错误。
+        result
+    }
+}
+// 注册：WorkflowNodeMiddlewarePlugin::new("my-node-middleware", implementation)
+```
+
+贡献顺序决定嵌套顺序：先安装的包装器在外层。`next` 被消费，不能重复调用同一个 continuation。
+节点身份不能通过传给 next 的 input 改写；返回的路由会经过定义校验。
+节点和内层中间件 panic 会转换为执行错误，外层包装器可观测到错误结果。
+包装器与节点均为可信进程内插件，不构成隔离沙箱。
+
+节点派发前先持久化身份与 `Running`，再进入中间件。意图写入失败时不会调用中间件或节点；
+跳过节点、复用已完成节点、人工 `RecordNode` 也不会伪造执行 span。
+节点 span 包含执行和节点内部的保存，调度器在节点返回之后提交结果的耗时和错误归属 run span。
+
+取消、超时或兄弟节点失败可能直接丢弃 future，不能依靠 await 后面的语句清理资源。
+观测插件为每个执行 future 持有独立的 RAII span 守卫：子 future 先释放工具 span，再释放节点 span。已确认取消标记 `cancelled`；
+无法确定结果的中断标记 `unknown`，并计入 abandoned 指标。真实错误标记 Error 并带错误事件。
+硬进程终止不能保证导出尚未结束的 span。
+
+## 跨恢复身份
+
+| 字段 | 含义 | 恢复时 |
+|---|---|---|
+| `agent.run.id` | 逻辑运行 | 保持不变 |
+| `agent.execution.id` | 一次 Agent 启动或恢复 | 生成新 UUID |
+| `agent.node.invocation.id` | 节点的一次逻辑调用 | 继续执行保留；显式 RetryNode 更换 |
+| `agent.node.attempt.id` | 一次节点派发 | 生成新 UUID |
+| `agent.node.previous_attempt.id` | 上次持久化派发的 attempt | 从检查点恢复 |
+| `agent.previous_execution.id` | 上次节点派发所属的 execution | 从检查点恢复 |
+
+`WorkflowNodeState.last_execution` 与节点意图原子提交，保存上述身份及工作流 ID、版本和节点 ID。
+如果进程在意图提交后、实际进入执行器前退出，前次 attempt 仍然存在，但可能没有对应 span；
+这个身份表示已准入的尝试，不证明远端副作用已经发生。
+显式 RetryNode 清空节点本地执行状态，同时保留前次身份作为关联依据。
+旧检查点缺少 `last_execution` 时默认 None，首次升级恢复没有前次 attempt 关联。
+
+每次恢复产生新的 run span。使用 run/invocation/previous-attempt 字段跨 trace 查询，不把已经
+结束的旧 run span 重新打开。这些 UUID 不承担租约授权职责；fencing 仍由 StateStore 控制。
+恢复已完成的运行只产生 run span，不重复生成节点 span。
+
+## 结构化错误和脱敏
+
+`AgentError::report(&redactor)` 返回可序列化的 `ErrorReport`：
+
+```json
+{
+  "kind": "run",
+  "causes": [{"kind": "run", "truncated": false}],
+  "cleanup": [{"kind": "state", "truncated": false}],
+  "truncated": false
+}
+```
+
+报告保留原始错误的原因链，并将 `WithCleanup` 的清理失败单独列出。
+默认 `OmitErrorMessages` 删除全部错误文本。每份报告最多 16 个错误项，单项文本在脱敏后
+截断为最多 2048 UTF-8 字节；脱敏器 panic 时省略正文。`truncated` 表示报告有截断。
+不采集提示词、认证数据、完整请求或堆栈作为额外字段。
+
+宿主通过 `TelemetryPlugin::with_error_redactor(Arc<dyn ErrorRedactor>)` 允许经过处理的文本。
+脱敏器能看到原始错误文本，应采用业务认可的允许列表或脱敏规则；返回 None 表示不导出。
+该回调同步执行，不应进行 IO 或阻塞等待。报告大小限制在回调返回后生效。
+
+遥测在发生错误的 span 上写入 `agent.error` 事件，事件字段包含 `error.type` 和 JSON 格式的
+`agent.error.report`，天然带 trace/span ID；span 属性带执行身份。运行、节点、模型和工具均
+支持该报告。模型重试中途失败、工具返回 `is_error` 也会记录，即使外层运行最终成功。
+清理失败可以作为错误事件附着在 cancelled run 上，不会将取消重新归类为普通失败。
+这是一份关联到 trace 的错误事件；独立日志系统的转发和存储仍由宿主提供。
+
+脱敏只作用于结构化导出报告。调用者收到的类型化 AgentError、原有 RunFailed 事件及
+检查点中的节点 error 文本保留执行语义；宿主如要对外展示这些原始数据，需要另行应用
+同一脱敏策略。启用 `record_identifiers` 仅允许导出工作流、节点、模型、阶段及工具名称，
+不会自动允许错误正文。UUID 身份默认导出，仅作为 span 属性，不用作指标标签。
+
+## 验证
+
+`agent-observability/tests/export.rs` 使用实际 SDK in-memory exporter 验证：
+并行 DAG 层级、相同 call ID 不串链、关闭重建后的继续执行与显式重试、取消、失败终止兄弟
+工具、节点中间件顺序与拒绝、panic、非法路由、主错误与清理错误的脱敏和截断。
+这些测试离线运行，不需要供应商接口。
+
+Run、工具、模型、节点均通过执行拦截器接入 OTel。`RunLifecycleHook` 是独立的生命周期通知
+契约，不用于包裹 span；Hook 回调位于 run 中间件链之外。详见[扩展机制](extensions.md)。

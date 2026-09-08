@@ -1,0 +1,11 @@
+[package]
+name = "agent-tools-human"
+version.workspace = true
+edition.workspace = true
+description = "Structured user questions and default human interaction tools"
+
+[dependencies]
+agent-framework = { path = "../agent-framework" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
