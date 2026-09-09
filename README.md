@@ -3,7 +3,8 @@
 EliteForge Agent Framework 是一个可扩展的 Rust Agent 框架：Framework 负责装配、执行和生命周期管理，Plugin 提供模型、工具、存储和可观测能力，上层应用保留身份、权限和业务流程。
 
 所有插件只配置到 `AgentBuilder`，应用通过构建后的 `agent` 实例操作：启动、控制、获取输出、调用模型、处理问答和关闭资源。
-自定义插件通过 `agent.execute(request)` 暴露能力。依赖配置、完整入门示例和场景选择见[插件开发指南](docs/plugins.md)。
+业务能力可以用 `#[capability(...)]` 声明，再由应用显式选择能力包自动装配；复杂资源安装仍使用普通 Plugin。
+依赖配置、完整入门示例和场景选择见[插件开发指南](docs/plugins.md)。
 
 多个插件可以打成包，一次配置到 Agent：
 
@@ -17,7 +18,21 @@ let agent = AgentBuilder::new()
 ```
 
 官方包默认包含项目里的全部 6 个官方插件：Genai、SQLite、用户问答、AGUI、MCP 和 OTel。
-MCP 未配置服务器时工具集为空；OTel 在构建时读取宿主的全局 provider。业务组合可实现自己的 `PluginPack`。
+MCP 未配置服务器时工具集为空；OTel 在构建时读取上层应用的全局 provider。
+`PluginPack` 继续用于官方和兼容的插件组合。
+
+业务能力包使用另一套入口；只会装配显式选中的包及其 `.include(...)` 子包：
+
+~~~rust
+use eliteforge_agent_core::CapabilityPackBuilder;
+
+let agent = AgentBuilder::new()
+    .capability_pack(CapabilityPackBuilder::new("shop", shop_config))
+    .build()
+    .await?;
+~~~
+
+能力声明、配置工厂、共享实例和依赖规则见[能力包与自动装配](docs/capability-packs.md)。
 
 ```mermaid
 flowchart LR
@@ -53,20 +68,55 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 
 代理服务可额外设置 `MODEL_ENDPOINT` 和 `MODEL_API_KEY`。完整代码和其他模型协议见[快速上手](docs/quickstart.md)。
 
-## 能力概览
+## 支持的特性
 
-- 执行：默认 ReAct、分阶段 Workflow、可并行和分支的 DAG。
-- 扩展：模型、工具、MCP、用户问答、上下文、存储和 OpenTelemetry 均通过 Plugin 接入。
-- 运行控制：流式事件、追加指令、取消、工具撤销和资源清理。
-- 持久化：SQLite 会话、checkpoint、长期记忆、上下文摘要和中断恢复。
-- 宿主边界：身份、权限、凭据、套餐和业务流程由上层应用管理。
+| 分类 | 主流 Agent 常见特性 | 本框架状态 | 当前范围 |
+| --- | --- | --- | --- |
+| 运行 | ReAct 对话、流式输出与工具循环 | ✅ 已支持 | 文本与推理增量、工具错误回传、步骤和工具调用上限 |
+| 运行 | 阶段工作流与 DAG 编排 | ✅ 已支持 | 固定阶段、并行节点、条件分支、汇合、恢复和自定义节点 |
+| 模型 | 多供应商、多连接与模型选择 | ✅ 已支持 | 多连接选择；Chat Completions、Responses、原生 Gemini 与 Embedding |
+| 内容 | 多模态输入与结构化输出 | ✅ 已支持 | 文本、图片等内容块、结构化回复和大型结果引用 |
+| 工具 | 工具调用、Schema 校验与并发 | ✅ 已支持 | 调用前参数校验、显式安全的并发、撤销、取消和结果持久化 |
+| 工具 | 工作区文件、文本补丁、目录和代码搜索 | ✅ 已支持 | 可选工作区能力包提供 `fs_*` 与 `search_*` 工具；所有路径限制在上层应用配置的根目录内 |
+| 工具 | 系统命令执行（Linux、macOS、Windows） | ✅ 已支持 | 可选通用能力包提供 `system_exec`；能力包显式安装后可直接执行程序，也可按上层应用配置限制程序名；不隐式调用 Shell |
+| 工具 | 编辑器工具 | 🧩 可扩展 | 由上层应用的 `ToolProvider` 或 MCP Server 提供 |
+| 工具 | Web 搜索、抓取与浏览器自动化 | 🧩 可扩展 | 由上层应用工具或 MCP Server 接入 |
+| 安全 | 工具权限、审批与策略 | 🧩 可扩展 | `ToolPolicy`、中间件和用户审批可组合；具体权限模型由上层应用定义 |
+| 安全 | 沙箱执行 | 🏠 上层应用负责 | 框架传递取消、超时和策略；隔离运行环境由上层应用或工具实现 |
+| 规划 | Plan Mode / 只读计划 | 🧩 可扩展 | 通过自定义 `AgentLoop`、`ToolPolicy` 和工具暴露策略实现 |
+| 任务 | Todo、任务图与长期任务跟踪 | 🧩 可扩展 | 具备状态持久化、DAG 和恢复基础；未提供内置 Todo 或任务图产品模型 |
+| 上下文 | 上下文窗口、压缩与 token 预算 | ✅ 已支持 | 按块组装、模型容量检查、历史裁剪和模型摘要 |
+| 记忆 | 会话记忆、长期记忆与检索 | ✅ 已支持 | 可插拔接口、SQLite 后端、检索上下文和可选记忆工具 |
+| 连续性 | 会话持久化、checkpoint 与恢复 | ✅ 已支持 | 原子 checkpoint、恢复身份、工具结果日志和中断后续跑 |
+| 人机协作 | 用户问答与工具审批 | ✅ 已支持 | `AwaitInput`、持久化问题、允许/拒绝和跨进程恢复 |
+| 运行控制 | 追加指令、取消与子执行额度 | ✅ 已支持 | Steering、取消、父子执行身份和预算隔离 |
+| 集成 | MCP 工具与资源 | ✅ 已支持 | 官方 SDK transport、发现、分页、资源和取消传播 |
+| 集成 | AG-UI 事件协议 | ✅ 已支持 | SSE、文本、推理、工具、状态、活动和交互恢复事件 |
+| 扩展 | Plugin、PluginPack 与能力包 | ✅ 已支持 | 依赖排序、回滚、异步关闭、官方插件组合和 `#[capability]` 自动装配 |
+| 扩展 | Middleware、Hook 与自定义执行器 | ✅ 已支持 | Run、模型、工具、节点中间件；生命周期 Hook；自定义 `AgentLoop` |
+| 扩展 | Skills 系统 | — 未提供 | 可用 Plugin、CapabilityPack 或上层应用配置实现，尚无 Skills 发现与加载规范 |
+| 扩展 | 插件市场与在线安装 | — 未提供 | 当前提供 crate 与插件组合 API，未提供市场或安装器 |
+| 多 Agent | 子 Agent / 专家 Agent | 🧩 可扩展 | 具备父子执行和预算基础；Agent 定义、路由和注册表由上层应用实现 |
+| 多 Agent | 后台执行、队列与 Worktree 隔离 | 🏠 上层应用负责 | 需要部署队列、进程管理和 Git 工作树管理 |
+| 多 Agent | Agent Team 协作 | 🧩 可扩展 | 可用 DAG、子执行和事件接口编排；未提供内置团队协议 |
+| 产品接口 | 终端 UI、REPL、Slash Commands、Headless HTTP | 🏠 上层应用负责 | Framework 提供运行时和事件；UI、CLI、HTTP 与命令路由由上层应用构建 |
+| 产品接口 | 文件历史、Diff 与 Rewind | 🏠 上层应用负责 | 可作为工具或存储能力接入；框架不管理 Git 或工作区文件 |
+| 配置 | 项目级 / 用户级配置 Profile | 🏠 上层应用负责 | AgentBuilder 接收已解析配置；读取、合并和安全存储由上层应用负责 |
+| 可观测 | OpenTelemetry、事件与指标 | ✅ 已支持 | 运行、节点、模型和工具 span；指标、错误事件和可注入 exporter |
+
+各项的使用方式与约束见：[架构总览](docs/architecture.md)、
+[上下文窗口](docs/context-windows.md)、[DAG 工作流](docs/dag-workflows.md)、
+[交互与审批](docs/interactions.md)、[插件开发指南](docs/plugins.md)、
+[能力包](docs/capability-packs.md)、[AG-UI](docs/agui.md) 和
+[可观测](docs/observability.md)。
 
 ## 关键 Crate
 
 | Crate | 作用 |
 | --- | --- |
 | `eliteforge-agent-framework` | Agent 装配、循环调度、模型和工具执行 |
-| `eliteforge-agent-core` | 公共类型、能力接口和 Plugin 契约 |
+| `eliteforge-agent-core` | 公共类型、能力接口、CapabilityPack API 和 Plugin 契约 |
+| `eliteforge-agent-capability-tools` | 可选文件系统读写、搜索、文本修改，以及独立的通用跨平台系统命令能力包 |
 | `eliteforge-agent-plugin-kernel` | 服务注册、依赖排序和资源关闭 |
 | `eliteforge-agent-official-plugin-pack` | 官方插件组合，一次配置到 Agent |
 | `eliteforge-agent-official-plugin-*` | Genai、SQLite、MCP、AG-UI、OTel 等官方实现 |
@@ -76,7 +126,7 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 - [快速上手](docs/quickstart.md)：按场景运行 Agent，并查看完整 Rust 代码。
 - [架构总览](docs/architecture.md)：分层、装配、执行链和生命周期。
 - [插件与扩展开发指南](docs/plugins.md)：引入依赖、实现 Provider、按业务场景选择扩展点。
-- [能力包与自动装配设计](docs/capability-packs.md)：框架宏声明能力、应用显式选包、内部自动装配；尚未实现。
+- [能力包与自动装配](docs/capability-packs.md)：声明能力、显式选包、配置工厂和依赖规则。
 - [扩展点参考](docs/plugin-extension-reference.md)：接口、注册类型、调用时机与多实例规则。
 - [模型插件](docs/model-plugins.md)：Genai 配置、协议、模型选择与多模态扩展。
 - [DAG 工作流](docs/dag-workflows.md)：节点、并行、分支和恢复。

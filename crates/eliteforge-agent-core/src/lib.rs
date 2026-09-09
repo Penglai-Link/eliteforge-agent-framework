@@ -1,5 +1,6 @@
 //! Shared Agent contracts and portable registration/context primitives.
 pub mod budget;
+pub mod capability_packs;
 pub mod content;
 pub mod context;
 pub mod conversation;
@@ -18,6 +19,7 @@ pub mod state;
 pub mod tokens;
 pub mod types;
 pub mod workflow;
+pub use capability_packs::*;
 pub use content::*;
 pub use context::*;
 pub use conversation::*;
@@ -38,6 +40,15 @@ pub use state::*;
 pub use tokens::*;
 pub use types::*;
 pub use workflow::*;
+
+/// Internal implementation dependencies used by framework-generated code.
+/// Application code should use the public `#[capability]` macro instead.
+#[doc(hidden)]
+pub mod __private {
+    pub use inventory;
+}
+
+pub use eliteforge_agent_capability_macros::capability;
 
 mod capabilities;
 pub use capabilities::*;

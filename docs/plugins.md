@@ -3,20 +3,21 @@
 这篇指南回答三个问题：**业务能力实现哪个接口、项目需要什么依赖、写好的实现怎样在 Agent 中生效。**
 
 下面先介绍如何给客服 Agent 添加商店说明，再扩展到订单工具、执行拦截和应用主动查询。
-示例以文档中的代码片段展示。只想使用现成插件，可以直接阅读[插件包](#插件包)。
+示例以文档中的代码片段展示。只想使用现成官方插件，可以直接阅读[插件包](#插件包)。
 
-本文说明当前已经实现的 API。“用框架宏声明能力、显式选包后自动装配”的目标和接口草案，
-单独记录在[能力包与自动装配设计](capability-packs.md)，尚未替换当前的 `PluginPack` 接口。
+普通业务能力优先使用 `#[capability(...)]` + `CapabilityPack` 声明并自动装配。
+`Plugin` 和 `PluginPack` 仍是完整、兼容的 API：前者处理复杂安装和生命周期，后者继续组合官方插件或已有插件。
 
 ## 阅读路线
 
 | 你现在要做什么 | 从哪里开始 |
 |---|---|
-| 第一次添加业务能力，不知道从哪里开始 | [引入依赖](#引入依赖) → [提供系统上下文](#提供系统上下文) |
+| 第一次添加业务能力，不知道从哪里开始 | [引入依赖](#引入依赖) → [用能力包提供系统上下文](#用能力包提供系统上下文) |
 | 不明白 Provider、Plugin 和插件包的关系 | [基本概念](#基本概念) |
 | 知道业务需求，不知道该实现哪个接口 | [按场景选择扩展点](#按场景选择扩展点) |
 | 想理解插件怎样注册、生效和关闭 | [基本概念](#基本概念) → [依赖与生命周期](#依赖与生命周期) |
-| 想一次配置官方插件或自己的组合 | [插件包](#插件包) |
+| 想一次配置业务能力、官方插件或已有组合 | [能力包](#能力包) → [插件包](#插件包) |
+| 想启用框架提供的文件、搜索、补丁或系统命令工具 | [能力包](#能力包) → [工作区工具能力包](capability-packs.md#框架提供的工作区工具能力包) |
 | 想知道多个 Provider 怎样进入 Agent | [构建时如何收集能力](#构建时如何收集能力) |
 | 想判断多个插件能不能共存 | [多个插件与配置替换](#多个插件与配置替换) |
 | 已选好接口，需要核对注册类型和调用时机 | [扩展点参考](plugin-extension-reference.md) |
@@ -24,33 +25,31 @@
 
 ## 基本概念
 
-**提供系统上下文，只需要实现 `ContextProvider` 中的业务方法。**
-这个实现负责生成指令；应用再把它配置给 Agent，框架才会在准备模型输入时调用它。
-
-当前 API 使用 `ContextPlugin::new(id, provider)` 完成这一步配置。
-`ContextPlugin` 是现成的注册封装，**它没有额外的上下文业务能力**：指令内容来自传入的 Provider。
-应用不需要为了添加一个 Provider，再手写一个 `Plugin` 实现。
+**提供系统上下文，先实现 `ContextProvider` 中的业务方法。**
+普通业务实现再用 `#[capability(...)]` 标记，应用选择包后框架会在准备模型输入时调用它。
+`ContextPlugin::new(id, provider)` 仍可手工注册；它是兼容的注册封装，不会额外生成上下文业务逻辑。
 
 | 概念 | 作用 | 示例 |
 |---|---|---|
 | 能力接口 | 定义一个业务扩展点，由框架在对应时机调用 | `ContextProvider` 提供系统或开发者指令 |
 | 能力实现 | 保存业务配置，实现接口中的方法 | `ShopContext` 生成商店说明 |
-| 注册封装 | 将一个能力实现接入现有插件安装流程 | `ContextPlugin` 注册传入的 Provider |
+| `CapabilityPack` | 选择一组宏声明的业务能力，并为当前 Agent 提供配置 | Shop、订单、审计等业务能力 |
+| 注册封装 | 手工将一个能力实现接入 Plugin 安装流程 | `ContextPlugin` 注册传入的 Provider |
 | `Plugin` | 定义安装过程，可创建资源、解析依赖并注册多种能力 | `OrdersPlugin` 注册订单服务和查询工具 |
-| `PluginPack` | 组合一组安装配置，供应用一次引入 | 官方插件，或包装了业务 Provider 的注册封装 |
+| `PluginPack` | 组合已有 Plugin 安装配置，供应用一次引入 | 官方插件，或兼容的业务注册封装 |
 
-应用通过 `AgentBuilder` 的 `.plugin(...)` 或 `.plugin_pack(...)` 配置插件，
-在 `build().await` 时安装插件。运行和关闭等操作统一通过 Agent 实例完成。
-添加 Cargo 依赖只让代码可引用，**还需要注册，插件才会生效**。
-Provider 本身不要求实现 `Plugin`。简单能力使用现成的注册封装；需要组织安装过程时，
-再阅读[什么时候需要自己实现 Plugin](#什么时候需要自己实现-plugin)。
+应用通过 `AgentBuilder` 的 `.capability_pack(...)`、`.plugin(...)` 或
+`.plugin_pack(...)` 配置能力；`build().await` 才创建实例并安装插件。运行和关闭等操作统一由
+Agent 实例完成。添加 Cargo 依赖只让宏声明可发现，**只有选中能力包或手工注册 Plugin 才会生效**。
+Provider 本身不要求实现 `Plugin`。简单业务能力使用能力包；需要组织复杂安装过程时，再阅读
+[什么时候需要自己实现 Plugin](#什么时候需要自己实现-plugin)。
 
 ```text
-ShopContext                    生成商店说明
-    ↓ 交给
-ContextPlugin                  保存 ID 和 Provider，安装时注册
-    ↓ 配置到 AgentBuilder
-build().await                  安装并汇总上下文实现
+ShopContext + #[capability]    声明业务能力和包归属
+    ↓ 应用选择
+CapabilityPackBuilder          保存当前 Agent 配置和显式子包
+    ↓ build().await
+预校验 → factory → Plugin      创建、适配并安装上下文实现
     ↓
 agent.run(request)             准备模型输入时调用 ShopContext::context
 ```
@@ -110,7 +109,8 @@ serde_json = "1"
 tokio-util = { version = "0.7", features = ["rt"] }
 ```
 
-- `eliteforge-agent-core`：`Plugin`、`PluginContext`、各种扩展接口及注册类型。插件作者的主要依赖。
+- `eliteforge-agent-core`：`capability`、`CapabilityPackBuilder`、`Plugin`、`PluginContext`、
+  各种扩展接口及注册类型。插件作者的主要依赖。
 - `async-trait`：用于示例中的异步接口实现。
 - `serde_json`：订单工具的参数和 JSON Schema；只写商店指令插件时可以不引入。
 - `tokio-util`：主动查询接口接收 `CancellationToken`；没有这类操作时可以不引入。
@@ -142,7 +142,80 @@ AGUI、MCP 和遥测。`tokio` 提供异步运行时。
 
 Cargo 包名里的 `-` 在 Rust 的 `use` 路径里写成 `_`，例如 `shop-plugin` 对应 `shop_plugin`。
 
-## 提供系统上下文
+## 用能力包提供系统上下文
+
+目标：让模型收到“你是星河商店的客服，请使用中文回答”。业务 crate 声明能力，应用不再逐项调用
+`ContextPlugin::new(...)`。
+
+将下面实现放到 `shop-plugin/src/lib.rs`：
+
+~~~rust
+use async_trait::async_trait;
+use eliteforge_agent_core::{
+    capability, AgentError, ContextProvider, Message, RunContext,
+};
+
+pub struct ShopConfig {
+    pub name: String,
+}
+
+pub struct ShopContext {
+    name: String,
+}
+
+impl ShopContext {
+    pub fn from_config(config: &ShopConfig) -> Self {
+        Self {
+            name: config.name.clone(),
+        }
+    }
+}
+
+#[capability(
+    pack = "shop",
+    config = ShopConfig,
+    factory = ShopContext::from_config
+)]
+#[async_trait]
+impl ContextProvider for ShopContext {
+    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
+        Ok(vec![Message::system(format!(
+            "你是{}的客服，请使用中文回答。",
+            self.name
+        ))])
+    }
+}
+~~~
+
+应用选择包并提供当前 Agent 的配置：
+
+~~~rust
+use eliteforge_agent_core::CapabilityPackBuilder;
+use eliteforge_agent_framework::AgentBuilder;
+use shop_plugin::ShopConfig;
+
+let agent = AgentBuilder::new()
+    .capability_pack(CapabilityPackBuilder::new(
+        "shop",
+        ShopConfig {
+            name: "星河商店".into(),
+        },
+    ))
+    .build()
+    .await?;
+~~~
+
+上例省略了 `id` 和 `instance`；同一类型实现多个 trait 时按包和实际 Rust 类型身份复用该
+实例，支持跨模块实现和类型别名。需要跨能力排序、命名或创建多份同类型对象时，再显式写 `depends_on`、`id` 和
+`instance`。配置型 factory 必须是 `fn(&ShopConfig) -> ShopContext`；同步 factory 之外的
+连接建立或服务解析应留在普通 Plugin。
+
+包必须显式选择。即使应用也链接了 Payment crate，只要没有
+`.capability_pack(CapabilityPackBuilder::new("payment", ...))`，Payment 的 factory 不会执行。
+子包使用 `.include(...)` 加入。完整字段、共享实例、依赖和首版边界见
+[能力包与自动装配](capability-packs.md)。
+
+## 手工注册 Provider（兼容入口）
 
 目标：让模型收到“你是星河商店的客服，请使用中文回答”这条系统指令。
 下面先写 Provider，再把它配置给 Agent。这个场景不需要自己实现 `Plugin`。
@@ -213,7 +286,8 @@ let agent = AgentBuilder::new()
 片段位于异步函数中，模型配置见[默认模型装配](model-plugins.md#默认装配)。
 应用使用 `agent.run(...)` 发起运行，结束使用后调用 `agent.close().await` 关闭资源，错误路径也应执行关闭逻辑。
 
-如果多个应用需要同一组能力，可以由包作者统一声明，应用只引入一个包，见[仅组合 Provider 的包](#仅组合-provider-的包)。
+多个应用需要按配置自动装配同一组业务能力时，使用上面的 `CapabilityPack` 声明。
+若只是复用已经创建好的 Provider，再使用兼容的[仅组合 Provider 的插件包](#仅组合-provider-的包)。
 
 ### ContextPlugin 具体做了什么
 
@@ -239,16 +313,18 @@ context.contribute(ContextService(self.implementation.clone()))
 ## 什么时候需要自己实现 Plugin
 
 当安装过程需要解析其他服务、异步建立连接、注册多种相关能力或登记关闭回调时，再实现 `Plugin`。
-给 Provider 传入名称、规则等普通配置，使用上一节的注册封装即可。
+给业务 Provider 传入名称、规则等普通配置，优先使用上一节的能力包；已有对象的手工注册仍可使用
+`ContextPlugin` 等封装。
 
 例如，一个订单插件可以在 `install` 中创建订单服务，同时注册模型查询工具和应用主动查询入口。
 完整注册过程见[订单工具](#提供模型可调用的工具)，依赖及资源规则见[依赖与生命周期](#依赖与生命周期)。
 
 | 你要做什么 | 需要编写什么 |
 |---|---|
-| 添加系统上下文 | `ContextProvider` 实现；使用 `ContextPlugin` 注册 |
+| 添加按配置创建的业务上下文 | `ContextProvider` impl + `#[capability]`；应用选择 `CapabilityPack` |
+| 手工添加已有系统上下文 | `ContextProvider` 实现；使用 `ContextPlugin` 注册 |
 | 添加一段固定指令 | 使用 `FixedContext` 和 `ContextPlugin` |
-| 复用一组已经创建好的 Provider | 用注册封装组成 `PluginPack`，应用只安装包 |
+| 复用一组已经创建好的 Provider | 用注册封装组成兼容的 `PluginPack`，应用只安装包 |
 | 安装时创建并管理业务资源 | `Plugin::install`，并登记适用的关闭回调 |
 | 一次安装工具、上下文等多种能力 | 自定义 `Plugin`，或将独立注册配置组成包 |
 
@@ -258,7 +334,7 @@ context.contribute(ContextService(self.implementation.clone()))
 
 | 业务场景 | 首先关注的扩展点 | 下一步 |
 |---|---|---|
-| 添加角色、系统规则或开发者指令 | `ContextProvider` | 已在[入门示例](#提供系统上下文)中实现 |
+| 添加角色、系统规则或开发者指令 | `ContextProvider` | 已在[入门示例](#用能力包提供系统上下文)中实现 |
 | 每次调用模型前检索知识、记忆或业务数据 | `ContextContributor` + `ContextLayout` | [加入检索结果](#加入检索结果) |
 | 让模型决定什么时候查订单、调接口 | `Tool`，必要时再实现 `ToolProvider` | [提供模型可调用的工具](#提供模型可调用的工具) |
 | 工具执行前拒绝操作或要求审批 | `ToolPolicy` | [权限与人工交互](#权限与人工交互) |
@@ -490,7 +566,7 @@ A 前置 → B 前置 → 业务执行 → B 后置 → A 后置
 得到恢复请求 → agent.run(resume_request)
 ```
 
-应用用户身份及外部业务授权仍由宿主处理。使用自定义 `AgentLoop` 时，它还必须声明并实现工具策略执行能力。
+应用用户身份及外部业务授权仍由上层应用处理。使用自定义 `AgentLoop` 时，它还必须声明并实现工具策略执行能力。
 完整提问、审批与跨进程恢复代码见[用户交互](interactions.md)。
 
 ### 接收通知与输出
@@ -554,7 +630,7 @@ let status = agent.execute(FindOrder { order_id: "A100".into() }).await?;
 
 默认要求服务唯一；多个候选服务时，实现 `select` 按请求中的名字或其他明确规则选择。
 Agent 负责准入、取消和关闭顺序。该调用不会经过模型工具的 `ToolPolicy`/`ToolMiddleware` 链；
-需要业务鉴权时，由宿主或该操作实现负责。
+需要业务鉴权时，由上层应用或该操作实现负责。
 取消 token 的生命周期覆盖本次调用，返回、调用方丢弃 future 或 Agent 关闭时都会取消。
 
 ### 接入模型
@@ -600,16 +676,47 @@ Embedding、重排序、图片、视频、语音和实时会话各有独立接�
 这是高级扩展；循环需要自己遵守取消、持久化和工具执行契约。
 完整 DAG 示例与恢复规则见[DAG 工作流](dag-workflows.md)。
 
+## 能力包
+
+`CapabilityPack` 是业务能力的自动装配入口。业务 crate 在 trait `impl` 上使用
+`#[capability(...)]`；应用通过 `.capability_pack(...)` 选择包和配置。描述会跨已链接 crate
+收集，但只有根包和 `.include(...)` 明确加入的子包会实例化。
+
+~~~rust
+use eliteforge_agent_core::CapabilityPackBuilder;
+
+let pack = CapabilityPackBuilder::new("shop", shop_config)
+    .include(CapabilityPackBuilder::new("shop.audit", audit_config));
+
+let agent = AgentBuilder::new()
+    .capability_pack(pack)
+    .build()
+    .await?;
+~~~
+
+`build()` 先预校验能力 ID、依赖、环和共享实例声明，再按稳定拓扑顺序调用同步 factory。
+同一 `instance` 的多接口声明共享业务对象；不同 Agent 各自创建和关闭实例。未选包的 factory
+不会运行。首版不支持异步/依赖服务 factory、成员开关和官方包迁移。
+
+这不是 `PluginPack` 的新名字。能力包解决“发现什么业务能力、何时按哪个配置创建”的问题；
+普通 Plugin 仍解决复杂安装和资源生命周期。完整宏字段和错误边界见
+[能力包与自动装配](capability-packs.md)。
+
+框架已经提供可选的文件系统工具能力包，以及独立的通用系统命令能力包；它们不携带平台、空间或
+业务资源语义。目录范围、可选程序限制、跨平台调用方式和安全边界见
+[文件系统与系统工具能力包](capability-packs.md#框架提供的文件系统与系统工具能力包)。
+
 ## 插件包
 
-当前 `PluginPack` 接口返回 `Vec<Arc<dyn Plugin>>`，用于组合安装配置。
+`PluginPack` 接口返回 `Vec<Arc<dyn Plugin>>`，用于组合已有安装配置。它保持兼容，官方插件包
+继续使用它；不要把 `PluginPack` 当作自动发现的 `CapabilityPack`。
 包内可以全部是 Provider 的注册封装，也可以包含管理连接的插件，包作者不必为每个 Provider 自己实现 `Plugin`。
 应用只调用 `.plugin_pack(pack)`，包内成员会随 `build()` 一起安装。
 
 ### 仅组合 Provider 的包
 
 下面这个业务包只提供两项上下文能力。`ShopContext` 和 `FixedContext` 都是 Provider 实现，
-包作者用当前 API 所需的 `ContextPlugin` 完成注册声明：
+包作者用兼容 API 所需的 `ContextPlugin` 完成注册声明：
 
 ```rust
 use eliteforge_agent_core::{ContextPlugin, FixedContext, Plugin, PluginPack, PluginPackBuilder};
@@ -646,10 +753,10 @@ impl PluginPack for ShopContextPack {
 | 用户问答 | 注册 `ask_user` 工具 | `.human_interaction(false)` 可关闭 |
 | AGUI | 每次运行准备 AGUI 输出 | `.agui(plugin)` 修改配置；`.without_agui()` 可关闭 |
 | MCP | 注册 ID 为 `tools.mcp` 的空工具源 | `.mcp(plugin)` 配置服务器；未配置时查询返回空列表 |
-| OTel | 构建时读取宿主全局 tracer/meter provider | `.telemetry(plugin)` 替换默认 provider；没有 exporter 时不导出 |
+| OTel | 构建时读取上层应用全局 tracer/meter provider | `.telemetry(plugin)` 替换默认 provider；没有 exporter 时不导出 |
 
 `model`、`storage`、`human`、`agui`、`mcp`、`telemetry` 模块从官方包重新导出相应插件类型。
-具体配置例子见[快速上手](quickstart.md#使用插件包)；模型环境变量见[模型插件](model-plugins.md#默认装配)。
+具体配置例子见[快速上手](quickstart.md#使用官方插件包)；模型环境变量见[模型插件](model-plugins.md#默认装配)。
 `.without_model()` 只移除包内模型；Framework 的自动补充开关仍由 `.default_models(false)` 控制。
 
 ### 组合多种能力
@@ -680,40 +787,41 @@ impl PluginPack for ShopPluginPack {
 
 ## 构建时如何收集能力
 
-**当前框架会汇总已经注册的 Provider。** 它按服务注册类型查找实现，
-不是逐个检查任意对象实现了哪些 trait。
+框架不会扫描任意对象实现了哪些 trait。它收集两种明确来源：宏登记并被选中能力包激活的描述，
+以及手工安装的 Plugin 注册的服务。
 
-```text
-应用配置一个包
-    ↓
-展开包中的安装配置
-    ↓
-build() 按依赖顺序安装
-    ├─ shop.context → ContextService(ShopContext)
-    └─ shop.rules   → ContextService(FixedContext)
-    ↓
-从同一个容器收集全部 ContextService
-    ↓
-形成 Agent 的 ContextProvider 列表
-    ↓
-每轮准备模型输入时调用这些 Provider
-```
+~~~text
+#[capability] trait impl                    ContextPlugin / 自定义 Plugin
+             │                                          │
+             ▼                                          ▼
+静态 CapabilityDescriptor                     install 时注册服务
+             │                                          │
+capability_pack + include 筛选                 plugin / plugin_pack 配置
+             │                                          │
+预校验 → factory → 适配 Plugin ────────────────┘
+                         │
+                         ▼
+                 PluginContainer 安装
+                         │
+                         ▼
+all::<ContextService>() → Agent 的 ContextProvider 列表
+~~~
 
-`AgentBuilder::build` 使用 `all::<ContextService>()` 取得列表，再取出其中的 Provider。
-工具来源和事件监听也按各自的服务类型汇总。多个上下文实现按安装及注册顺序保留；
-实际消息还会经过上下文布局和预算处理。
-
-当前行为的边界：
+`AgentBuilder::build` 使用 `all::<ContextService>()` 取得上下文列表；工具来源、事件监听和
+其他多贡献接口也按各自服务类型汇总。能力描述的处理顺序按依赖和稳定 ID 决定；手工 Plugin 的
+安装顺序仍由其依赖图决定。实际消息还会经过上下文布局和预算处理。
 
 | 操作 | 是否会加入 Agent 的上下文来源 |
 |---|---|
-| 在依赖 crate 中编写 `impl ContextProvider` | 不会，还没有声明使用哪个实例 |
-| 把 Provider 交给 `ContextPlugin`，再直接或通过包安装 | 会 |
-| 在自定义插件中调用 `contribute(ContextService(...))` | 会 |
+| 仅在依赖 crate 中写 `impl ContextProvider` | 不会 |
+| 标记 `#[capability]`，但不选择对应包 | 不会，factory 也不运行 |
+| 标记 `#[capability]` 并选择对应 `CapabilityPack` | 会 |
+| 把 Provider 交给 `ContextPlugin`，再直接或通过 `PluginPack` 安装 | 会 |
+| 在自定义 Plugin 中调用 `contribute(ContextService(...))` | 会 |
 | 仅把业务对象作为自身类型注册 | 不会，业务对象类型与 `ContextService` 是不同注册键 |
 
-应用通过包安装全部成员的行为已经存在；目标方案使用 `#[capability(...)]` 声明包归属，
-由框架自动收集并注册所选包的能力。业务侧无需直接操作发现库，见[能力包自动装配](capability-packs.md)。
+业务侧不需要直接操作发现库。能力包的选择、实例化、共享和错误边界见
+[能力包与自动装配](capability-packs.md)。
 
 ## 多个插件与配置替换
 
@@ -770,11 +878,20 @@ let catalog = context.services()
 如果你希望支持多种供应商插件，不要把依赖 ID 写死为某个厂商；将依赖 ID 做成插件配置，
 并始终对所需服务类型进行检查。缺失依赖或依赖环会在任何插件安装前失败。
 
+能力声明使用 `depends_on = ["..."]` 表达同样的安装前后关系。它可以依赖已选能力或应用显式
+配置的普通 Plugin，但不会自动选择另一个能力包；框架保留的内部 ID 也不能作为能力依赖。
+静态能力 ID、缺失依赖和依赖环都会在调用 capability factory 前失败；预检包含应用传入的
+普通插件依赖边。自动创建的 Plugin 自身的动态 `dependencies()` 只能在构造后读取，
+需要提前校验的依赖应写入宏的 `depends_on`。
+
 ### 资源在哪创建、在哪关闭
 
 | 时机 | 该做什么 |
 |---|---|
-| `new`、各配置方法 | 保存配置，校验同步参数 |
+| `#[capability]` | 只登记静态描述；不创建对象、连接或后台任务 |
+| `CapabilityPackBuilder::new / include` | 保存当前 Agent 配置和显式子包；不调用 factory |
+| 能力包解析 | 先预校验，再按稳定依赖顺序调用同步 factory 并适配为 Plugin |
+| `new`、各配置方法 | 保存普通 Plugin 配置，校验同步参数 |
 | `PluginPack::into_plugins` | 组合插件配置 |
 | `Plugin::install` | 创建连接或后台任务，立即注册清理回调，再注册服务 |
 | 扩展点回调 | 执行业务，遵守传入的取消信号和限额 |
@@ -795,8 +912,9 @@ let catalog = context.services()
 
 | 现象 | 原因与处理 |
 |---|---|
-| 只引入依赖，能力没有生效 | 还没有调用 `.plugin(...)` 或 `.plugin_pack(...)` 注册 |
-| 实现了接口，框架仍没调用 | 核对是否注册到该扩展点要求的 `...Service`，以及调用场景是否会触发它 |
+| 只引入依赖，能力没有生效 | 还没有选择 `.capability_pack(...)`，或没有调用 `.plugin(...)` / `.plugin_pack(...)` 注册 |
+| 实现了接口，框架仍没调用 | 能力包路径核对 trait impl 是否标记 `#[capability]` 且包已选中；手工路径核对是否注册到该扩展点要求的 `...Service` |
+| 未选的业务包仍创建了资源 | factory、连接或后台任务写进了静态注册/构造路径；factory 只接收配置，资源初始化移到 Plugin 安装期 |
 | 加上第二个存储插件就构建失败 | 重复插件 ID 或唯一存储角色冲突；修改现有配置，或重新组合存储插件 |
 | 明明有插件，`get<T>()` 仍返回空 | 具体注册类型不匹配，或该类型使用了 `contribute`，应在插件内部用 `all<T>()` |
 | 自定义上下文来源构建失败 | `ContextContributor` 还需要完整的 `ContextLayout`，包括每个来源的 ID 和配额 |

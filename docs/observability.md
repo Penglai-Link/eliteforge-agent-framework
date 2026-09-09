@@ -1,14 +1,14 @@
 # 节点观测与恢复身份
 
 Framework 定义执行中间件、身份和结构化错误契约；`eliteforge-agent-official-plugin-otel` 将这些契约转换为
-OpenTelemetry span、事件和指标。宿主配置 tracer/meter provider、exporter、采样、存储和查询界面。
+OpenTelemetry span、事件和指标。上层应用配置 tracer/meter provider、exporter、采样、存储和查询界面。
 Framework 本身不依赖 OpenTelemetry 或 SQLite。
 
 ## 装配与链路
 
 `EliteForgeOfficialPluginPack` 已默认安装 `TelemetryPlugin::default()`。它在 `build().await` 时
-读取宿主的全局 tracer/meter provider；宿主应在 build 前配置 provider 和 exporter。
-没有 exporter 时不导出数据。插件不会修改全局 provider，`agent.close()` 也不会关闭宿主的 provider。
+读取上层应用的全局 tracer/meter provider；上层应用应在 build 前配置 provider 和 exporter。
+没有 exporter 时不导出数据。插件不会修改全局 provider，`agent.close()` 也不会关闭上层应用的 provider。
 使用独立 provider 时，在官方包上调用 `.telemetry(TelemetryPlugin::new(...)?)` 替换默认遥测。
 
 先安装 `TelemetryPlugin`，再安装其他执行中间件，让观测包装器看到内层执行和收尾的结果：
@@ -37,7 +37,7 @@ agent.run                     一次启动或恢复执行
 纯路由或转换节点同样有 node span；没有模型调用就没有 model span。
 普通 `ReactLoop` 和旧 `WorkflowLoop` 没有 DAG 节点，因此模型和工具仍直接归属 `agent.run`。
 通过 DAG 内置 `framework.react` 执行 ReAct 时使用图中的节点层级。
-宿主可在请求 extensions 中传入 `TraceParent`，让 `agent.run` 归属现有请求链路。
+上层应用可在请求 extensions 中传入 `TraceParent`，让 `agent.run` 归属现有请求链路。
 
 节点包装器通过克隆后的 RunContext 显式传递父 span，并只在 future 被 poll 时附加 OTel
 context。跨 Tokio 任务的模型和工具定位不依赖线程本地状态，也不依赖异步事件消费。
@@ -119,7 +119,7 @@ impl WorkflowNodeMiddleware for MyNodeMiddleware {
 截断为最多 2048 UTF-8 字节；脱敏器 panic 时省略正文。`truncated` 表示报告有截断。
 不采集提示词、认证数据、完整请求或堆栈作为额外字段。
 
-宿主通过 `TelemetryPlugin::with_error_redactor(Arc<dyn ErrorRedactor>)` 允许经过处理的文本。
+上层应用通过 `TelemetryPlugin::with_error_redactor(Arc<dyn ErrorRedactor>)` 允许经过处理的文本。
 脱敏器能看到原始错误文本，应采用业务认可的允许列表或脱敏规则；返回 None 表示不导出。
 该回调同步执行，不应进行 IO 或阻塞等待。报告大小限制在回调返回后生效。
 
@@ -127,10 +127,10 @@ impl WorkflowNodeMiddleware for MyNodeMiddleware {
 `agent.error.report`，天然带 trace/span ID；span 属性带执行身份。运行、节点、模型和工具均
 支持该报告。模型重试中途失败、工具返回 `is_error` 也会记录，即使外层运行最终成功。
 清理失败可以作为错误事件附着在 cancelled run 上，不会将取消重新归类为普通失败。
-这是一份关联到 trace 的错误事件；独立日志系统的转发和存储仍由宿主提供。
+这是一份关联到 trace 的错误事件；独立日志系统的转发和存储仍由上层应用提供。
 
 脱敏只作用于结构化导出报告。调用者收到的类型化 AgentError、原有 RunFailed 事件及
-检查点中的节点 error 文本保留执行语义；宿主如要对外展示这些原始数据，需要另行应用
+检查点中的节点 error 文本保留执行语义；上层应用如要对外展示这些原始数据，需要另行应用
 同一脱敏策略。启用 `record_identifiers` 仅允许导出工作流、节点、模型、阶段及工具名称，
 不会自动允许错误正文。UUID 身份默认导出，仅作为 span 属性，不用作指标标签。
 

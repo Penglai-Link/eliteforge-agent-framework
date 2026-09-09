@@ -114,6 +114,7 @@ impl AgentError {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Plugin(_) => "plugin",
+            Self::Capability(_) => "capability",
             Self::MissingService(_) => "missing_service",
             Self::InvalidConfiguration(_) => "configuration",
             Self::Closed => "closed",

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex, atomic::AtomicU64},
 };
 
@@ -12,12 +12,14 @@ use crate::*;
 
 pub struct AgentBuilder {
     plugins: Vec<Arc<dyn Plugin>>,
+    capability_packs: Vec<Arc<dyn CapabilityPack>>,
     default_models: bool,
 }
 impl Default for AgentBuilder {
     fn default() -> Self {
         Self {
             plugins: Vec::new(),
+            capability_packs: Vec::new(),
             default_models: true,
         }
     }
@@ -40,6 +42,12 @@ impl AgentBuilder {
         self
     }
 
+    /// Select a configured capability pack for this Agent's dependency graph.
+    pub fn capability_pack(mut self, pack: impl CapabilityPack + 'static) -> Self {
+        self.capability_packs.push(Arc::new(pack));
+        self
+    }
+
     /// Add a group of configured plugins to this Agent's dependency graph.
     /// Duplicate IDs and dependency errors are reported by `build`, before installation.
     pub fn plugin_pack(mut self, pack: impl PluginPack) -> Self {
@@ -48,6 +56,33 @@ impl AgentBuilder {
     }
 
     pub async fn build(mut self) -> Result<Agent, AgentError> {
+        let mut occupied_plugin_ids = HashSet::with_capacity(self.plugins.len() + 1);
+        for (index, plugin) in self.plugins.iter().enumerate() {
+            let id = plugin.id().to_owned();
+            if id.trim().is_empty() {
+                return Err(PluginError::EmptyPluginId { index }.into());
+            }
+            if !occupied_plugin_ids.insert(id.clone()) {
+                return Err(PluginError::DuplicatePluginId { id }.into());
+            }
+        }
+        // DefaultsPlugin joins the same graph below. Its ID must be reserved
+        // before capability factories run, but cannot satisfy a capability
+        // dependency because DefaultsPlugin is ordered after all capabilities.
+        let defaults_plugin_id = "builtin.framework-defaults".to_owned();
+        if occupied_plugin_ids.contains(&defaults_plugin_id) {
+            return Err(PluginError::DuplicatePluginId {
+                id: defaults_plugin_id,
+            }
+            .into());
+        }
+        let reserved_plugin_ids = HashSet::from([defaults_plugin_id]);
+        let capability_plugins = resolve_capability_packs_with_plugins(
+            &self.capability_packs,
+            &self.plugins,
+            &reserved_plugin_ids,
+        )?;
+        self.plugins.extend(capability_plugins);
         let after = self.plugins.iter().map(|p| p.id().to_owned()).collect();
         self.plugins.push(Arc::new(crate::plugins::DefaultsPlugin {
             after,

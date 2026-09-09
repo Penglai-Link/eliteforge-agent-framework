@@ -1,251 +1,274 @@
-# 能力包与自动装配设计
+# 能力包与自动装配
 
-状态：设计方案，尚未接入框架。当前可用 API 见[插件与扩展开发指南](plugins.md)。
-本文中的 `CapabilityPack`、`capability_pack` 和 `#[capability(...)]` 都是拟议接口。
+能力包首版已经可用。它把“业务能力的静态声明”和“某个 Agent 的业务实例”分开：
+业务 crate 用 `#[capability(...)]` 声明能力，应用显式选择 `CapabilityPack`，`build()`
+才为这个 Agent 创建对象并接入运行时。
 
-目标是：**业务开发者实现能力并声明包归属；应用显式选择能力包；框架自动装配选中包内的能力。**
-发现机制使用开源库，业务侧通过框架宏声明能力，无需理解底层注册表。
+`CapabilityPack` 不是 `PluginPack` 的改名。前者用于自动发现和按配置创建业务能力；
+后者仍用于把已有 `Plugin` 组合成一个安装集合，官方插件包继续使用后者。两套 API 可以同时配置到同一个 Agent。
 
-## 应用只安装包
+## 最小用法
 
-能力包把一组可以直接使用的业务能力交给 Agent。包内可以只有 Provider，也可以包含工具、
-中间件、事件监听或需要初始化资源的插件。应用安装包后，`build()` 自动接入包内全部已声明且启用的能力。
+业务 crate 通过 `eliteforge-agent-core` 获取能力包 API。将属性标在具体的 trait `impl` 上，
+而不是结构体上；宏据此生成静态描述和接口适配代码。与 `async_trait` 一起使用时，
+`#[capability]` 放在外层。
 
-应用侧的目标写法是：
-
-```rust
-// 拟议 API：各包接收自己的配置，并在包内声明所需的子包。
-let agent = AgentBuilder::new()
-    .capability_pack(ShopCapabilityPack::new(config))
-    .capability_pack(ObservabilityCapabilityPack::new())
-    .build().await?;
-```
-
-应用负责选择包并传入配置；包作者负责提供业务实现及其创建方式。
-应用无需枚举包里的 Provider，也无需调用 `ContextPlugin::new(...)` 或重复写 `.plugin(...)`。
-运行、输出、问答、存储和关闭等操作继续由 Agent 实例发起。
-
-**Cargo 依赖存在，只表示能力声明可以被链接和发现；只有选中的包才会启用。**
-例如，应用同时依赖 Shop 和 Payment 两个包，但只安装 Shop：
-
-```text
-发现的声明                     当前 Agent 的选择
-shop.context                         │
-shop.orders                    capability_pack(ShopCapabilityPack)
-shop.audit                           │
-payment.context                      ▼
-payment.tools                  按 shop 筛选
-                                     │
-                                     ▼
-                               创建并装配 Shop 能力
-```
-
-Payment 的业务工厂、插件安装和后台任务都不会执行。子包必须由已选包显式声明；
-能力依赖用于校验和排序，不会让所有可发现的包自动启用。
-
-## 为什么叫能力包
-
-| 概念 | 职责 |
-|---|---|
-| 能力接口 | 描述运行时行为，例如 Provider、Middleware、Policy 和 `EventSink` |
-| 能力实现 | 提供具体行为，例如 `ShopContext` 返回商店说明 |
-| 能力包 | 声明包含哪些能力、所需配置和依赖，供应用一次安装 |
-| 插件 | 处理需要自定义的安装过程，例如建立连接、注册多项服务和登记关闭回调 |
-
-`CapabilityPack` 表示一组可以安装到 Agent 的能力声明，公共契约不要求返回 `Vec<Plugin>`。
-包可以全部由 Provider 实现组成，包作者无需为其手写 `Plugin`。
-
-```text
-ShopCapabilityPack
-├─ ContextProvider
-├─ ToolProvider
-├─ ContextContributor
-├─ RunMiddleware
-├─ ToolPolicy
-├─ EventSink                 事件监听
-└─ Plugin                    复杂安装与资源生命周期
-```
-
-事件监听沿用框架现有的 `EventSink` 接口。`Plugin` 是其中一种高级安装方式；
-`ContextPlugin`、`ToolProviderPlugin` 等简单注册适配器逐步退到框架内部。
-
-改名需要和直接声明能力、自动装配一起实现；仅替换 `PluginPack` 的名称不会改变开发体验。
-
-## 自动装配包含哪些步骤
-
-```text
-业务实现 Provider / Policy / Middleware / Plugin
-                      ↓
-#[capability(...)] 声明包归属和必要的创建配置
-                      ↓
-框架宏生成内部能力描述及 inventory 注册代码
-                      ↓
-开源注册库收集链接进应用的能力声明
-                      ↓
-应用选择能力包并传入配置
-                      ↓
-build() 筛选所选包及其显式组合的子包
-                      ↓
-校验声明、排序依赖、创建实例和安装资源
-                      ↓
-按能力接口汇总并装配
-  ├─ ContextProvider 列表 → 模型输入准备
-  ├─ ToolProvider 列表    → 工具执行器
-  └─ EventSink 列表       → 事件分发
-```
-
-能力声明只保存元数据和工厂函数。Provider 实例、连接和后台任务在当前 Agent 的构建阶段创建，
-配置由所选能力包提供。不同 Agent 可以安装同一个包并使用不同配置。
-
-包内新增一个带宏声明的能力后，应用原有的安装代码保持不变；新增模块仍需纳入 crate 编译。
-安装完成后，Provider 会在模型输入准备时调用，工具会在被选中调用时执行，事件监听会在发布事件时触发。
-
-## 各层职责
-
-| 层次 | 负责什么 | 对外边界 |
-|---|---|---|
-| 业务实现 | 返回上下文、提供工具、执行策略或处理事件 | 只实现对应能力接口 |
-| `#[capability]` | 将包归属、能力接口和创建方式转换为内部声明 | 由框架公开导出，隐藏注册后端 |
-| `inventory` | 收集有哪些能力声明 | 只保存元数据和工厂入口 |
-| 能力包与框架 | 决定当前 Agent 启用哪些声明、使用哪些配置 | 显式选包，按包筛选 |
-| `AgentBuilder::build` | 检查依赖和冲突、实例化、注册并汇总能力 | 创建当前 Agent 的服务集合 |
-| 插件生命周期与 Agent | 管理资源启动、取消、关闭和失败回滚 | 复用现有资源管理机制 |
-
-`inventory` 不承担业务实例创建、依赖注入或生命周期管理。
-业务 crate 无需直接依赖 `inventory`，也无需使用 `ContextService`、`PluginContext` 或注册描述类型来声明普通 Provider。
-高级插件作者仅在需要自定义安装流程时接触安装与资源接口。
-
-更换底层收集机制时，框架保持 `#[capability]` 和能力包公共接口，调整宏生成代码及内部发现适配即可。
-
-## Rust 内置机制核查
-
-核查日期：2026-09-09。本地使用 Rust 1.95.0。
-
-稳定 Rust 的 `Any` 可以检查具体类型，不能枚举一个类型实现的全部 trait，也不能用它判断任意值是否实现了某个 trait。
-因此，当前 `ServiceRegistry` 按 `TypeId` 存储对象，并不能直接得到所有 `ContextProvider` 实现。
-见 [Rust 标准库说明](https://doc.rust-lang.org/std/any/index.html)。
-
-标准库另有实验性的 `try_as_dyn`，官方仍标为 nightly-only；它尝试将已知值转换为指定 trait 对象，
-也没有提供扫描依赖 crate、收集工厂和创建实例的完整机制。
-本方案不依赖 nightly，见 [try_as_dyn 文档](https://doc.rust-lang.org/std/any/fn.try_as_dyn.html)。
-
-## 开源方案选择
-
-先复用现成的发现和注册机制，再适配框架已有的依赖、装配与资源管理。
-
-| 方案 | 已提供的机制 | 对本需求的判断 |
-|---|---|---|
-| [`inventory`](https://docs.rs/inventory/0.3.24/inventory/) | 在不同模块和 crate 中声明注册项，统一迭代已链接的注册项 | 首选后端，已验证基本收集机制；注册代码由框架宏生成 |
-| [`linkme`](https://docs.rs/linkme/0.3.37/linkme/) | 通过链接器将分散声明的静态项合成切片 | 可替代的收集机制；需结合目标平台验证 |
-| [`bevy_reflect`](https://docs.rs/bevy_reflect/0.19.1/bevy_reflect/) | 类型元数据、显式声明的 trait 反射和类型注册 | 如果需要运行时反射再考虑；当前按接口收集工厂不需要字段反射 |
-
-建议先采用 `inventory` 收集能力声明，复用当前容器进行实际安装。
-`inventory` 已覆盖跨 crate 注册，框架无需自行实现链接段扫描或进程初始化钩子。
-它的注册表迭代顺序没有保证，因此业务安装顺序必须由框架按依赖和稳定规则确定。
-见 [inventory 注册与迭代规则](https://docs.rs/inventory/0.3.24/inventory/)。
-
-`inventory` 在进程初始化时登记注册项；登记内容应限于静态描述与工厂指针，
-不要在登记表达式中创建业务实例、连接或后台任务。
-其支持平台和初始化机制见 [inventory 项目说明](https://github.com/dtolnay/inventory#how-it-works)。
-
-## 业务侧通过宏声明能力
-
-框架提供 `#[capability(...)]`，由它生成 `inventory::submit!` 和内部注册描述。
-直接编写底层注册代码不作为业务开发方式；宏封装是首版 API 的组成部分。
-
-### 无配置的 Provider
-
-下面是目标写法。宏从 `impl` 中取得能力接口与实现类型，开发者只声明所属包：
-
-```rust
-// 拟议的 capability 宏；其他接口沿用当前框架定义。
+~~~rust
 use async_trait::async_trait;
-use eliteforge_agent_core::{capability, AgentError, ContextProvider, Message, RunContext};
+use eliteforge_agent_core::{
+    capability, AgentError, ContextProvider, Message, RunContext,
+};
 
-#[derive(Default)]
-struct ShopContext;
+pub struct ShopConfig {
+    pub name: String,
+}
 
-#[capability(pack = "shop")]
+pub struct ShopContext {
+    name: String,
+}
+
+impl ShopContext {
+    pub fn from_config(config: &ShopConfig) -> Self {
+        Self {
+            name: config.name.clone(),
+        }
+    }
+}
+
+#[capability(
+    pack = "shop",
+    id = "shop.context",
+    instance = "shop.context",
+    config = ShopConfig,
+    factory = ShopContext::from_config
+)]
 #[async_trait]
 impl ContextProvider for ShopContext {
     async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![Message::system("你是商店客服，请使用中文回答。")])
+        Ok(vec![Message::system(format!(
+            "你是{}的客服，请使用中文回答。",
+            self.name
+        ))])
     }
 }
+~~~
+
+应用选择根包，并用 `include(...)` 明确选择子包：
+
+~~~rust
+use eliteforge_agent_core::CapabilityPackBuilder;
+use eliteforge_agent_framework::AgentBuilder;
+use shop_plugin::{AuditConfig, ShopConfig};
+
+let agent = AgentBuilder::new()
+    .capability_pack(
+        CapabilityPackBuilder::new(
+            "shop",
+            ShopConfig {
+                name: "星河商店".into(),
+            },
+        )
+        .include(CapabilityPackBuilder::new("shop.audit", AuditConfig::default())),
+    )
+    .build()
+    .await?;
+~~~
+
+`CapabilityPackBuilder::new(id, configuration)` 本身实现 `CapabilityPack`，不需要额外的
+`build()`。`CapabilityPack`、`CapabilityPackBuilder` 和 `capability` 都由
+`eliteforge-agent-core` 导出。
+
+## 装配流程
+
+~~~mermaid
+flowchart LR
+    D[业务 crate 的 trait impl / #[capability]] --> R[静态 CapabilityDescriptor / inventory 收集]
+    A[AgentBuilder / capability_pack] --> S[显式选择根包和子包]
+    R --> F[按已选包筛选]
+    S --> F
+    F --> V[预校验 ID、依赖、环和实例声明]
+    V --> C[按稳定拓扑顺序调用同步 factory]
+    C --> P[适配为普通 Plugin]
+    P --> K[PluginContainer 安装、回滚和关闭]
+    K --> G[当前 Agent 的运行时服务]
+~~~
+
+宏登记的只是静态描述和函数指针，不会创建 Provider、连接或后台任务。应用链接业务 crate
+也只会让描述可发现；只有选中对应包后，`build()` 才会调用 factory。
+
+~~~text
+已链接的声明                       当前 Agent
+shop.context  ───────┐
+shop.audit    ───────┼─ CapabilityPackBuilder::new("shop", config)
+payment.tool  ───────┘             │
+                                  include("shop.audit")
+                                        │
+                                        ▼
+                              仅 shop / shop.audit 被装配
+
+payment.tool 的 factory 不运行。
+~~~
+
+包的子集必须由 `include(...)` 显式声明。`depends_on` 只规定已经选中的能力或显式插件的
+安装前后关系，不能隐式启用另一个包。
+
+## CapabilityPack 与 PluginPack
+
+| 项目 | `CapabilityPack` | `PluginPack` |
+|---|---|---|
+| 面向对象 | 声明式业务能力 | 已创建的 `Plugin` 安装配置 |
+| 应用入口 | `.capability_pack(pack)` | `.plugin_pack(pack)` |
+| 成员来源 | `#[capability]` 的静态声明 | `into_plugins()` 返回的列表 |
+| 配置 | 每个选中包持有自己的配置 | 包作者自行保存插件配置 |
+| 实例化 | 当前 Agent 的 `build()`，按需调用 factory | 展开后由 `PluginContainer` 安装 |
+| 子包 | 必须 `.include(...)` 显式选择 | 可嵌套展开插件列表 |
+| 典型用途 | Shop、订单、审计等业务能力 | `EliteForgeOfficialPluginPack` 和兼容的业务组合 |
+
+`PluginPack` 保持兼容，现有 `.plugin_pack(...)` 代码不需要迁移。首版也不会把
+`EliteForgeOfficialPluginPack` 迁为能力包；它仍是官方模型、存储、交互、AG-UI、MCP 和
+遥测插件的组合入口。
+
+## 框架提供的文件系统与系统工具能力包
+
+`eliteforge-agent-capability-tools` 提供三个可独立选择的通用能力包。它不在官方 `PluginPack`
+中默认安装；文件和搜索工具必须显式提供文件系统根目录。系统命令能力包完全通用，不绑定任何
+目录或项目；选中后默认允许执行所有程序，也可以配置为仅允许指定程序名。
+
+```toml
+[dependencies]
+eliteforge-agent-capability-tools = "0.1.0"
 ```
-
-安装 `ShopCapabilityPack` 后，构建过程才使用 `Default` 创建 `ShopContext`，并把它加入上下文来源列表。
-框架宏负责生成能力角色到服务注册的映射，业务实现不需要调用注册 API。
-
-### 为什么建议标记 impl
-
-Rust 属性宏接收被标记语法项的 token。标记 `struct ShopContext` 时，输入中没有其他位置的
-`impl ContextProvider for ShopContext`，不能直接据此知道它实现了哪些能力接口。
-见 [Rust 属性宏说明](https://doc.rust-lang.org/reference/procedural-macros.html#the-proc_macro_attribute-attribute)。
-
-因此，本方案建议标记具体的 `impl`，从声明本身取得接口信息，并生成由编译器校验的转换代码。
-这样保留“实现能力 + 声明属于哪个包”的开发方式，也无需另外列出接口。
-若将宏放在 `struct` 上，则需要额外的接口声明或配套的 `impl` 标记，不能把一个孤立的结构体标记描述成完整反射。
-`capability` 与 `async_trait` 的组合顺序及诊断需要在宏实现阶段验证。
-
-### 带配置的 Provider
-
-需要配置时，包的 `new(config)` 保存当前 Agent 使用的业务配置，能力声明指定一个业务工厂。
-例如将上述声明扩展为：
 
 ```rust
-// 属性参数示意，应用于对应的能力 impl；factory 由业务类型提供。
-#[capability(pack = "shop", factory = ShopContext::from_config)]
+use eliteforge_agent_capability_tools::{
+    FileSystemToolsConfig, SystemCommandConfig, read_only_filesystem_pack, system_command_pack,
+    write_filesystem_pack,
+};
+use eliteforge_agent_framework::AgentBuilder;
+
+let filesystem = FileSystemToolsConfig::new("./data")
+    .with_max_read_bytes(128 * 1024)
+    .with_max_results(100);
+let agent = AgentBuilder::new()
+    .capability_pack(read_only_filesystem_pack(filesystem.clone()))
+    .capability_pack(write_filesystem_pack(filesystem))
+    .capability_pack(system_command_pack(SystemCommandConfig::new()))
+    .build()
+    .await?;
 ```
 
-`ShopContext::from_config` 接收声明类型的包配置并创建实现。宏生成读取配置和调用工厂的适配，
-业务工厂只处理自己的配置，普通 Provider 不必接触通用容器。
-无工厂参数时要求实现 `Default`；不能默认构造、缺少配置或工厂返回类型不匹配时，必须明确报错。
-异步创建资源和依赖其他服务的高级工厂契约需与安装生命周期一起定义。
+| 能力包 | 模型可见工具 | 边界 |
+|---|---|---|
+| `framework.filesystem.readonly` | `fs_read_text`、`fs_list`、`fs_stat`、`search_grep`、`search_glob`、`search_path` | 仅访问配置文件系统根目录下的 UTF-8 文件；拒绝绝对路径和 `..`，不跟随符号链接；读取、搜索文件、深度和结果数量均受配置上限约束 |
+| `framework.filesystem.write` | `fs_write_text`、`fs_apply_patch` | 仅修改配置文件系统根目录内的文本文件；创建父目录、覆盖、追加和文本替换都属于可变更操作，应由 `ToolPolicy` 和审批流程控制 |
+| `framework.system-command` | `system_exec` | 完全通用；选中能力包后可直接启动程序，参数按数组传递；Linux/macOS 可传入 `sh`，Windows 可传入 `cmd` 或 PowerShell；可配置为仅允许指定程序名；工具设置运行超时和输出上限，但不提供沙箱或进程树隔离 |
 
-能力 ID 可以由包、实现类型和能力接口生成；跨能力依赖需要稳定名字时，允许显式指定 `id`。
-同一实现类型声明多个接口时，应复用同一包实例中的业务对象，再分别注册接口视图。
-需要同类型的多个独立对象时，使用显式实例标识；配置或工厂声明冲突应报错，不能静默重复创建。
+`system_exec` 不会根据操作系统自动拼接 shell 命令，也不会接受一段待解析的命令行文本。
+这保证同一份工具契约可用于 Linux、macOS 和 Windows；需要 shell 内建命令时，上层应用把
+对应的 shell 程序作为 `command`，并显式传递平台需要的参数。例如 Windows 使用
+`{"command":"cmd","args":["/C","dir"]}`，Unix 使用
+`{"command":"sh","args":["-c","ls -la"]}`。
 
-这一宏只封装框架领域的声明和适配规则。底层发现继续使用开源库，不自行开发通用反射或扫描系统。
+`system_exec` 不会默认进入任何文件系统根目录或项目目录。调用提供 `cwd` 时直接使用该目录；未提供时
+继承上层应用进程的当前目录。`cwd` 只是运行上下文，不是路径或沙箱边界；已允许的系统命令仍可能
+读取任意数据、启动子进程或访问网络。
 
-## 自动装配必须保留的规则
+能力包的显式选择是第一道开关；如需收紧，使用
+`SystemCommandConfig::restricted(["git", "cargo"])`。每次调用在启动进程前还会依次
+经过所有 `ToolPolicy`：任一策略 `Deny` 就拒绝，未被拒绝且任一策略 `RequireApproval` 就创建审批
+交互，收到明确同意后才执行。上层应用应把可选的程序限制、`ToolPolicy`、用户审批和操作系统级
+隔离组合使用；命令超时或等待失败按不确定外部副作用处理，不能自动重试。
 
-| 问题 | 设计要求 |
+## 声明字段和工厂
+
+| 字段 | 作用 |
 |---|---|
-| 应用链接了多个包 | 仅激活应用选择的包及其声明的子包；其他包的工厂不执行 |
-| 增加一个标记了 capability 的实现 | 包启用时自动纳入，应用不追加成员注册代码 |
-| 包里只有 Provider | 可以安装，不要求包作者额外实现 `Plugin` |
-| 同一接口有多个实现 | 支持多贡献的接口收集为列表；唯一角色冲突时报错 |
-| 多个包提供同一能力 ID | 报告冲突及来源，不依赖收集顺序覆盖 |
-| 能力依赖其他服务 | 声明依赖，按拓扑顺序创建；安装期解析只保证前置依赖已就绪 |
-| 消费者需要完整 Provider 列表 | 在全部相关安装完成后汇总，不能把安装途中的部分列表当成最终结果 |
-| 同一个包用于多个 Agent | 工厂按 Agent 创建实例，配置及生命周期分别管理 |
-| 同一实现类型提供多个能力接口 | 默认共享该包实例内的业务对象；不因多个接口标记重复初始化资源 |
-| 安装失败或取消 | 复用容器的回滚和关闭回调，已取得资源必须被释放 |
-| 修改成员开关和配置 | 在构建前决定；默认启用的成员无需应用再次逐项登记 |
+| `pack` | 所属能力包 ID，必须与应用选择的包 ID 一致 |
+| `id`（可选） | 当前 Agent 内唯一的能力 ID；省略时由包、模块、实现类型和 trait 稳定生成 |
+| `instance`（可选） | 共享业务对象的键；省略时由包和实际 Rust 类型身份确定，同类型多接口默认共享对象，支持跨模块和类型别名 |
+| `depends_on`（可选） | 当前已选能力或显式 Plugin 的 ID 列表；省略时为空 |
+| `config` + `factory`（成对可选） | 配置类型和同步构造函数，签名为 `fn(&Config) -> Self` |
 
-能从声明中确定的重复 ID、缺失依赖和唯一性冲突，在创建资源前检查。
-自定义插件安装时动态产生的服务冲突仍由容器检查，并触发回滚。
+`id`、`instance` 与 `depends_on` 可按需要显式指定。默认值不依赖链接或注册顺序。
+需要两份相同类型的独立对象时，给它们不同的 `instance`；同一对象实现多个接口时，给这些
+`impl` 使用同一个 `instance` 和同一 factory 声明。省略 `config` 与 `factory` 时，
+宏使用 `Default::default()` 创建实现，因此该类型必须实现 `Default`。
+传给 `CapabilityPackBuilder` 的配置需要满足 `Send + Sync + 'static`；普通不可变配置 struct
+通常天然满足这个条件。
 
-## 当前实现与目标的差别
+~~~text
+SharedShop
+  ├─ #[capability(id = "shop.context", instance = "shop.shared")]
+  │       impl ContextProvider
+  └─ #[capability(id = "shop.events",  instance = "shop.shared")]
+          impl EventSink
 
-当前 `PluginPack` 已能让应用一次安装多个成员；`build()` 已会将注册好的 `ContextService`
-汇总为 Provider 列表。还需补充框架能力宏、自动收集声明、按包选择实例和隐藏注册封装的入口。
+一个 Agent build：factory 一次 → 同一个 SharedShop 同时适配两个接口
+两个 Agent build：factory 各一次 → 两个互相隔离的 SharedShop
+~~~
 
-迁移时先实现能力宏和自动装配，再迁移官方包及应用示例。
-业务侧的 `ContextPlugin` 等注册适配器逐步退到内部，高级 `Plugin` 的依赖与资源管理能力保留。
-以上 API 尚未实现，生产 workspace 尚未添加发现后端或宏依赖。
+共享实例的实现类型、配置类型和 factory 函数必须一致。框架按实际类型和函数身份比较，
+同一函数通过不同模块路径或类型别名引用仍能共享；真正不同的 factory 会在构造前报错。
+显式 `instance` 只能属于一个包；否则构建失败，不会静默选取某个实现。
 
-## 开源机制验证
+同一接口需要两份同类型对象时，可以在一个 `impl` 上叠加声明，分别指定 `id` 和 `instance`：
 
-在仓库外建立了最小验证项目，使用 Rust 1.95.0 和 `inventory` 0.3.24，
-分别运行普通构建与启用 LTO 的发布构建。验证了：
+~~~rust
+#[capability(pack = "shop", id = "shop.first", instance = "shop.first")]
+#[capability(pack = "shop", id = "shop.second", instance = "shop.second")]
+#[async_trait]
+impl ContextProvider for DefaultShopContext {
+    // ...（DefaultShopContext 实现 Default）
+}
+~~~
 
-- 不同模块中的两个 Provider 工厂可以从业务包 crate 自动收集到应用，应用无需维护成员清单。
-- 已链接但未选择的另一个包可以被发现，其工厂不会执行。
-- 收集声明不会创建 Provider；构建时才调用工厂。
-- 同一个包可以根据两份配置分别创建实例，排序由框架逻辑明确指定。
+每个声明有独立的宏辅助代码；上述配置会调用两次 `Default::default()` 并注册两份上下文来源。
 
-这是对开源收集机制的验证，使用简化的 Provider 接口，并未验证 `#[capability]` 宏。
-实际框架的异步依赖安装、冲突回滚和 Agent 关闭仍需在后续接入时验证；其他目标平台尚未实测。
+首版可适配的 trait 包括 `ContextProvider`、`ToolProvider`、`EventSink`、
+`ContextContributor`、各类 Middleware、`ToolPolicy`、`RunLifecycleHook`、
+`WorkflowNode`、`RunOutputFactory` 和 `Plugin`。完整入口见
+[扩展点参考](plugin-extension-reference.md)。
+
+## 预校验、排序和生命周期
+
+解析器先计算根包与 `include(...)` 形成的闭包，再收集其中的声明。它会在调用第一个业务
+factory 之前检查：
+
+- 空或重复的包 ID、重复选包，以及包包含环；
+- 空或重复的能力 ID、与显式或框架保留 `Plugin` ID 的冲突；
+- 空实例键、同一实例的 factory/config 声明冲突、跨包实例冲突；
+- 缺失依赖和依赖环，包括能力与普通 `Plugin` / `PluginPack` 成员组成的混合依赖图。
+
+通过校验后，解析器按完整依赖拓扑创建能力；能力候选按 ID 稳定排序，普通插件保留配置顺序，
+跨普通插件的间接依赖同样影响 factory 顺序，所以结果不依赖 `inventory` 的迭代顺序。
+工厂创建的对象先按实例身份缓存，再被各个接口声明适配为
+普通插件。随后仍由现有 `PluginContainer` 安装、处理插件依赖、失败回滚和关闭回调。
+
+生命周期和预检边界如下：
+
+- 静态声明错误会在业务 factory 前报告，未选包的 factory 永远不执行。
+- `depends_on` 可以引用应用显式配置的普通 Plugin；框架保留的内部 ID 既不能被能力占用，
+  也不能作为能力依赖的满足项。
+- factory 已创建对象后发生插件安装失败或取消时，沿用容器的回滚和 `agent.close()` 生命周期；
+  资源型能力应在其 `Plugin::install` 中及时登记关闭回调。
+- 自动创建的 `Plugin` 自身返回的动态 `dependencies()` 只能在构造后检查；需要构造前预检的
+  依赖应写在宏的 `depends_on` 中。应用已经传入的普通插件则会在 factory 前读取并校验依赖。
+
+## 首版边界
+
+首版有意保持 factory 很小：
+
+- 只支持同步、仅依赖所属包配置的 `&Config -> Self` factory；不支持异步 factory，也不在
+  factory 中解析其他服务。
+- 一个已选包的全部已声明成员都会装配；没有按成员开关、按条件发现或隐式子包选择。
+- 复杂连接建立、服务解析、后台任务和资源关闭仍使用 `Plugin::install` 与现有生命周期接口。
+- 官方插件包暂不迁移；首版让 `PluginPack` 和能力包并存。
+
+需要这些超出首版边界的行为时，先保留或编写普通 `Plugin`；不要把异步 I/O、服务查找或后台
+任务塞进 capability factory。
+
+## 相关文档
+
+- [插件与扩展开发指南](plugins.md)：选择能力包、普通 Plugin 或官方插件包。
+- [扩展点参考](plugin-extension-reference.md)：接口、注册入口和数量语义。
+- [Framework 架构](architecture.md)：能力声明如何进入 Agent 的服务装配。

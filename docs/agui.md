@@ -73,7 +73,7 @@ data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"...","delta":"你好"}
 
 `control` 可以交给接收用户消息的任务，继续调用 `agent.steer(&control, ...)`、`agent.cancel(&control)` 或 `agent.revoke_tools(&control, ...)`。
 保留控制句柄不会阻止事件流结束。丢弃事件接收器只停止消费；丢弃 `RunHandle` 或它的
-等待 future 会取消执行。HTTP 断开时是否取消 Agent，由宿主决定。
+等待 future 会取消执行。HTTP 断开时是否取消 Agent，由上层应用决定。
 
 可直接运行不需要模型账号的完整示例：
 
@@ -183,10 +183,10 @@ ToolResult，并保留模型返回的 `ToolCall.invocation_id`，不要为了发
 通道满、消息超限、非法 Patch 或事件顺序错误，会关闭已经向客户端打开的消息/步骤，
 随后发出一个明确的 RUN_ERROR。没有静默丢弃后继续宣告成功，也不会因此重复调用工具。
 协议流失败和 Agent 执行失败是两件事；执行的最终结果仍以 `agent.wait(handle)` 为准。
-运行异常默认使用通用错误文本，宿主显式设置 `include_error_details` 后才输出异常正文。
+运行异常默认使用通用错误文本，上层应用显式设置 `include_error_details` 后才输出异常正文。
 
 此插件提供事件输出，不实现完整的 RunAgentInput HTTP 端点、客户端工具执行、
-MESSAGES_SNAPSHOT 历史快照或持久化 SSE 重连回放。需要回放时，宿主保存已经转换好的
+MESSAGES_SNAPSHOT 历史快照或持久化 SSE 重连回放。需要回放时，上层应用保存已经转换好的
 AG-UI 事件；现有 Workflow journal 不包含完整 token 流，不能据此还原丢失的文本增量。
 
 ## 验证

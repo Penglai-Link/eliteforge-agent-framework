@@ -929,27 +929,35 @@ impl ModelExecutionRuntime<'_> {
                 descriptor: &execution.descriptor,
                 run: self.context,
             };
+            let approved = matches!(&execution.state, ToolExecutionState::Approved);
+            let mut approval = None;
+            let mut denied = None;
             for policy in &self.services.tool_policy {
                 match policy.evaluate(&invocation).await? {
                     ToolPolicyDecision::Allow => {}
                     ToolPolicyDecision::Deny(reason) => {
-                        self.execution_mut(index).state =
-                            ToolExecutionState::Finished(ToolOutput::error(reason));
+                        denied = Some(reason);
                         break;
                     }
-                    ToolPolicyDecision::RequireApproval(prompt)
-                        if !matches!(execution.state, ToolExecutionState::Approved) =>
-                    {
-                        let interaction =
-                            InteractionRequest::approval(execution.invocation_id, prompt);
-                        self.execution_mut(index).state = ToolExecutionState::WaitingApproval {
-                            interaction_id: interaction.id,
-                        };
-                        self.state.interactions.push(interaction);
-                        break;
+                    ToolPolicyDecision::RequireApproval(prompt) if !approved => {
+                        if approval.is_none() {
+                            approval = Some(prompt);
+                        }
                     }
                     ToolPolicyDecision::RequireApproval(_) => {}
                 }
+            }
+            if let Some(reason) = denied {
+                self.execution_mut(index).state =
+                    ToolExecutionState::Finished(ToolOutput::error(reason));
+                continue;
+            }
+            if let Some(prompt) = approval {
+                let interaction = InteractionRequest::approval(execution.invocation_id, prompt);
+                self.execution_mut(index).state = ToolExecutionState::WaitingApproval {
+                    interaction_id: interaction.id,
+                };
+                self.state.interactions.push(interaction);
             }
         }
         self.save(None).await?;

@@ -7,11 +7,13 @@
 
 ## 总体结构
 
-宿主应用负责业务边界，Framework 负责 Agent 运行时，插件负责接入外部能力。
+上层应用负责业务边界，Framework 负责 Agent 运行时，插件负责接入外部能力。
 
 ```mermaid
 flowchart TD
-    Host[宿主应用\n身份、权限、订阅、凭据、UI] --> Builder[AgentBuilder\n服务装配]
+    Application[上层应用\n身份、权限、订阅、凭据、UI] --> Builder[AgentBuilder\n服务装配]
+    Application --> CapabilityPack[CapabilityPack\n业务配置与显式子包]
+    CapabilityPack --> Builder
     Builder --> Agent[Agent\n运行入口、关闭、身份]
     Agent --> Loop[AgentLoop\nReAct / Workflow / DAG]
     Loop --> ModelInvoker[ModelInvoker\n模型步骤编排]
@@ -22,9 +24,11 @@ flowchart TD
     Loop --> State[状态与会话\n完整聊天记录 / 任务进度 / 交互]
     ContextPipeline --> ChatModel[ChatModel\n协议适配]
     ModelSelection -.选择 connection/model.-> ChatModel
-    ToolInvoker --> ToolProvider[ToolProvider\n宿主工具 / MCP]
+    ToolInvoker --> ToolProvider[ToolProvider\n上层应用工具 / 工作区能力包 / MCP]
     State --> Storage[存储插件\nSQLite 或自定义实现]
     Agent --> Events[EventSink\n实时事件与遥测]
+    Builder --> CapabilityResolver[能力包解析\n筛选、预校验、factory]
+    CapabilityResolver --> Kernel
     Builder --> Kernel[eliteforge-agent-plugin-kernel\n依赖排序、服务注册、资源释放]
     ChatModel --> Kernel
     ToolProvider --> Kernel
@@ -35,29 +39,40 @@ flowchart TD
 
 | 模块 | 职责 | 不负责的内容 |
 |---|---|---|
-| 宿主应用 | 业务身份、权限、订阅、凭据、配置、HTTP/UI、业务路由 | 不把业务策略下沉到通用 Framework |
+| 上层应用 | 业务身份、权限、订阅、凭据、配置、HTTP/UI、业务路由 | 不把业务策略下沉到通用 Framework |
 | `eliteforge-agent-plugin-kernel` | 插件依赖排序、类型服务注册、安装回滚、异步关闭和 Drop 兜底 | 不定义 Agent 执行语义 |
-| `eliteforge-agent-core` | 模型/工具接口、请求/响应、上下文、状态、交互和运行支撑 | 不依赖具体插件或 Framework |
-| `eliteforge-agent-framework` | Agent、执行循环、服务装配、模型调度和运行控制 | 不包含供应商协议实现 |
-| 配套插件 | 实现模型协议、存储、工具、上下文、摘要、附件、AG-UI 和遥测 | 不替宿主管理业务权限和订阅 |
+| `eliteforge-agent-core` | 模型/工具接口、请求/响应、上下文、状态、交互、能力包描述与宏导出 | 不依赖具体插件或 Framework |
+| `eliteforge-agent-framework` | Agent、执行循环、能力包解析、服务装配、模型调度和运行控制 | 不包含供应商协议实现 |
+| `eliteforge-agent-capability-tools` | 可选的文件系统读写、搜索、文本修改，以及独立的通用跨平台系统命令工具 | 不提供进程或文件系统沙箱，不定义上层应用的授权策略 |
+| 配套插件 | 实现模型协议、存储、工具、上下文、摘要、附件、AG-UI 和遥测 | 不替上层应用管理业务权限和订阅 |
 
-Framework 的默认 `genai` feature 依赖 `eliteforge-agent-official-plugin-model-genai`；该插件仅依赖 Core。关闭默认 feature 可移除 Genai。SQLite、MCP 和 OpenTelemetry 仍由应用显式安装。DAG 使用 `petgraph` 校验拓扑，使用 Tokio 执行节点。
-宿主通过适配层接入 Framework，宿主自己的业务类型留在宿主内。
+Framework 的默认 `genai` feature 依赖 `eliteforge-agent-official-plugin-model-genai`；该插件仅依赖 Core。关闭默认 feature 可移除 Genai。SQLite、MCP 和 OpenTelemetry 仍由应用显式安装；工作区工具也需要应用显式选择对应能力包。DAG 使用 `petgraph` 校验拓扑，使用 Tokio 执行节点。
+上层应用通过适配层接入 Framework，上层应用自己的业务类型留在上层应用内。
 
 ## 服务装配
 
-`AgentBuilder` 通过 `plugin` 收集单个插件，通过 `plugin_pack` 展开插件包。所有插件进入同一个依赖图，
-`build().await` 才安装插件并构造运行时服务。包不创建独立容器，也不自行调用成员的 `install`。
-官方组合由独立的 `eliteforge-agent-official-plugin-pack` 提供，Framework 和 Core 不依赖它。
-安装阶段不会提前调用模型接口。
+`AgentBuilder` 有三类装配入口：`plugin` 添加单个插件，`plugin_pack` 展开兼容的
+`PluginPack`，`capability_pack` 选择声明式业务能力包。三者最后都进入同一个依赖图；
+`build().await` 才创建能力实例、安装插件并构造运行时服务。
 
-上下文内容由 `ContextProvider` 实现提供，`ContextPlugin` 只将其注册为 `ContextService`。
-安装完成后，Builder 通过 `all::<ContextService>()` 汇总所有上下文实现；其他多贡献接口也按各自服务类型收集。
-当前没有从任意对象自动检测 trait 的机制。目标方案通过框架宏声明能力，内部收集元数据，
-再按应用显式选择的能力包装配；发现、启用、实例化和生命周期分别处理，见[设计说明](capability-packs.md)。
+能力包解析器只读取宏登记的静态描述。它先按根包和显式 `include(...)` 筛选，再预校验 ID、
+依赖、环和共享实例声明；通过后按稳定拓扑顺序调用 factory，并将每项能力适配为普通 `Plugin`。
+因此，未选包不创建业务对象。官方组合仍由独立的
+`eliteforge-agent-official-plugin-pack` 的 `PluginPack` 提供，Framework 和 Core 不依赖它。
+
+上下文内容由 `ContextProvider` 实现提供，能力包适配器或 `ContextPlugin` 都会将其注册为
+`ContextService`。安装完成后，Builder 通过 `all::<ContextService>()` 汇总所有上下文实现；
+其他多贡献接口也按各自服务类型收集。能力声明、配置和首版边界见
+[能力包与自动装配](capability-packs.md)。
 
 ```text
-AgentBuilder.plugin(...) / plugin_pack(...)
+AgentBuilder.plugin(...) / plugin_pack(...) / capability_pack(...)
+        │
+        ▼
+CapabilityPack（仅 capability_pack）
+  ├─ 显式根包和 include 子包
+  ├─ 描述筛选、ID/依赖/环预校验
+  └─ 同步 factory → 适配后的 Plugin
         │
         ▼
 PluginContainer.build
@@ -86,10 +101,10 @@ AgentBuilder 读取服务
 ### 装配边界
 
 Framework 根据已注册的服务构造运行时；需要 Chat 且没有自定义连接时，默认 Genai 插件读取模型环境配置。数据库和其他存储由应用显式安装。
-内置执行器需要持久化状态时，宿主必须显式安装对应存储插件。
+内置执行器需要持久化状态时，上层应用必须显式安装对应存储插件。
 
 ```text
-宿主和插件注册运行所需服务
+上层应用和插件注册运行所需服务
             │
             ▼
 Framework 读取服务并构造运行时
@@ -218,7 +233,7 @@ flowchart TD
 1. `ModelSelectionStrategy` 根据阶段、步骤、尝试次数、工具和原始历史选择模型。
 2. `ModelDescriptor` 和 `TokenEstimator` 计算模型输入容量，并预留工具定义和生成选项占用的协议空间。
 3. `ConversationSession.snapshot()` 提供不可变的原始历史；本次模型调用不会改写它。
-4. `ContextAssembler` 生成上下文块。简单 Agent 默认有 `instructions` 和 `history` 两个内置块；显式布局可以加入长期记忆、检索结果或宿主数据块。
+4. `ContextAssembler` 生成上下文块。简单 Agent 默认有 `instructions` 和 `history` 两个内置块；显式布局可以加入长期记忆、检索结果或上层应用数据块。
 5. 每个 `ContextContributor` 在自己的额度内生成数据，`ContextBudgetPolicy` 为所有块分配独立预算，块之间不借用剩余额度。
 6. 每个块交给自己的 `ContextReducer`，可以保留、按消息/轮次裁剪、选择条目或调用摘要模型压缩；工具调用和工具结果必须保持完整关系。
 7. 组装器校验最终消息、指令不可变性、历史投影合法性和模型特定额度，输出 `ContextWindow` 与 `ContextAssemblyReport`。
@@ -258,7 +273,7 @@ GenaiPlugin / 自定义 Plugin → Core 注册契约 → Framework 模型目录�
 
 请求指定优先于阶段规则和每项能力的默认模型，未配置规则时要求唯一兼容实现。协议绑定到具体连接/模型/操作；continuation 还绑定格式版本。详细调用示例见[模型插件](model-plugins.md)。
 
-模型连接、模型目录和选择策略属于运行时配置；订阅归属、账号权限、计费和凭据轮换由宿主管理。
+模型连接、模型目录和选择策略属于运行时配置；订阅归属、账号权限、计费和凭据轮换由上层应用管理。
 `ModelInvoker` 协调 `ContextAssembler`，并负责超时、重试、预算预留和结果验证。模型已输出增量后不自动重试；不确定失败按已预留额度保守计入预算。
 
 ## 会话记录、任务进度与持久化
@@ -293,7 +308,7 @@ flowchart LR
 - 正在等待的用户回答或工具审批；
 - 预算、重试次数和恢复所需的运行身份。
 
-这份数据不是聊天记录，而是“任务做到哪里了”。进程崩溃后，Framework 读取它判断应该继续、直接复用已完成结果，还是要求宿主核对一个可能已经产生外部副作用的调用。
+这份数据不是聊天记录，而是“任务做到哪里了”。进程崩溃后，Framework 读取它判断应该继续、直接复用已完成结果，还是要求上层应用核对一个可能已经产生外部副作用的调用。
 
 ### 3. 本次模型输入和实时事件
 
@@ -356,11 +371,11 @@ Framework 因此在数据库中记录一项短期的“执行权”，代码中�
 
 会话追加也有类似保护：同一个会话同时只能有一个写入者，追加消息时会检查 `revision` 是否仍是读取时的版本。版本不一致表示另一个请求已经写入，当前追加会失败，而不会覆盖新消息。
 
-如果取消一个 SQLite 写操作，不能直接假设数据库已经回滚。宿主需要重新读取状态，确认这一步是未写入、已完成，还是处于需要人工核对的未知状态。
+如果取消一个 SQLite 写操作，不能直接假设数据库已经回滚。上层应用需要重新读取状态，确认这一步是未写入、已完成，还是处于需要人工核对的未知状态。
 
 ## 用户交互与审批
 
-ReAct、Workflow 和 DAG 内置 ReAct 节点共用持久化交互机制。用户问题、选项、答案和原始调用保存在交互记录中，宿主负责身份验证和 UI。
+ReAct、Workflow 和 DAG 内置 ReAct 节点共用持久化交互机制。用户问题、选项、答案和原始调用保存在交互记录中，上层应用负责身份验证和 UI。
 
 ```text
 ask_user / RequireApproval
@@ -369,7 +384,7 @@ ask_user / RequireApproval
 保存交互与任务进度 → RUN_FINISHED(interrupt)
           │
           ▼
-宿主展示 UI，提交回答或审批决定
+上层应用展示 UI，提交回答或审批决定
           │
           ▼
 恢复同一 run → 保存答案 → 继续模型或执行工具
@@ -389,8 +404,8 @@ ask_user / RequireApproval
 | `on_diagnostic` | 同步记录上下文组装和最终发送元数据 | 必须快速，不能 I/O |
 | `on_published` | 按实时发布顺序交接完整事件 | 不能 I/O 或再次发布事件 |
 
-`TelemetryPlugin` 使用宿主注入的 OpenTelemetry provider 记录 run、node、model、tool、关联关系、耗时、结果和用量；默认不输出提示词、参数、结果、session 或错误正文。
-错误报告默认省略正文，可显式配置 `ErrorRedactor`。AG-UI 插件在 `on_published` 上转换输出事件和 SSE，HTTP 路由仍由宿主提供。
+`TelemetryPlugin` 使用上层应用注入的 OpenTelemetry provider 记录 run、node、model、tool、关联关系、耗时、结果和用量；默认不输出提示词、参数、结果、session 或错误正文。
+错误报告默认省略正文，可显式配置 `ErrorRedactor`。AG-UI 插件在 `on_published` 上转换输出事件和 SSE，HTTP 路由仍由上层应用提供。
 
 ## 资源生命周期
 

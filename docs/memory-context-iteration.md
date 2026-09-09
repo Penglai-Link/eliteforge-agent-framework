@@ -9,7 +9,7 @@
 | 1. 会话存储 | ConversationStore 命名、分支和 generation、版本追加、结构化输出；内存与 SQLite 实现；存储不裁剪窗口 | `eliteforge-agent-framework/tests/context_windows.rs`、`eliteforge-agent-memory/tests/stores.rs` |
 | 2. 上下文窗口 | 独立块额度、显式顺序、组装器和插件注册、配置冲突检查、模型容量及中间件改写后的校验 | `eliteforge-agent-framework/tests/context_windows.rs`、`model_connections.rs` |
 | 3. 摘要 | 按块处理、模型感知分批、内存与 SQLite 摘要存储、范围和指纹、增量复用、不复用的 CAS 版本 | `eliteforge-agent-context/tests/compression.rs`、`summary_store.rs` |
-| 4. 工具大结果 | content 和 structured 联合判断并完整转存；保留状态及显式引用；分页读取、缺失响应与宿主保留/清理流程 | `eliteforge-agent-context/tests/artifacts.rs` |
+| 4. 工具大结果 | content 和 structured 联合判断并完整转存；保留状态及显式引用；分页读取、缺失响应与上层应用保留/清理流程 | `eliteforge-agent-context/tests/artifacts.rs` |
 | 5. Loop 与恢复 | 三类执行器共用组装入口；节点历史隔离；自定义节点可原子保存状态和消息；恢复沿用历史身份 | `eliteforge-agent-state-sqlite/tests/context_windows.rs`、现有工作流/DAG 恢复测试 |
 | 6. 长期记忆 | 通用读写接口、内存及 SQLite 后端、关键词检索块、默认只读的记忆工具、版本冲突及过期处理 | `eliteforge-agent-memory/tests/stores.rs`、`components.rs` |
 | 7. 观测与文档 | 组装及失败报告、最终发送统计、节点与模型 span 关联、摘要调用标识、完整组合示例 | `eliteforge-agent-official-plugin-otel/tests/export.rs`、`eliteforge-agent-memory/examples/memory_context.rs` |
@@ -20,7 +20,7 @@ Clippy、格式检查、文档测试和文档构建均通过。未调用真实�
 
 默认策略保持独立块额度和显式顺序；不增加借用、优先保留或联合压缩。
 长期记忆默认后端是关键词检索，语义检索由替换后端提供。
-附件默认不自动过期；宿主掌握完整引用清单，负责保留期限和清理调度。
+附件默认不自动过期；上层应用掌握完整引用清单，负责保留期限和清理调度。
 
 ## 目标与范围
 

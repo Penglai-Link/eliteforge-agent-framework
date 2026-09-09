@@ -303,6 +303,17 @@ impl ToolPolicy for Approval {
         ))
     }
 }
+
+struct Deny;
+#[async_trait]
+impl ToolPolicy for Deny {
+    async fn evaluate(
+        &self,
+        _: &ToolInvocationContext<'_>,
+    ) -> Result<ToolPolicyDecision, AgentError> {
+        Ok(ToolPolicyDecision::Deny("policy denied this tool".into()))
+    }
+}
 async fn arithmetic_agent(
     store: Arc<SqliteStateStore>,
     calls: Arc<AtomicUsize>,
@@ -322,6 +333,46 @@ async fn arithmetic_agent(
         .build()
         .await
         .unwrap()
+}
+
+async fn denied_arithmetic_agent(
+    store: Arc<SqliteStateStore>,
+    calls: Arc<AtomicUsize>,
+    effects: Arc<AtomicUsize>,
+) -> Agent {
+    TestBuilder::default()
+        .plugin(store.plugin())
+        .plugin(ChatModelPlugin::new(Arithmetic { calls }))
+        .plugin(AgentLoopPlugin::new(
+            WorkflowLoop::new(definition()).unwrap(),
+        ))
+        .plugin(ToolPolicyPlugin::new("approval", Approval))
+        .plugin(ToolPolicyPlugin::new("deny", Deny))
+        .plugin(ToolProviderPlugin::new(
+            "tools",
+            StaticToolProvider::new(vec![double_tool(effects)]),
+        ))
+        .build()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn deny_policy_wins_before_an_earlier_policy_requests_approval() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = database(&directory.path().join("deny-wins.db")).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let effects = Arc::new(AtomicUsize::new(0));
+    let agent = denied_arithmetic_agent(store.clone(), calls.clone(), effects.clone()).await;
+
+    let result = agent.run(RunRequest::new("deny-wins", "17")).await.unwrap();
+
+    assert_eq!(result.status, RunStatus::Completed);
+    assert!(result.interactions.is_empty());
+    assert_eq!(effects.load(Ordering::SeqCst), 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    agent.close().await;
+    store.close().await.unwrap();
 }
 
 #[tokio::test]

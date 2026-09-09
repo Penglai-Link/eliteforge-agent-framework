@@ -138,7 +138,7 @@ let plugin = GenaiPlugin::empty()
         .with_input_modalities([Modality::Text, Modality::Image, Modality::Audio, Modality::Video]));
 ```
 
-模型声明还受 Adapter 实际支持范围约束。当前 Genai 对 Gemini 传递原生图片、音频和视频块；OpenAI、Responses、Anthropic、Ollama 的 Chat 路径开放文本和图片。媒体预算需要 `estimated_tokens` 或连接自定义 TokenEstimator。`ResourceReference` 只是资源引用，是否读取由宿主显式决定，不能据此声称模型已理解资源内容。
+模型声明还受 Adapter 实际支持范围约束。当前 Genai 对 Gemini 传递原生图片、音频和视频块；OpenAI、Responses、Anthropic、Ollama 的 Chat 路径开放文本和图片。媒体预算需要 `estimated_tokens` 或连接自定义 TokenEstimator。`ResourceReference` 只是资源引用，是否读取由上层应用显式决定，不能据此声称模型已理解资源内容。
 
 协议属于模型操作绑定。一个 Genai 连接中，Chat 可以使用 Responses，Embedding 仍调用 Embeddings endpoint；同连接不同 Chat 模型也可使用不同协议：
 
@@ -162,7 +162,7 @@ let vectors = agent.embed(request).await?;
 
 批量结果校验数量、输入索引、维度和有限数值，并按输入顺序返回。缺失用量保持 `None`。`EmbeddingPurpose` 区分 Query、Document 和 Similarity，Adapter 负责映射供应商的任务类型。
 
-持久化向量索引还应记录 `EmbeddingSpace { model, revision, dimensions, preprocessing }`，并通过插件贡献 `EmbeddingSpaceService(space)`。查询使用 `embed_query(&space, request)`；运行时要求模型绑定及四项配置完全一致。框架不会自动更换向量模型、执行预处理或验证远端可变别名实际指向的权重；宿主应使用固定版本并按声明完成预处理。
+持久化向量索引还应记录 `EmbeddingSpace { model, revision, dimensions, preprocessing }`，并通过插件贡献 `EmbeddingSpaceService(space)`。查询使用 `embed_query(&space, request)`；运行时要求模型绑定及四项配置完全一致。框架不会自动更换向量模型、执行预处理或验证远端可变别名实际指向的权重；上层应用应使用固定版本并按声明完成预处理。
 
 ## 调用控制和生命周期
 

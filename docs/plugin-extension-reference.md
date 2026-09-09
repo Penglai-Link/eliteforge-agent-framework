@@ -5,14 +5,60 @@
 
 业务能力由接口实现提供。`ContextPlugin`、`ToolProviderPlugin` 等是现成的注册封装，
 用于把实现接入当前安装流程；它们不会额外提供上下文或工具业务逻辑。
-能力包自动装配的目标见[设计说明](capability-packs.md)，下面列出的仍是当前可用 API。
+能力包自动装配已经可用：用 Core 导出的 `#[capability(...)]` 标记支持的 trait `impl`，
+应用选择 `CapabilityPack` 后由框架创建并适配实例。手工注册封装和 `PluginPack` 仍完全兼容。
+
+## 能力包自动装配
+
+业务 crate 使用 `eliteforge_agent_core::{capability, CapabilityPackBuilder}`。属性标在 trait
+`impl` 上；与 `async_trait` 共用时，`#[capability]` 放在外层。
+
+~~~rust
+#[capability(
+    pack = "shop",
+    id = "shop.context",
+    instance = "shop.context",
+    depends_on = ["shop.catalog"],
+    config = ShopConfig,
+    factory = ShopContext::from_config
+)]
+#[async_trait]
+impl ContextProvider for ShopContext {
+    // ...
+}
+~~~
+
+`id`、`instance` 和 `depends_on` 都可省略；前两项生成稳定默认值，依赖默认为空。
+`config` 和 `factory` 必须同时出现，factory 签名是 `fn(&Config) -> Self`。两者都省略时，
+实现类型必须满足 `Default`。应用选择包及显式子包：
+
+~~~rust
+let agent = AgentBuilder::new()
+    .capability_pack(
+        CapabilityPackBuilder::new("shop", shop_config)
+            .include(CapabilityPackBuilder::new("shop.audit", audit_config)),
+    )
+    .build()
+    .await?;
+~~~
+
+解析器在 factory 前检查包/能力 ID、依赖、环和共享实例声明，按稳定拓扑顺序创建对象。
+预检包含应用传入的普通插件依赖边。未选包不运行 factory；同一 `instance` 的多接口声明共享对象，
+省略时按包和实际类型身份共享，支持跨模块和类型别名。不同 Agent 的对象与生命周期隔离。
+首版不支持异步或依赖服务 factory、成员开关和官方包迁移。详情见
+[能力包与自动装配](capability-packs.md)。
+
+首版支持的标记目标是：`ContextProvider`、`ToolProvider`、`EventSink`、
+`ContextContributor`、`ModelMiddleware`、`ToolMiddleware`、`RunMiddleware`、
+`ToolPolicy`、`RunLifecycleHook`、`WorkflowNode`、`WorkflowNodeMiddleware`、
+`RunOutputFactory` 和 `Plugin`。其他 trait 继续用对应注册封装或自定义 Plugin。
 
 ## 怎样使用下面的注册类型
 
 除特别标注外，接口、注册适配器和服务类型都从 `eliteforge_agent_core` 引入。
 应用也可从 `eliteforge_agent_framework` 引入这些重新导出的类型。
 
-下面两种写法注册同一种能力：
+下面两种是手工 Plugin 路径，注册同一种能力：
 
 ```rust
 // 应用装配：使用已实现 Plugin 的适配器。
@@ -30,8 +76,11 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 
 | 接口或入口 | 你需要实现或提供什么 | 框架什么时候使用 | 数量与约束 |
 |---|---|---|---|
+| `#[capability(...)]` | 支持的 Core trait `impl`，以及可选 ID/实例/依赖和可选成对 config/factory | 业务 crate 链接时登记描述；仅选中包在 build 时实例化 | 描述静态；factory 同步；同实例的声明必须兼容 |
+| `CapabilityPackBuilder::new(id, config)` | 当前 Agent 的包 ID 和配置；用 `.include(child)` 选择子包 | `.capability_pack(pack)` 时保存选择 | 子包必须显式加入；重复包/包含环报错 |
+| `CapabilityPack` | 自定义包 ID、配置和显式子包闭包 | Agent build 前解析 | 每个选中 Agent 独立创建业务对象 |
 | `Plugin` | `id()`、`install(&mut PluginContext)`；需要前置插件时实现 `dependencies()` | `AgentBuilder::build` 时安装 | ID 在一个 Agent 内唯一 |
-| `PluginPack` | `into_plugins(self)` 返回安装配置列表；可全部是 Provider 的注册封装 | `.plugin_pack(pack)` 时展开 | 可以多个、可以嵌套；成员进入同一依赖图 |
+| `PluginPack` | `into_plugins(self)` 返回已有 Plugin 安装配置；可全部是 Provider 的注册封装 | `.plugin_pack(pack)` 时展开 | 兼容 API；可以多个、可以嵌套；官方包继续使用 |
 | `PluginContext::provide<T>` | 唯一角色的服务对象 | 安装期间写入容器 | 同类型一个 |
 | `PluginContext::contribute<T>` | 某类能力的一个贡献 | 安装期间写入容器 | 同类型多个，保留注册顺序 |
 | `PluginContext::services` | 用 `get<T>` 或 `all<T>` 解析已有服务 | 其他插件的 `install` 中 | `dependencies` 负责保证安装顺序 |
@@ -164,7 +213,7 @@ SQLite 官方存储插件一次注册这些唯一角色。官方包的 `.storage
 
 ## 应用操作入口速查
 
-插件注册完成后，宿主通过 Agent 实例操作：
+插件注册完成后，上层应用通过 Agent 实例操作：
 
 | 需求 | Agent 方法 |
 |---|---|

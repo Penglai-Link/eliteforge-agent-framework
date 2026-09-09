@@ -1,5 +1,8 @@
 [workspace]
 members = [
+    "crates/eliteforge-agent-capability-macros",
+    "crates/eliteforge-agent-capability-test-fixture",
+    "crates/eliteforge-agent-capability-tools",
     "crates/eliteforge-agent-plugin-kernel",
     "crates/eliteforge-agent-framework",
     "crates/eliteforge-agent-core",
@@ -26,6 +29,7 @@ edition = "2024"
 [workspace.dependencies]
 async-trait = "0.1"
 futures = "0.3"
+inventory = "0.3.24"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

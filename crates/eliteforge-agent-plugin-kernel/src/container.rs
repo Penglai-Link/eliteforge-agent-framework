@@ -174,10 +174,24 @@ impl Drop for PluginContainer {
 fn installation_order(
     plugins: &[Arc<dyn Plugin>],
 ) -> Result<(Vec<String>, Vec<usize>), PluginError> {
-    let mut ids = Vec::with_capacity(plugins.len());
+    let declarations = plugins
+        .iter()
+        .map(|plugin| (plugin.id().to_owned(), plugin.dependencies()))
+        .collect::<Vec<_>>();
+    let order = plugin_dependency_order(&declarations)?;
+    Ok((declarations.into_iter().map(|(id, _)| id).collect(), order))
+}
+
+/// Validate IDs and dependencies without constructing or installing plugins.
+/// Returns declaration indices in dependency order, using input order to break
+/// ties. Hosts can use this same check before invoking deferred factories.
+pub fn plugin_dependency_order(
+    declarations: &[(String, Vec<String>)],
+) -> Result<Vec<usize>, PluginError> {
+    let mut ids = Vec::with_capacity(declarations.len());
     let mut positions = HashMap::new();
-    for (index, plugin) in plugins.iter().enumerate() {
-        let id = plugin.id().to_owned();
+    for (index, (id, _)) in declarations.iter().enumerate() {
+        let id = id.clone();
         if id.trim().is_empty() {
             return Err(PluginError::EmptyPluginId { index });
         }
@@ -187,16 +201,16 @@ fn installation_order(
         ids.push(id);
     }
 
-    let mut dependencies = Vec::with_capacity(plugins.len());
-    for (index, plugin) in plugins.iter().enumerate() {
+    let mut dependencies = Vec::with_capacity(declarations.len());
+    for (index, (_, declared_dependencies)) in declarations.iter().enumerate() {
         let mut required = HashSet::new();
-        for dependency in plugin.dependencies() {
+        for dependency in declared_dependencies {
             let position =
                 positions
-                    .get(&dependency)
+                    .get(dependency)
                     .ok_or_else(|| PluginError::MissingDependency {
                         plugin: ids[index].clone(),
-                        dependency,
+                        dependency: dependency.clone(),
                     })?;
             required.insert(*position);
         }
@@ -204,9 +218,9 @@ fn installation_order(
     }
 
     let mut installed = HashSet::new();
-    let mut order = Vec::with_capacity(plugins.len());
-    while order.len() < plugins.len() {
-        let ready = (0..plugins.len())
+    let mut order = Vec::with_capacity(declarations.len());
+    while order.len() < declarations.len() {
+        let ready = (0..declarations.len())
             .find(|index| !installed.contains(index) && dependencies[*index].is_subset(&installed));
         let Some(index) = ready else {
             return Err(PluginError::DependencyCycle {
@@ -221,5 +235,5 @@ fn installation_order(
         installed.insert(index);
         order.push(index);
     }
-    Ok((ids, order))
+    Ok(order)
 }

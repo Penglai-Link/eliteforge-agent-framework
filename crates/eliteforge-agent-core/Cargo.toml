@@ -5,9 +5,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+eliteforge-agent-capability-macros = { version = "0.1.0", path = "../eliteforge-agent-capability-macros" }
 eliteforge-agent-plugin-kernel = { version = "0.1.0", path = "../eliteforge-agent-plugin-kernel" }
 async-trait.workspace = true
 futures.workspace = true
+inventory.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

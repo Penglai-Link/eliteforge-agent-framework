@@ -14,7 +14,7 @@ mod resources;
 mod services;
 
 pub use async_trait::async_trait;
-pub use container::{Plugin, PluginContainer, PluginContext};
+pub use container::{Plugin, PluginContainer, PluginContext, plugin_dependency_order};
 pub use error::PluginError;
 pub use pack::{PluginPack, PluginPackBuilder};
 pub use resources::{ResourceScope, ShutdownReport};

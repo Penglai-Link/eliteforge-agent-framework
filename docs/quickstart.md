@@ -7,7 +7,8 @@
 | 场景 | 入口 |
 |---|---|
 | 最小可运行 Agent | [创建第一个 Agent](#创建第一个-agent) |
-| 一次配置多个插件 | [使用插件包](#使用插件包) |
+| 声明业务能力并按包自动装配 | [自动装配业务能力](#自动装配业务能力) |
+| 一次配置官方插件 | [使用官方插件包](#使用官方插件包) |
 | 边生成边推送给前端 | [流式输出](#流式输出) |
 | 运行中追加指令或取消 | [控制运行](#控制运行) |
 | 保持同一会话上下文 | [连续对话](#连续对话) |
@@ -53,7 +54,43 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 
 对应源码：[default_model.rs](../integration-tests/src/bin/default_model.rs)。`SqliteStoragePlugin` 会注册会话、执行状态、交互、长期记忆、摘要和附件存储；服务端通常复用同一个 Agent，进程退出时再调用 `agent.close()`。
 
-## 使用插件包
+## 自动装配业务能力
+
+业务 crate 在对应 trait `impl` 上标记 `#[capability(...)]`，应用只选择它需要的能力包。
+包配置属于当前 Agent；依赖已链接但未选中的包不会调用 factory。
+
+~~~rust
+use eliteforge_agent_core::CapabilityPackBuilder;
+use eliteforge_agent_framework::AgentBuilder;
+use eliteforge_agent_official_plugin_pack::EliteForgeOfficialPluginPack;
+use shop_plugin::ShopConfig;
+
+let agent = AgentBuilder::new()
+    .plugin_pack(EliteForgeOfficialPluginPack::new("agent.sqlite"))
+    .capability_pack(
+        CapabilityPackBuilder::new(
+            "shop",
+            ShopConfig {
+                name: "星河商店".into(),
+            },
+        ),
+    )
+    .build()
+    .await?;
+~~~
+
+子包必须明确加入：
+
+~~~rust
+let shop = CapabilityPackBuilder::new("shop", shop_config)
+    .include(CapabilityPackBuilder::new("shop.audit", audit_config));
+~~~
+
+这里的 `PluginPack` 只负责官方插件组合，`CapabilityPack` 负责业务声明的自动装配；
+两者可以并用。完整的宏写法、`id`、`instance`、`depends_on`、配置 factory 和首版限制见
+[能力包与自动装配](capability-packs.md)。
+
+## 使用官方插件包
 
 安装 `eliteforge-agent-official-plugin-pack` 后，一个包默认装配全部官方插件：模型、SQLite、用户问答、AGUI、MCP 和 OTel。
 
@@ -76,8 +113,9 @@ AGUI 已默认启用，调用 `agent.start_with_output::<AgUiStream>(request)` �
 cargo run -p eliteforge-agent-official-plugin-pack --example official_pack -- agent.sqlite
 ```
 
-这个示例使用本地演示模型，无需凭据。MCP 默认没有服务器，工具集为空；OTel 使用宿主的全局 provider。
-替换模型、配置 MCP 服务器和遥测 provider，以及自定义和嵌套包，见[插件包](plugins.md#插件包)。
+这个示例使用本地演示模型，无需凭据。MCP 默认没有服务器，工具集为空；OTel 使用上层应用的全局 provider。
+替换模型、配置 MCP 服务器和遥测 provider，以及兼容的自定义 `PluginPack`，见
+[插件包](plugins.md#插件包)。
 
 ## 流式输出
 
@@ -147,7 +185,7 @@ let second = agent
 println!("{}\n{}", first.output, second.output);
 ```
 
-同一 Agent 的同一 Session 同时只能有一个 Run。并发请求需要由宿主排队，或使用不同的 session ID。
+同一 Agent 的同一 Session 同时只能有一个 Run。并发请求需要由上层应用排队，或使用不同的 session ID。
 
 ## 使用 DAG
 
@@ -190,7 +228,7 @@ agent.close().await;
 
 ## 按阶段选择模型
 
-一个连接可以注册多个模型；宿主只配置一次地址和认证，再用选择策略把不同阶段映射到模型：
+一个连接可以注册多个模型；上层应用只配置一次地址和认证，再用选择策略把不同阶段映射到模型：
 
 ```rust
 use eliteforge_agent_framework::{FixedModelStrategy, ModelDescriptor, ModelRef, ModelStrategyPlugin};
@@ -259,7 +297,7 @@ cargo run -p eliteforge-agent-state-sqlite --example durable_approval -- start /
 cargo run -p eliteforge-agent-state-sqlite --example durable_approval -- answer /tmp/approval.db <run-id> <interaction-id> true
 ```
 
-对应源码：[durable_approval.rs](../crates/eliteforge-agent-state-sqlite/examples/durable_approval.rs)。真实应用需要由宿主负责鉴权、审批 UI 和回答提交。
+对应源码：[durable_approval.rs](../crates/eliteforge-agent-state-sqlite/examples/durable_approval.rs)。真实应用需要由上层应用负责鉴权、审批 UI 和回答提交。
 
 ## 开启 OTel
 
@@ -302,7 +340,7 @@ metrics.shutdown()?;
 println!("{}", result?.output);
 ```
 
-默认 ReAct 会看到 `agent.run` 和 `agent.model`；使用 DAG 或工具时会增加对应的 node/tool span。生产环境由宿主配置 exporter、采样和关闭策略，详见[可观测](observability.md)。
+默认 ReAct 会看到 `agent.run` 和 `agent.model`；使用 DAG 或工具时会增加对应的 node/tool span。生产环境由上层应用配置 exporter、采样和关闭策略，详见[可观测](observability.md)。
 
 ## 下一步
 

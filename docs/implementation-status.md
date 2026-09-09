@@ -26,6 +26,7 @@ no Tron compatibility rules were added to the execution contracts.
 | Token estimation and admission | Connection-level model-aware estimator throughout built-in planning and final admission; atomic reservation, conservative unknown usage, JSON-output capability check | `eliteforge-agent-framework/tests/model_and_tool_controls.rs`; `eliteforge-agent-framework/tests/execution_contracts.rs` |
 | Resource lifecycle | Async reverse-order shutdown, sync Drop fallback, bounded workflow lease release, installation rollback; execution and cleanup errors retained together; cancelled close waiter cannot abandon cleanup | `eliteforge-agent-plugin-kernel/tests/async_shutdown.rs`; `eliteforge-agent-plugin-kernel/tests/container.rs`; `eliteforge-agent-framework/tests/async_lifecycle.rs`; release-fault tests in `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Tools and run control | Schema before effects; bounded opt-in ReAct parallelism; cloneable RunControl independent of result waiting, owner-drop cancellation, tool revocation at dispatch; post-effect middleware failure remains indeterminate | `eliteforge-agent-framework/tests/runtime_control.rs`; `eliteforge-agent-framework/tests/model_and_tool_controls.rs`; `eliteforge-agent-state-sqlite/tests/workflow.rs` |
+| Filesystem and system-command capability packs | Explicit directory-confined read/search and write/patch packs; an independent cross-platform system-command pack; absolute paths, `..`, and symlink traversal are rejected only for filesystem tools | `eliteforge-agent-capability-tools/tests/capability_packs.rs` |
 | Independent execution scenarios | Simple chat, tools, configurable stages, input, approval, nested child Agents through real invokers | `eliteforge-agent-framework/tests/host_contract.rs`; `eliteforge-agent-framework/tests/delegation.rs`; `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Child execution | Root/parent identity, inherited limits, upfront allowance; rejected/interrupted admission refunds local budget/count; confirmed reservations corrected after rejected dispatch; unknown writes remain conservative | `eliteforge-agent-framework/tests/delegation.rs`; admission journal fault tests in `eliteforge-agent-framework/src/tests.rs`; durable child budget/count test in `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Persistence | Atomic checkpoint/transcript/journal; session-head predecessor checks, CAS revisions; stable fencing identity across renewals with authoritative store expiry; bounded worker admission, WAL and FULL synchronous mode | `eliteforge-agent-state-sqlite/tests/store.rs`; `eliteforge-agent-state-sqlite/src/lib.rs` cancellation test |
@@ -38,6 +39,7 @@ no Tron compatibility rules were added to the execution contracts.
 | Recovery failure boundaries | Real executor process kill, in-flight budget reservation, completed/pending tool siblings, simultaneous resume, definition drift after optimistic read, schema drift, policy failure, SQL completion after await cancellation | `eliteforge-agent-state-sqlite/tests/crash_recovery.rs`; `eliteforge-agent-state-sqlite/tests/workflow.rs`; `eliteforge-agent-state-sqlite/src/lib.rs` |
 | Event semantics | Distinct live execution-attempt and durable-journal scopes; serialized publication; workflow steering messages and events committed together before live publication, including final replies; bounded normal-event drain followed by a separately bounded terminal attempt per sink | `eliteforge-agent-framework/tests/execution_contracts.rs`; steering/replay/failure and acquired-checkpoint/event-scope tests in `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Agent plugin operations | Plugins configure services and per-run output factories; Agent owns execution, controls, model operations, storage requests and shutdown admission; typed custom operations and output ownership checks | `eliteforge-agent-framework/tests/agent_operations.rs`; storage bundle and MCP transport tests |
+| Capability packs | Core exports `CapabilityPack` / builder and `#[capability]`; selected packs and explicit children resolve static descriptors, preflight IDs/dependencies/cycles, create sync configured instances in stable order, share declared instances, and enter the existing Plugin lifecycle | `eliteforge-agent-framework/tests/capability_packs.rs`; cross-crate declarations in `eliteforge-agent-capability-test-fixture/src/lib.rs`; resolver unit coverage in `eliteforge-agent-core/src/capability_packs.rs` |
 | Plugin packs | AgentBuilder::plugin_pack expands custom, nested and official packs into one dependency graph; official defaults register all six plugins: Genai, SQLite, human tools, AG-UI, empty MCP and telemetry using host global providers | `eliteforge-agent-framework/tests/plugin_packs.rs`; `eliteforge-agent-official-plugin-pack/tests/official_pack.rs`; `tests/global_telemetry.rs`; offline `examples/official_pack.rs` |
 | AG-UI output | Community ag-ui 0.3.0 event types and SSE; ordered bounded handoff independent of ordinary observer backlog; text/reasoning/tool/step/state/activity/custom events; distinct model/tool invocation identities, offloaded result references, tool-bound approval/denial across executor restart, final-response deduplication and serialized admission checks; explicit overflow/size/order errors | 22 SDK-client and lifecycle cases in `eliteforge-agent-official-plugin-agui/tests/protocol.rs`; offline `eliteforge-agent-official-plugin-agui/examples/sse.rs` |
 | genai | Exact `=0.7.0-beta.21`, real local HTTP/SSE, shared auth, model discovery, tools, signed-thinking continuation, media input and generation options | `eliteforge-agent-official-plugin-model-genai/tests/protocol.rs` |
@@ -50,7 +52,39 @@ no Tron compatibility rules were added to the execution contracts.
 | Artifacts | Directory capability, canonical random IDs, atomic immutable publication, fsync, bounded byte ranges, cancellation, symlink rejection, combined content/structured offload, explicit result reference, post-publication/history-failure reconciliation | `eliteforge-agent-context/src/artifact.rs`; `eliteforge-agent-context/tests/artifacts.rs` |
 | OpenTelemetry | Injected providers; run/node/model/tool spans, node-scoped model/tool links, persisted attempt identities across restore/retry, bounded redacted error events, duration/usage/error/cancellation metrics; inline assembly/failure/dispatch diagnostics while spans are alive; no payloads by default; providers remain host-owned | `eliteforge-agent-official-plugin-otel/tests/export.rs` uses actual SDK in-memory exporters |
 
-## Final verification
+## Current capability-pack verification
+
+- `cargo test --offline --locked -p eliteforge-agent-capability-macros`: 8 passed, 1 ignored.
+- `cargo test --offline --locked -p eliteforge-agent-core`: 6 passed.
+- `cargo test --offline --locked -p eliteforge-agent-framework --test capability_packs`: 15 passed.
+- `cargo test --offline -p eliteforge-agent-capability-tools`: 6 passed.
+- `make test`: passed, including workspace all-target tests, documentation tests and the Framework
+  no-default-features suite.
+- `make lint`: passed, including format check, Clippy with `-D warnings`, compilation and Rustdoc.
+- `git diff --check`: passed.
+- `make test ALL_FEATURES=true`: blocked by an existing SHA-256 manifest mismatch for
+  `sqlite-simple/hmm_model.utf8`. That resource was not changed by the capability-pack work;
+  this is an environment/baseline limitation, not a capability-pack test failure.
+
+The cross-crate suite covers selected and unselected packs, explicit children, stable dependency order,
+shared multi-interface instances, per-Agent isolation, pre-factory rejection of ID/dependency/cycle
+errors, compatibility with legacy plugins, reserved framework IDs, and rollback after Plugin installation failure.
+Review regressions additionally cover cross-module and aliased implementation/configuration types,
+implicit and explicit shared-instance keys, distinct factory conflicts, stacked declarations of two
+instances, combined ordinary-plugin/capability cycles and missing dependencies, and factory ordering
+through ordinary-plugin dependency edges.
+
+Core now declares a version for its capability-macro dependency. Offline packaging with
+`--registry crates-io --allow-dirty --no-verify` produced the macro and kernel archives;
+Core passed the version-requirement check but could not find the macro package in the configured
+`panamax-sparse` replacement index while offline. No package was uploaded. End-to-end Core
+packaging still requires these dependency versions to be available in the target registry.
+
+## Historical baseline verification
+
+The following evidence belongs to the earlier baseline delivery and predates the current
+capability-pack dependency additions. It is retained for the broader runtime scope; use the
+section above for this change's current validation result.
 
 - `cargo test --workspace --all-targets --all-features`: 249 tests passed, including optional native SQLite extension checks and local model protocol fixtures.
 - `cargo test -p eliteforge-agent-framework --no-default-features --all-targets`: 87 tests passed; the Framework can run without the Genai integration.
@@ -105,6 +139,10 @@ no Tron compatibility rules were added to the execution contracts.
   owns and closes the connections it creates. This work does
   not claim account-level subscription billing, cross-node quota coordination,
   arbitrary plugin sandboxing, lowest-Rust-version certification or load certification.
+- Capability-pack factories are synchronous and only receive their selected pack configuration.
+  They do not resolve services, perform async initialization or provide member-level switches.
+  Official `PluginPack` composition is intentionally unchanged; it remains the supported
+  official-plugin entry point.
 
 The execution invariants and acceptance scope are retained in [execution-contracts.md](execution-contracts.md). Current layers and defaults are described in [architecture.md](architecture.md), with the extension inventory in [plugins.md](plugins.md).
 

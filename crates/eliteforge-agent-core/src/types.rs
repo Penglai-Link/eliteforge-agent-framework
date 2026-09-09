@@ -245,6 +245,8 @@ pub enum ContextError {
 pub enum AgentError {
     #[error(transparent)]
     Plugin(#[from] eliteforge_agent_plugin_kernel::PluginError),
+    #[error(transparent)]
+    Capability(#[from] crate::CapabilityError),
     #[error("required service is missing: {0}")]
     MissingService(&'static str),
     #[error("invalid configuration: {0}")]

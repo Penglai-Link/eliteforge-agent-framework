@@ -1,0 +1,10 @@
+[package]
+name = "eliteforge-agent-capability-test-fixture"
+description = "Cross-crate capability-pack fixtures for framework integration tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }

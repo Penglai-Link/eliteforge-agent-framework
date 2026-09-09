@@ -131,9 +131,9 @@ ReAct 的不确定工具仍使用原有 `Record` / `Retry`，按 invocation ID �
 
 同一运行只有一个持有租约的调度器。续租保持 fencing 身份，重新接管提高 generation。
 这不是分布式 worker 队列，也不承诺外部副作用 exactly-once；外部幂等和操作确认由
-工具系统及宿主协作完成。
+工具系统及上层应用协作完成。
 
-## 预算、交互与宿主边界
+## 预算、交互与上层应用边界
 
 - 所有 ReAct 节点共享 token、逻辑模型步骤和工具调用次数限额；恢复保留已消耗或
   不确定的额度。模型重试和上下文压缩仍使用同一 token 账本。
@@ -142,7 +142,7 @@ ReAct 的不确定工具仍使用原有 `Record` / `Retry`，按 invocation ID �
 - 达到步骤或工具次数上限会以对应 RunStatus 结束，终态可直接重放。
 - DAG 不接受未指定目标的实时文本 steering，以免多节点竞争同一条指令。
   交互通过明确的 interaction ID 恢复；普通 ReAct / WorkflowLoop 的 steering 保持原语义。
-- UI 布局、表单体验、发布流程、权限和配置继承由宿主负责。
+- UI 布局、表单体验、发布流程、权限和配置继承由上层应用负责。
   `Agent::workflow_node_descriptors()` 提供类型能力与配置 schema；
   `DagWorkflowDefinition::validate()` 提供结构校验；`WorkflowNodeChanged` 与
   `DagWorkflowState` 提供事件和权威状态。

@@ -143,6 +143,7 @@ macro_rules! contribution_plugin {
 contribution_plugin!(ToolProviderPlugin, ToolProvider, ToolProviderService);
 contribution_plugin!(ContextPlugin, ContextProvider, ContextService);
 contribution_plugin!(EventPlugin, EventSink, EventService);
+contribution_plugin!(RunOutputPlugin, RunOutputFactory, RunOutputService);
 contribution_plugin!(WorkflowNodePlugin, WorkflowNode, WorkflowNodeService);
 
 pub type ContextProviderPlugin = ContextPlugin;

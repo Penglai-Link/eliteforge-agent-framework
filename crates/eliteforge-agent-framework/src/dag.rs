@@ -747,9 +747,7 @@ impl WorkflowNode for ReactWorkflowNode {
             .await?;
         Ok(WorkflowNodeResult {
             content: Some(result.content),
-            value: result
-                .structured
-                .unwrap_or_else(|| Value::String(result.output)),
+            value: result.structured.unwrap_or(Value::String(result.output)),
             routes: None,
             status: result.status,
             interactions: result.interactions,

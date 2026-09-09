@@ -24,5 +24,6 @@ jsonschema = { version = "0.52.1", default-features = false }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+eliteforge-agent-capability-test-fixture = { path = "../eliteforge-agent-capability-test-fixture" }
 eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-official-plugin-storage-sqlite" }
 eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }
