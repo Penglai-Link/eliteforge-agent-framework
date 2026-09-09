@@ -1,13 +1,12 @@
 # 快速上手
 
-本文按场景介绍如何组装和运行 Agent。先准备 Rust/Cargo 以及模型服务；不想访问真实模型时，可以运行离线的 `standalone` 示例。
+本文按场景介绍如何组装和运行 Agent。先准备 Rust/Cargo 以及模型服务。
 
 ## 场景导航
 
 | 场景 | 入口 |
 |---|---|
 | 最小可运行 Agent | [创建第一个 Agent](#创建第一个-agent) |
-| 不接真实模型，验证模型-工具循环 | [运行离线示例](#运行离线示例) |
 | 边生成边推送给前端 | [流式输出](#流式输出) |
 | 运行中追加指令或取消 | [控制运行](#控制运行) |
 | 保持同一会话上下文 | [连续对话](#连续对话) |
@@ -52,16 +51,6 @@ cargo run -p eliteforge-agent-framework --example default_model
 代理服务可额外配置 `MODEL_ENDPOINT` 和 `MODEL_API_KEY`。其他协议通过 `MODEL_ADAPTER` 选择。需要在代码中指定时，直接 `.plugin(GenaiPlugin::new(model))`；详细配置见 [plugins.md](plugins.md)。
 
 对应源码：[default_model.rs](../crates/eliteforge-agent-framework/examples/default_model.rs)。`SqliteStoragePlugin` 会注册会话、执行状态、交互、长期记忆、摘要和附件存储；服务端通常复用同一个 Agent，进程退出时再调用 `agent.close()`。
-
-## 运行离线示例
-
-`standalone` 使用确定性的 `DemoModel`，完整演示“模型发起工具调用 → 工具返回观察 → 模型生成最终答案”，不访问网络。这个示例用 `ChatModelPlugin` 注册自定义 ChatModel，连接与模型名默认 `default/default`：
-
-```sh
-cargo run -p eliteforge-agent-framework --example standalone -- 19 23
-```
-
-输出包含最终结果、模型步骤数和工具调用数。对应源码：[standalone.rs](../crates/eliteforge-agent-framework/examples/standalone.rs)。把 `DemoModel` 替换为自己的 HTTP/SDK 适配器，即可沿用相同的工具调用链。
 
 ## 流式输出
 

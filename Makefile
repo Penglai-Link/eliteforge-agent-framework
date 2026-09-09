@@ -49,7 +49,7 @@ $(error 错误：TEST 必须对应 crates/*/tests 下已有的 .rs 文件，不�
 endif
 endif
 
-.PHONY: help doctor install clean format lint test build dev deploy _version
+.PHONY: help doctor install clean format lint test build deploy _version
 
 help:
 	@echo 统一命令：
@@ -61,7 +61,6 @@ help:
 	@echo   make lint       格式检查、Clippy、编译检查和严格 Rustdoc 检查
 	@echo   make test       workspace 测试、文档测试及 Framework 无默认特性测试
 	@echo   make build      构建全部 workspace 库的 release 产物
-	@echo   make dev        运行离线 standalone 示例：19 加 23，数据保存在 agent.sqlite
 	@echo   make deploy     发布版本化制品；当前缺少发布配置，执行会报错
 	@echo 能力：未检测到 Docker、Compose 或应用壳，不生成对应目标
 	@echo 覆盖变量：
@@ -141,9 +140,6 @@ endif
 build: _version
 	@echo 检查：cargo build 不隐含测试，SKIP_TESTS 对此目标无测试可跳过；测试使用 make test
 	cargo build $(_CARGO_FLAGS) $(_WORKSPACE_FLAGS) --release
-
-dev:
-	cargo run $(_CARGO_FLAGS) -p eliteforge-agent-framework --example standalone -- 19 23
 
 # 缺少发布目标、依赖版本和发布顺序证据，不能猜测为 crates.io 发布。
 deploy: _version

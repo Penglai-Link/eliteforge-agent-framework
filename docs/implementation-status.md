@@ -57,7 +57,6 @@ no Tron compatibility rules were added to the execution contracts.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps`: passed.
 - `cargo test --workspace --doc --all-features`: passed; there are currently no Rust doctest cases.
-- Offline `standalone` ran twice against the same temporary SQLite database: `19 + 23 = 42` and `-11 + 4 = -7`. Each run completed two model steps and one tool call.
 - External dependency versions and checksums in Cargo.lock are unchanged.
 - Cargo checks run from `/tmp` with a temporary `CARGO_HOME` that reuses the local cache. This avoids the unavailable configured mirror without changing repository or global Cargo configuration.
 - `git diff --check` and an additional source/document whitespace scan cover tracked and new files. Local Markdown file links are checked after moving the public contracts into Core.
