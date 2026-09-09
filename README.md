@@ -2,6 +2,23 @@
 
 EliteForge Agent Framework 是一个可扩展的 Rust Agent 框架：Framework 负责装配、执行和生命周期管理，Plugin 提供模型、工具、存储和可观测能力，上层应用保留身份、权限和业务流程。
 
+所有插件只配置到 `AgentBuilder`，应用通过构建后的 `agent` 实例操作：启动、控制、获取输出、调用模型、处理问答和关闭资源。
+自定义插件通过 `agent.execute(request)` 暴露能力。依赖配置、完整入门示例和场景选择见[插件开发指南](docs/plugins.md)。
+
+多个插件可以打成包，一次配置到 Agent：
+
+```rust
+use eliteforge_agent_framework::AgentBuilder;
+use eliteforge_agent_official_plugin_pack::EliteForgeOfficialPluginPack;
+
+let agent = AgentBuilder::new()
+    .plugin_pack(EliteForgeOfficialPluginPack::new("agent.sqlite"))
+    .build().await?;
+```
+
+官方包默认包含项目里的全部 6 个官方插件：Genai、SQLite、用户问答、AGUI、MCP 和 OTel。
+MCP 未配置服务器时工具集为空；OTel 在构建时读取宿主的全局 provider。业务组合可实现自己的 `PluginPack`。
+
 ```mermaid
 flowchart LR
     Host[上层应用] --> Builder[AgentBuilder]
@@ -51,13 +68,17 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 | `eliteforge-agent-framework` | Agent 装配、循环调度、模型和工具执行 |
 | `eliteforge-agent-core` | 公共类型、能力接口和 Plugin 契约 |
 | `eliteforge-agent-plugin-kernel` | 服务注册、依赖排序和资源关闭 |
+| `eliteforge-agent-official-plugin-pack` | 官方插件组合，一次配置到 Agent |
 | `eliteforge-agent-official-plugin-*` | Genai、SQLite、MCP、AG-UI、OTel 等官方实现 |
 
 ## 文档
 
 - [快速上手](docs/quickstart.md)：按场景运行 Agent，并查看完整 Rust 代码。
 - [架构总览](docs/architecture.md)：分层、装配、执行链和生命周期。
-- [Plugin 与扩展点](docs/plugins.md)：注册方式和现有实现。
+- [插件与扩展开发指南](docs/plugins.md)：引入依赖、实现 Provider、按业务场景选择扩展点。
+- [能力包与自动装配设计](docs/capability-packs.md)：框架宏声明能力、应用显式选包、内部自动装配；尚未实现。
+- [扩展点参考](docs/plugin-extension-reference.md)：接口、注册类型、调用时机与多实例规则。
+- [模型插件](docs/model-plugins.md)：Genai 配置、协议、模型选择与多模态扩展。
 - [DAG 工作流](docs/dag-workflows.md)：节点、并行、分支和恢复。
 - [交互与审批](docs/interactions.md)：用户问答、工具审批和跨进程恢复。
 - [可观测](docs/observability.md)：事件、OpenTelemetry 和恢复身份。

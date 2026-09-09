@@ -184,9 +184,9 @@ async fn retry_does_not_duplicate_text_or_reasoning_already_streamed() {
             .await
             .unwrap();
         let mut handle = agent.start(RunRequest::new("s", "hello")).unwrap();
-        let mut events = handle.take_events();
+        let mut events = agent.events(&mut handle).unwrap();
         assert!(matches!(
-            handle.wait().await,
+            agent.wait(handle).await,
             Err(AgentError::Model(ModelError::Transient(_)))
         ));
         assert_eq!(attempts.load(Ordering::SeqCst), 1);

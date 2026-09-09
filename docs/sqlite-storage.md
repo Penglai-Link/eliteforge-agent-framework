@@ -66,7 +66,7 @@ eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-
 
 ```rust
 use eliteforge_agent_official_plugin_storage_sqlite::{
-    ExtensionConfig, ExtensionMode, SqliteCapabilitiesService, SqliteStoragePlugin,
+    ExtensionConfig, ExtensionMode, ReadSqliteCapabilities, SqliteStoragePlugin,
 };
 
 let mut extensions = ExtensionConfig::new("private-data/sqlite-native");
@@ -79,8 +79,8 @@ let agent = AgentBuilder::new()
     .build()
     .await?;
 
-let capabilities = agent.service::<SqliteCapabilitiesService>().unwrap();
-for (store, report) in &capabilities.0 {
+let capabilities = agent.execute(ReadSqliteCapabilities).await?;
+for (store, report) in &capabilities {
     println!("{store}: simple={:?}, vector={:?}", report.simple, report.vector);
 }
 ```

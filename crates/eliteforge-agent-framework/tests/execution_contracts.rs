@@ -447,7 +447,7 @@ async fn slow_observer_does_not_block_stream_or_drop_terminal_on_saturation() {
     .await
     .unwrap();
     gate.add_permits(1);
-    handle.wait().await.unwrap();
+    agent.wait(handle).await.unwrap();
     assert_eq!(finished.load(Ordering::SeqCst), 1);
 }
 

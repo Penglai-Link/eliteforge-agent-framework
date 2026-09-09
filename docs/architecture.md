@@ -46,10 +46,18 @@ Framework 的默认 `genai` feature 依赖 `eliteforge-agent-official-plugin-mod
 
 ## 服务装配
 
-`AgentBuilder` 先收集插件，`build().await` 才安装插件并构造运行时服务。安装阶段不会提前调用模型接口。
+`AgentBuilder` 通过 `plugin` 收集单个插件，通过 `plugin_pack` 展开插件包。所有插件进入同一个依赖图，
+`build().await` 才安装插件并构造运行时服务。包不创建独立容器，也不自行调用成员的 `install`。
+官方组合由独立的 `eliteforge-agent-official-plugin-pack` 提供，Framework 和 Core 不依赖它。
+安装阶段不会提前调用模型接口。
+
+上下文内容由 `ContextProvider` 实现提供，`ContextPlugin` 只将其注册为 `ContextService`。
+安装完成后，Builder 通过 `all::<ContextService>()` 汇总所有上下文实现；其他多贡献接口也按各自服务类型收集。
+当前没有从任意对象自动检测 trait 的机制。目标方案通过框架宏声明能力，内部收集元数据，
+再按应用显式选择的能力包装配；发现、启用、实例化和生命周期分别处理，见[设计说明](capability-packs.md)。
 
 ```text
-AgentBuilder.plugin(...)
+AgentBuilder.plugin(...) / plugin_pack(...)
         │
         ▼
 PluginContainer.build
@@ -218,7 +226,7 @@ flowchart TD
 
 上下文失败、成功、压缩恢复都会发布对应事件；因此 UI、Telemetry 或调试工具可以观察每个块的原始额度、最终额度和处理结果，而不需要解析模型适配器内部状态。
 
-相关代码入口：[context.rs](../crates/eliteforge-agent-core/src/context.rs)、[models.rs](../crates/eliteforge-agent-framework/src/models.rs)。配置层扩展点见[Plugin 与扩展点](plugins.md#工具上下文与事件)。
+相关代码入口：[context.rs](../crates/eliteforge-agent-core/src/context.rs)、[models.rs](../crates/eliteforge-agent-framework/src/models.rs)。配置层扩展点见[按场景选择扩展点](plugins.md#按场景选择扩展点)。
 
 ## 模型与订阅
 
@@ -248,7 +256,7 @@ ModelInvoker
 GenaiPlugin / 自定义 Plugin → Core 注册契约 → Framework 模型目录与执行器
 ```
 
-请求指定优先于阶段规则和每项能力的默认模型，未配置规则时要求唯一兼容实现。协议绑定到具体连接/模型/操作；continuation 还绑定格式版本。详细调用示例见 [plugins.md](plugins.md)。
+请求指定优先于阶段规则和每项能力的默认模型，未配置规则时要求唯一兼容实现。协议绑定到具体连接/模型/操作；continuation 还绑定格式版本。详细调用示例见[模型插件](model-plugins.md)。
 
 模型连接、模型目录和选择策略属于运行时配置；订阅归属、账号权限、计费和凭据轮换由宿主管理。
 `ModelInvoker` 协调 `ContextAssembler`，并负责超时、重试、预算预留和结果验证。模型已输出增量后不自动重试；不确定失败按已预留额度保守计入预算。
@@ -399,8 +407,8 @@ flowchart LR
 ```
 
 `Agent::close` 关闭所有克隆的新运行入口，等待运行清理后关闭插件，并返回 `ShutdownReport`。
-显式共享的 SQLite store、MCP client 和 OTel provider 仍由宿主关闭；关闭一个 Agent 不应关闭其他 Agent 共享的服务。
-`McpToolsPlugin::owned` 只负责它自己创建的连接。
+插件创建的 SQLite 和 MCP 连接在 `agent.close()` 时释放。应用只配置 `McpToolsPlugin::new`，无需单独连接或关闭 MCP client。
+显式注入的共享组件（例如跨应用使用的 OTel provider）仍由其所有者管理；关闭 Agent 只清理本实例的观测状态。
 
 ## 延伸阅读
 

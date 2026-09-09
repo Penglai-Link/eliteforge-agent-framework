@@ -35,19 +35,9 @@ impl Default for AgUiOptions {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct AgUiPlugin {
-    id: RunId,
     options: AgUiOptions,
-}
-struct InstalledAgUi(RunId);
-impl Default for AgUiPlugin {
-    fn default() -> Self {
-        Self {
-            id: RunId::new_v4(),
-            options: AgUiOptions::default(),
-        }
-    }
 }
 impl AgUiPlugin {
     pub fn new(options: AgUiOptions) -> Result<Self, AgentError> {
@@ -62,62 +52,7 @@ impl AgUiPlugin {
                 "invalid AG-UI stream limits".into(),
             ));
         }
-        Ok(Self {
-            id: RunId::new_v4(),
-            options,
-        })
-    }
-
-    /// Start through the same plugin instance (or clone) installed on the Agent.
-    /// The RunHandle retains cancellation-on-drop ownership. Move it into wait
-    /// while consuming AgUiStream; obtain handle.control() for live controls.
-    pub fn start<A: AgentRuntime>(
-        &self,
-        agent: &A,
-        mut request: RunRequest,
-    ) -> Result<(A::Handle, AgUiStream), AgentError> {
-        if agent
-            .service::<InstalledAgUi>()
-            .is_none_or(|installed| installed.0 != self.id)
-        {
-            return Err(AgentError::InvalidConfiguration(
-                "install this AgUiPlugin before starting an AG-UI run".into(),
-            ));
-        }
-        self.validate_start(&request)?;
-        let (sender, receiver) = mpsc::channel(self.options.capacity);
-        let channel = Arc::new(Channel {
-            plugin_id: self.id,
-            state: Mutex::new(ChannelState {
-                sender: Some(sender),
-                execution_id: None,
-            }),
-            failure: Arc::new(Mutex::new(None)),
-            max_event_bytes: self.options.max_event_bytes,
-        });
-        request.extensions.insert(channel.clone());
-        let handle = agent.start(request)?;
-        let execution_id = channel
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .execution_id;
-        let Some(execution_id) = execution_id else {
-            drop(handle);
-            return Err(AgentError::InvalidConfiguration(
-                "install this AgUiPlugin before starting an AG-UI run".into(),
-            ));
-        };
-        Ok((
-            handle,
-            AgUiStream {
-                adapter: Adapter::new(self.options.clone(), execution_id),
-                receiver,
-                failure: channel.failure.clone(),
-                pending: VecDeque::new(),
-                ended: false,
-            },
-        ))
+        Ok(Self { options })
     }
 
     fn validate_start(&self, request: &RunRequest) -> Result<(), AgentError> {
@@ -164,23 +99,53 @@ impl AgUiPlugin {
     }
 }
 
+impl RunOutputFactory for AgUiPlugin {
+    fn output_type(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<AgUiStream>()
+    }
+    fn prepare(
+        &self,
+        request: &RunRequest,
+        execution_id: RunId,
+        extensions: &mut Extensions,
+        outputs: &mut RunOutputs,
+    ) -> Result<(), AgentError> {
+        self.validate_start(request)?;
+        let (sender, receiver) = mpsc::channel(self.options.capacity);
+        let channel = Arc::new(Channel {
+            state: Mutex::new(ChannelState {
+                sender: Some(sender),
+                execution_id: Some(execution_id),
+            }),
+            failure: Arc::new(Mutex::new(None)),
+            max_event_bytes: self.options.max_event_bytes,
+        });
+        outputs.insert(AgUiStream {
+            adapter: Adapter::new(self.options.clone(), execution_id),
+            receiver,
+            failure: channel.failure.clone(),
+            pending: VecDeque::new(),
+            ended: false,
+        })?;
+        extensions.insert(channel);
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl Plugin for AgUiPlugin {
     fn id(&self) -> &str {
         "agent.agui"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.provide(InstalledAgUi(self.id))?;
+        context.contribute(RunOutputService(Arc::new(self.clone())))?;
         context.contribute(EventService(Arc::new(self.clone())))
     }
 }
 #[async_trait]
 impl EventSink for AgUiPlugin {
     fn on_published(&self, context: &RunContext, event: &EventEnvelope) {
-        let Some(channel) = context.extensions.get::<Arc<Channel>>() else {
-            return;
-        };
-        if channel.plugin_id == self.id {
+        if let Some(channel) = context.extensions.get::<Arc<Channel>>() {
             channel.send(event);
         }
     }
@@ -188,7 +153,6 @@ impl EventSink for AgUiPlugin {
 }
 
 struct Channel {
-    plugin_id: RunId,
     max_event_bytes: usize,
     state: Mutex<ChannelState>,
     failure: Arc<Mutex<Option<&'static str>>>,
@@ -260,7 +224,7 @@ fn relevant(event: &AgentEvent) -> bool {
 
 /// A single consumer with ordered, typed AG-UI events. A capacity, size or
 /// source-order failure yields RUN_ERROR and terminates this presentation stream;
-/// it does not retry tools or implicitly cancel the agent. Use RunHandle::wait
+/// it does not retry tools or implicitly cancel the agent. Use Agent::wait
 /// for the authoritative execution result.
 pub struct AgUiStream {
     adapter: Adapter,

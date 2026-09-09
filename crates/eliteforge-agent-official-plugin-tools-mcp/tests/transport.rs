@@ -126,6 +126,76 @@ async fn check_roundtrip(client: &McpClient) {
     );
 }
 
+struct InspectOnly;
+#[async_trait::async_trait]
+impl eliteforge_agent_framework::AgentLoop for InspectOnly {
+    async fn run(
+        &self,
+        _: &eliteforge_agent_framework::RunRequest,
+        _: &eliteforge_agent_framework::RunContext,
+        _: &eliteforge_agent_framework::AgentServices,
+    ) -> Result<eliteforge_agent_framework::RunResult, eliteforge_agent_framework::AgentError> {
+        unreachable!("discovery must not execute the Agent loop")
+    }
+}
+
+async fn configured_mcp_plugins_are_discovered_and_closed_through_agent() {
+    use eliteforge_agent_framework::{AgentBuilder, AgentError, AgentLoopPlugin};
+    use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
+    let dir = tempfile::tempdir().unwrap();
+    let (url, stop, task) = http_server(Server::default()).await;
+    let config = |namespace| {
+        McpConfig::new(
+            namespace,
+            McpTransport::StreamableHttp {
+                url: url.clone(),
+                headers: HashMap::new(),
+            },
+        )
+    };
+    let agent = AgentBuilder::new()
+        .plugin(SqliteStoragePlugin::new(dir.path().join("mcp.db")))
+        .plugin(AgentLoopPlugin::new(InspectOnly))
+        .plugin(McpToolsPlugin::new("first", config("first")))
+        .plugin(McpToolsPlugin::new("second", config("second")))
+        .build()
+        .await
+        .unwrap();
+    for id in ["first", "second"] {
+        let tools = agent
+            .execute(DiscoverMcpTools {
+                plugin_id: id.into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(tools.len(), 3);
+        assert!(
+            tools
+                .iter()
+                .all(|tool| tool.id.starts_with(&format!("mcp/{id}/")))
+        );
+    }
+    assert!(
+        agent
+            .execute(DiscoverMcpTools {
+                plugin_id: "missing".into()
+            })
+            .await
+            .is_err()
+    );
+    assert!(agent.close().await.is_success());
+    assert!(matches!(
+        agent
+            .execute(DiscoverMcpTools {
+                plugin_id: "first".into()
+            })
+            .await,
+        Err(AgentError::Closed)
+    ));
+    stop.cancel();
+    task.await.unwrap();
+}
+
 async fn http_roundtrip_and_protocol_cancellation() {
     let server = Server::default();
     let entered = server.entered.clone();
@@ -250,10 +320,11 @@ async fn main() {
         http_roundtrip_and_protocol_cancellation().await;
         discovery_cycle_is_bounded().await;
         stdio_roundtrip_and_reaped_close().await;
+        configured_mcp_plugins_are_discovered_and_closed_through_agent().await;
     })
     .await
     .unwrap();
     println!(
-        "MCP transport scenarios: 3 passed (HTTP roundtrip and cancellation, bounded discovery, stdio roundtrip and close)"
+        "MCP transport scenarios: 4 passed (HTTP roundtrip and cancellation, bounded discovery, stdio roundtrip and close, Agent plugin operations)"
     );
 }

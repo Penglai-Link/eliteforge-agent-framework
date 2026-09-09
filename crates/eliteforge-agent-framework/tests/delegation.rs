@@ -102,7 +102,7 @@ async fn actual_nested_invokers_inherit_identity_and_charge_parent_budget() {
     for input in ["first task", "不同任务"] {
         let handle = root.start(RunRequest::new(input, input)).unwrap();
         let root_id = handle.run_id;
-        let answer = handle.wait().await.unwrap();
+        let answer = root.wait(handle).await.unwrap();
         assert_eq!(answer.output, input);
         assert_eq!(answer.usage.input_tokens + answer.usage.output_tokens, 6);
         let events = trace.0.lock().unwrap();
@@ -210,8 +210,11 @@ async fn parent_cancellation_reaches_child_provider_and_releases_its_future() {
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    handle.cancel();
-    assert!(matches!(handle.wait().await, Err(AgentError::Cancelled)));
+    root.cancel(&handle).unwrap();
+    assert!(matches!(
+        root.wait(handle).await,
+        Err(AgentError::Cancelled)
+    ));
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     tokio::time::timeout(Duration::from_secs(2), leaf.close())
         .await
@@ -372,7 +375,7 @@ async fn rejected_children_preserve_budget_and_admission_for_a_valid_child() {
     assert_eq!(answer.output, "input");
     assert_eq!(answer.usage.input_tokens + answer.usage.output_tokens, 6);
     release.notify_one();
-    busy.wait().await.unwrap();
+    child.wait(busy).await.unwrap();
     parent.close().await;
     child.close().await;
 }

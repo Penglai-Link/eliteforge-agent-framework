@@ -82,14 +82,17 @@ async fn final_reply_steering_records_ordered_live_and_durable_events_without_re
     let model = SteeringModel::default();
     let agent = steering_agent(store.clone(), model.clone()).await;
     let mut handle = agent.start(RunRequest::new("steering", "task")).unwrap();
-    let control = handle.control();
-    let mut events = handle.take_events();
-    let waiting = tokio::spawn(handle.wait());
+    let control = agent.control(&handle).unwrap();
+    let mut events = agent.events(&mut handle).unwrap();
+    let waiting = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.wait(handle).await }
+    });
     tokio::time::timeout(Duration::from_secs(5), model.entered.notified())
         .await
         .unwrap();
-    control.steer("include tests").unwrap();
-    control.clone().steer("explain the result").unwrap();
+    agent.steer(&control, "include tests").unwrap();
+    agent.steer(&control, "explain the result").unwrap();
     model.release.notify_one();
     let result = tokio::time::timeout(Duration::from_secs(5), waiting)
         .await
@@ -98,7 +101,7 @@ async fn final_reply_steering_records_ordered_live_and_durable_events_without_re
         .unwrap();
     assert_eq!(result.status, RunStatus::Completed);
     assert_eq!(result.steps, 2);
-    assert!(control.steer("after completion").is_err());
+    assert!(agent.steer(&control, "after completion").is_err());
     {
         let requests = model.requests.lock().unwrap();
         assert_eq!(requests.len(), 2);
@@ -147,10 +150,11 @@ async fn final_reply_steering_records_ordered_live_and_durable_events_without_re
     let mut replay = agent
         .start(resume("steering", control.run_id(), None))
         .unwrap();
-    let mut replay_events = replay.take_events();
-    // Even a resumed execution with the same RunId has separate controls.
-    control.cancel();
-    assert_eq!(replay.wait().await.unwrap().output, "done");
+    let mut replay_events = agent.events(&mut replay).unwrap();
+    // A rebuilt Agent rejects controls from the previous instance, even when
+    // the resumed execution shares the same logical RunId.
+    assert!(agent.cancel(&control).is_err());
+    assert_eq!(agent.wait(replay).await.unwrap().output, "done");
     assert_eq!(model.requests.lock().unwrap().len(), 2);
     while let Ok(envelope) = replay_events.try_recv() {
         assert!(!matches!(envelope.event, AgentEvent::Steered(_)));
@@ -180,13 +184,16 @@ async fn failed_final_reply_steering_save_does_not_publish_a_steered_event() {
     });
     let agent = steering_agent(fault, model.clone()).await;
     let mut handle = agent.start(RunRequest::new("steering", "task")).unwrap();
-    let control = handle.control();
-    let mut events = handle.take_events();
-    let waiting = tokio::spawn(handle.wait());
+    let control = agent.control(&handle).unwrap();
+    let mut events = agent.events(&mut handle).unwrap();
+    let waiting = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.wait(handle).await }
+    });
     tokio::time::timeout(Duration::from_secs(5), model.entered.notified())
         .await
         .unwrap();
-    control.steer("include tests").unwrap();
+    agent.steer(&control, "include tests").unwrap();
     // Only the steering commit fails; model budget settlement still succeeds.
     model.release.notify_one();
     let error = tokio::time::timeout(Duration::from_secs(5), waiting)
@@ -199,7 +206,7 @@ async fn failed_final_reply_steering_save_does_not_publish_a_steered_event() {
             if message == "steering checkpoint write failed"),
         "{error}"
     );
-    assert!(control.steer("after failure").is_err());
+    assert!(agent.steer(&control, "after failure").is_err());
     while let Ok(envelope) = events.try_recv() {
         assert!(!matches!(envelope.event, AgentEvent::Steered(_)));
     }
@@ -327,7 +334,7 @@ async fn approval_survives_restart_and_duplicate_answer_replays_without_executio
     let agent = arithmetic_agent(store.clone(), calls.clone(), effects.clone()).await;
     let handle = agent.start(RunRequest::new("approved", "17")).unwrap();
     let run_id = handle.run_id;
-    let waiting = handle.wait().await.unwrap();
+    let waiting = agent.wait(handle).await.unwrap();
     assert_eq!(waiting.status, RunStatus::AwaitingInput);
     assert_eq!(effects.load(Ordering::SeqCst), 0);
     let question = &waiting.interactions[0];
@@ -447,8 +454,8 @@ async fn cancellation_after_side_effect_requires_reconciliation_and_never_repeat
     tokio::time::timeout(Duration::from_secs(5), started.notified())
         .await
         .unwrap();
-    handle.cancel();
-    let stopped = handle.wait().await.unwrap();
+    agent.cancel(&handle).unwrap();
+    let stopped = agent.wait(handle).await.unwrap();
     assert_eq!(stopped.status, RunStatus::RecoveryRequired);
     agent.close().await;
     let agent = TestBuilder::default()
@@ -557,7 +564,7 @@ async fn input_pauses_before_sibling_effects_and_forces_replanning_after_answer(
         .unwrap();
     let handle = agent.start(RunRequest::new("input", "work")).unwrap();
     let run_id = handle.run_id;
-    let waiting = handle.wait().await.unwrap();
+    let waiting = agent.wait(handle).await.unwrap();
     assert_eq!(waiting.status, RunStatus::AwaitingInput);
     assert_eq!(effects.load(Ordering::SeqCst), 0);
     let answer = InteractionResponse {
@@ -697,9 +704,9 @@ async fn acquired_checkpoint_is_revalidated_after_another_executor_changes_defin
     )
     .await;
     let mut handle = original.start(RunRequest::new("drift", "6")).unwrap();
-    let mut original_events = handle.take_events();
+    let mut original_events = original.events(&mut handle).unwrap();
     let id = handle.run_id;
-    let waiting = handle.wait().await.unwrap();
+    let waiting = original.wait(handle).await.unwrap();
     original.close().await;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -733,7 +740,7 @@ async fn acquired_checkpoint_is_revalidated_after_another_executor_changes_defin
             }),
         ))
         .unwrap();
-    let mut resumed_events = handle.take_events();
+    let mut resumed_events = executor.events(&mut handle).unwrap();
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
@@ -752,7 +759,7 @@ async fn acquired_checkpoint_is_revalidated_after_another_executor_changes_defin
     competing.commit(&lease, revision, changed).await.unwrap();
     competing.release(&lease).await.unwrap();
     release.notify_one();
-    let error = handle.wait().await.unwrap_err();
+    let error = executor.wait(handle).await.unwrap_err();
     assert!(error.to_string().contains("acquired checkpoint"), "{error}");
     assert_eq!(effects.load(Ordering::SeqCst), 0);
     let before = original_events.try_recv().unwrap();
@@ -801,7 +808,7 @@ async fn simultaneous_resume_across_connections_has_one_effect_owner() {
     let initial = arithmetic_agent(first.clone(), calls.clone(), effects.clone()).await;
     let handle = initial.start(RunRequest::new("race", "12")).unwrap();
     let id = handle.run_id;
-    let waiting = handle.wait().await.unwrap();
+    let waiting = initial.wait(handle).await.unwrap();
     initial.close().await;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -845,7 +852,7 @@ async fn simultaneous_resume_across_connections_has_one_effect_owner() {
         Err(AgentError::State(StateError::Busy))
     ));
     release.notify_one();
-    assert_eq!(handle.wait().await.unwrap().output, "24");
+    assert_eq!(owner.wait(handle).await.unwrap().output, "24");
     assert_eq!(
         other
             .run(resume("race", id, Some(answer)))
@@ -870,7 +877,7 @@ async fn approval_cannot_authorize_a_changed_tool_schema() {
     let initial = arithmetic_agent(store.clone(), calls.clone(), effects.clone()).await;
     let handle = initial.start(RunRequest::new("schema", "8")).unwrap();
     let id = handle.run_id;
-    let waiting = handle.wait().await.unwrap();
+    let waiting = initial.wait(handle).await.unwrap();
     initial.close().await;
     let mut tool = double_tool(effects.clone());
     tool.descriptor.input_schema["properties"]["amount"]["minimum"] = json!(100);
@@ -962,7 +969,7 @@ async fn policy_failure_has_no_effect_and_post_effect_interceptor_failure_requir
         };
         let handle = agent.start(RunRequest::new("failure", "9")).unwrap();
         let id = handle.run_id;
-        let result = handle.wait().await;
+        let result = agent.wait(handle).await;
         if after {
             assert_eq!(result.unwrap().status, RunStatus::RecoveryRequired);
         } else {
@@ -1039,9 +1046,9 @@ async fn finished_tool_is_reused_when_a_later_sibling_is_interrupted() {
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    handle.cancel();
+    agent.cancel(&handle).unwrap();
     assert_eq!(
-        handle.wait().await.unwrap().status,
+        agent.wait(handle).await.unwrap().status,
         RunStatus::RecoveryRequired
     );
     let state: WorkflowState = serde_json::from_value(store.load(id).await.unwrap().state).unwrap();
@@ -1132,9 +1139,9 @@ async fn delegated_budget_and_count_are_durable_before_child_provider_dispatch()
     let state: WorkflowState = serde_json::from_value(store.load(id).await.unwrap().state).unwrap();
     assert_eq!(state.child_runs, 1);
     assert!(state.budget_usage.input_tokens + state.budget_usage.output_tokens >= 200);
-    handle.cancel();
+    agent.cancel(&handle).unwrap();
     assert_eq!(
-        handle.wait().await.unwrap().status,
+        agent.wait(handle).await.unwrap().status,
         RunStatus::RecoveryRequired
     );
     let state: WorkflowState = serde_json::from_value(store.load(id).await.unwrap().state).unwrap();
@@ -1388,7 +1395,7 @@ async fn release_failure_after_success_is_reported_without_rewriting_terminal_ch
     let handle = agent.start(RunRequest::new("release", "input")).unwrap();
     let id = handle.run_id;
     assert!(
-        matches!(handle.wait().await, Err(AgentError::State(StateError::Backend(message))) if message == "lease release unavailable")
+        matches!(agent.wait(handle).await, Err(AgentError::State(StateError::Backend(message))) if message == "lease release unavailable")
     );
     assert_eq!(
         database.load(id).await.unwrap().status,
@@ -1415,7 +1422,7 @@ async fn terminal_write_failure_retains_the_execution_error_and_leaves_durable_s
         .start(RunRequest::new("terminal-write", "fail generation"))
         .unwrap();
     let id = handle.run_id;
-    let error = handle.wait().await.unwrap_err();
+    let error = agent.wait(handle).await.unwrap_err();
     let AgentError::WithCleanup { primary, cleanup } = error else {
         panic!("execution and finalization failures required");
     };

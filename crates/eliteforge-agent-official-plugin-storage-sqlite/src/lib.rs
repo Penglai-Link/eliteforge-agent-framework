@@ -1,5 +1,6 @@
 //! Opt-in default storage bundle. All records persist in one explicitly chosen
 //! SQLite file. Framework abstractions have no dependency on SQLite.
+mod operations;
 use async_trait::async_trait;
 use eliteforge_agent_context::{
     ArtifactStore, FileArtifactLimits, SqliteArtifactStore, SqliteSummaryStore, SummaryStore,
@@ -12,6 +13,7 @@ pub use eliteforge_agent_sqlite_extensions::{
     ExtensionConfig, ExtensionMode, ExtensionReport, ExtensionStatus,
 };
 use eliteforge_agent_state_sqlite::{SqliteOptions, SqliteStateStore};
+pub use operations::*;
 pub struct SqliteCapabilitiesService(pub Vec<(String, ExtensionReport)>);
 use std::{path::PathBuf, sync::Arc};
 

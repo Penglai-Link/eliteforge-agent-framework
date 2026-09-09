@@ -258,9 +258,12 @@ async fn host_revocation_during_middleware_is_rechecked_before_external_effect()
     tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    let control = handle.control();
-    let waiting = tokio::spawn(handle.wait());
-    control.clone().revoke_tools(&["victim".into()]).unwrap();
+    let control = agent.control(&handle).unwrap();
+    let waiting = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.wait(handle).await }
+    });
+    agent.revoke_tools(&control, &["victim".into()]).unwrap();
     release.notify_one();
     waiting.await.unwrap().unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);

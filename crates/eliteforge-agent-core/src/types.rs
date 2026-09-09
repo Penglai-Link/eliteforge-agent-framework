@@ -568,7 +568,7 @@ pub trait ChatStream: Send + Sync {
 /// drains ordinary events for at most `cleanup_timeout`, then attempts one
 /// terminal callback per sink concurrently, each with an additional timeout of
 /// `min(cleanup_timeout, 1 second)`. Earlier callbacks cannot run after terminal
-/// dispatch. Callback completion is not guaranteed; use `RunHandle::wait` or a
+/// dispatch. Callback completion is not guaranteed; use `Agent::wait` or a
 /// durable checkpoint for authoritative execution state. Callbacks must yield
 /// cooperatively so timeout/cancellation can take effect.
 pub trait EventSink: Send + Sync {

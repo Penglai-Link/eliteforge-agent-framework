@@ -91,17 +91,20 @@ async fn cancellation_releases_run_resources_and_allows_reusing_the_session() {
     let mut handle = agent
         .start(RunRequest::new("session", "first input"))
         .unwrap();
-    let mut events = handle.take_events();
-    let control = handle.control();
-    let waiting = tokio::spawn(handle.wait());
+    let mut events = agent.events(&mut handle).unwrap();
+    let control = agent.control(&handle).unwrap();
+    let waiting = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.wait(handle).await }
+    });
     timeout(DEADLINE, model.entered.notified()).await.unwrap();
     assert!(matches!(
         agent.start(RunRequest::new("session", "overlapping input")),
         Err(AgentError::SessionBusy(_))
     ));
 
-    control.clone().cancel();
-    assert!(control.steer("too late").is_err());
+    agent.cancel(&control).unwrap();
+    assert!(agent.steer(&control, "too late").is_err());
     assert!(matches!(
         timeout(DEADLINE, waiting).await.unwrap().unwrap(),
         Err(AgentError::Cancelled)
@@ -142,7 +145,10 @@ async fn closing_an_agent_cancels_active_runs_cleans_plugins_and_rejects_new_run
 
     assert!(agent.is_closed());
     assert_eq!(cleaned.load(Ordering::SeqCst), 1);
-    assert!(matches!(handle.wait().await, Err(AgentError::Cancelled)));
+    assert!(matches!(
+        agent.wait(handle).await,
+        Err(AgentError::Cancelled)
+    ));
     assert!(matches!(
         agent.start(RunRequest::new("other", "new run")),
         Err(AgentError::Closed)
@@ -220,14 +226,17 @@ async fn steering_during_a_final_model_response_is_consumed_without_changing_its
     let mut handle = agent
         .start(RunRequest::new("session", "original task"))
         .unwrap();
-    let mut events = handle.take_events();
-    let control = handle.control();
+    let mut events = agent.events(&mut handle).unwrap();
+    let control = agent.control(&handle).unwrap();
     assert_eq!(control.run_id(), handle.run_id);
     let other_control = control.clone();
-    let waiting = tokio::spawn(handle.wait());
+    let waiting = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.wait(handle).await }
+    });
     timeout(DEADLINE, model.entered.notified()).await.unwrap();
-    control.steer("include tests").unwrap();
-    other_control.steer("explain the result").unwrap();
+    agent.steer(&control, "include tests").unwrap();
+    agent.steer(&other_control, "explain the result").unwrap();
     drop(other_control);
     model.release.notify_one();
 
@@ -237,7 +246,7 @@ async fn steering_during_a_final_model_response_is_consumed_without_changing_its
     assert_eq!(model.calls.load(Ordering::SeqCst), 2);
     assert!(result.output.contains("include tests"));
     assert!(result.output.contains("explain the result"));
-    assert!(control.steer("after completion").is_err());
+    assert!(agent.steer(&control, "after completion").is_err());
 
     // Keeping a control alive must not keep the event stream open.
     let steered = timeout(DEADLINE, async {
@@ -268,9 +277,12 @@ async fn dropping_all_external_controls_does_not_cancel_the_waiting_run() {
         .await
         .unwrap();
     let handle = agent.start(RunRequest::new("session", "task")).unwrap();
-    let control = handle.control();
+    let control = agent.control(&handle).unwrap();
     let other_control = control.clone();
-    let waiting = tokio::spawn(handle.wait());
+    let waiting = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.wait(handle).await }
+    });
     timeout(DEADLINE, model.entered.notified()).await.unwrap();
     drop(control);
     drop(other_control);
@@ -295,17 +307,17 @@ async fn retained_controls_do_not_prevent_owner_drop_from_cancelling_the_run() {
             .await
             .unwrap();
         let mut handle = agent.start(RunRequest::new("session", "task")).unwrap();
-        let control = handle.control();
-        let mut events = handle.take_events();
+        let control = agent.control(&handle).unwrap();
+        let mut events = agent.events(&mut handle).unwrap();
         timeout(DEADLINE, model.entered.notified()).await.unwrap();
         if drop_wait_future {
-            let mut waiting = Box::pin(handle.wait());
+            let mut waiting = Box::pin(agent.wait(handle));
             assert!(futures::poll!(waiting.as_mut()).is_pending());
             drop(waiting);
         } else {
             drop(handle);
         }
-        assert!(control.steer("owner gone").is_err());
+        assert!(agent.steer(&control, "owner gone").is_err());
         let cancelled = timeout(DEADLINE, async {
             let mut cancelled = 0;
             loop {
@@ -329,8 +341,8 @@ async fn retained_controls_do_not_prevent_owner_drop_from_cancelling_the_run() {
         // same session is reused. Its cancellation must not reach the new run.
         let next = agent.start(RunRequest::new("session", "new task")).unwrap();
         assert_ne!(next.run_id, control.run_id());
-        control.cancel();
-        assert_eq!(next.wait().await.unwrap().status, RunStatus::Completed);
+        agent.cancel(&control).unwrap();
+        assert_eq!(agent.wait(next).await.unwrap().status, RunStatus::Completed);
         agent.close().await;
     }
 }

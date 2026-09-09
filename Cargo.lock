@@ -685,6 +685,7 @@ dependencies = [
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
  "eliteforge-agent-official-plugin-model-genai",
+ "eliteforge-agent-official-plugin-storage-sqlite",
  "eliteforge-agent-sqlite-extensions",
  "eliteforge-agent-state-sqlite",
  "eliteforge-agent-test-support",
@@ -753,6 +754,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "eliteforge-agent-official-plugin-pack"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-agui",
+ "eliteforge-agent-official-plugin-model-genai",
+ "eliteforge-agent-official-plugin-otel",
+ "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-official-plugin-tools-human",
+ "eliteforge-agent-official-plugin-tools-mcp",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "eliteforge-agent-official-plugin-storage-sqlite"
 version = "0.1.0"
 dependencies = [
@@ -791,11 +812,13 @@ dependencies = [
  "axum",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-storage-sqlite",
  "http",
  "reqwest",
  "rmcp",
  "serde_json",
  "sha2",
+ "tempfile",
  "thiserror",
  "tokio",
  "tokio-util",
@@ -830,6 +853,7 @@ dependencies = [
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
  "eliteforge-agent-memory",
+ "eliteforge-agent-official-plugin-storage-sqlite",
  "eliteforge-agent-sqlite-extensions",
  "eliteforge-agent-test-support",
  "serde_json",

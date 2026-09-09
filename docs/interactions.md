@@ -12,18 +12,17 @@
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
 use eliteforge_agent_official_plugin_tools_human::HumanInteractionPlugin;
-use eliteforge_agent_official_plugin_agui::AgUiPlugin;
+use eliteforge_agent_official_plugin_agui::{AgUiPlugin, AgUiStream};
 
-let agui = AgUiPlugin::default();
 let agent = AgentBuilder::new()
     .plugin(SqliteStoragePlugin::new("agent.sqlite"))
     .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, models)) // 已配置的模型连接和目录
     .plugin(HumanInteractionPlugin)
-    .plugin(agui.clone())
+    .plugin(AgUiPlugin::default())
     .build()
     .await?;
 
-let (handle, mut stream) = agui.start(&agent, RunRequest::new("chat-1", "帮我剪辑视频"))?;
+let (handle, mut stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("chat-1", "帮我剪辑视频"))?;
 let send = async {
     while let Some(frame) = stream.recv_sse().await? {
         // 应用将 frame 写入 HTTP SSE 响应。
@@ -31,7 +30,7 @@ let send = async {
     }
     Ok::<_, Box<dyn std::error::Error>>(())
 };
-let (result, sent) = tokio::join!(handle.wait(), send);
+let (result, sent) = tokio::join!(agent.wait(handle), send);
 sent?;
 let result = result?;
 // result.status == AwaitingInput 时，result.interactions 包含问题。
@@ -46,8 +45,8 @@ Framework 只依赖存储抽象。数据库路径由应用指定；缺少存储�
 | `StateStore` | `StateStoreService` | `SqliteStateStore` |
 | `InteractionStore` | `InteractionStoreService` | `SqliteStateStore` 的独立交互表 |
 | `LongTermMemory` | `LongTermMemoryService` | `SqliteLongTermMemory` |
-| `SummaryStore` | `SummaryStoreService`，位于存储组合插件 | `SqliteSummaryStore` |
-| `ArtifactStore` | `ArtifactStoreService`，位于存储组合插件 | `SqliteArtifactStore` |
+| `SummaryStore` | `SummaryStoreService`，由存储组合插件注册 | `SqliteSummaryStore` |
+| `ArtifactStore` | `ArtifactStoreService`，由存储组合插件注册 | `SqliteArtifactStore` |
 
 存储组合插件拥有连接，在 `agent.close().await` 时关闭。长期记忆检索、模型摘要、工具结果
 转存仍需显式接入对应组件，注册存储不会自动调用模型或写入长期记忆。
@@ -101,15 +100,12 @@ Framework 只依赖存储抽象。数据库路径由应用指定；缺少存储�
 页面刷新或服务重启后，可查询待回答的问题，不需要内存中的 `RunHandle`。
 
 ```rust
-let store = agent.service::<InteractionStoreService>()
-    .expect("SqliteStoragePlugin registered InteractionStore");
-let interactions = InteractionManager(store.0.clone());
-let pending = interactions.pending("chat-1").await?;
+let pending = agent.pending_interactions("chat-1").await?;
 
 // session_id 必须由应用完成身份验证后确定。
-let request = interactions.answer("chat-1", interaction_id, answer_json).await?;
-let (handle, stream) = agui.start(&agent, request)?;
-// 将新的 stream 写入下一次 HTTP SSE 响应，并等待 handle.wait()。
+let request = agent.answer("chat-1", interaction_id, answer_json).await?;
+let (handle, stream) = agent.start_with_output::<AgUiStream>(request)?;
+// 将新的 stream 写入下一次 HTTP SSE 响应，并等待 agent.wait(handle)。
 ```
 
 保存答案和启动执行是两个步骤。保存后进程退出，可以重新调用 `answer()` 提交相同答案；
@@ -151,7 +147,7 @@ impl ToolPolicy for ConfirmExport {
 审批回复必须是 JSON 布尔值：
 
 ```rust
-let approved = interactions.answer("chat-1", interaction_id, serde_json::json!(true)).await?;
+let approved = agent.answer("chat-1", interaction_id, serde_json::json!(true)).await?;
 let result = agent.run(approved).await?;
 ```
 

@@ -174,8 +174,8 @@ async fn lifecycle_hook_panics_and_timeouts_are_reported_without_changing_result
     let mut request = RunRequest::new("s", "input");
     request.limits.cleanup_timeout = Duration::from_millis(10);
     let handle = a.start(request).unwrap();
-    let mut events = handle.subscribe();
-    let result = tokio::time::timeout(Duration::from_secs(2), handle.wait())
+    let mut events = a.subscribe(&handle).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), a.wait(handle))
         .await
         .unwrap()
         .unwrap();

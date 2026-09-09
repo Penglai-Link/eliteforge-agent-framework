@@ -17,6 +17,7 @@ eliteforge-agent-context = { path = "../eliteforge-agent-context" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio-util.workspace = true
 
 [dev-dependencies]
 eliteforge-agent-framework = { path = "../eliteforge-agent-framework", default-features = false }
@@ -24,4 +25,3 @@ eliteforge-agent-official-plugin-tools-human = { path = "../eliteforge-agent-off
 eliteforge-agent-official-plugin-agui = { path = "../eliteforge-agent-official-plugin-agui" }
 tempfile = "3"
 tokio.workspace = true
-tokio-util.workspace = true

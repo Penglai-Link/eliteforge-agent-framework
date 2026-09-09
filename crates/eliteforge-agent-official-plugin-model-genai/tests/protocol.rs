@@ -39,7 +39,7 @@ async fn openai_embeddings_use_embedding_endpoint_even_with_responses_chat_proto
         .unwrap();
     let mut request = EmbeddingRequest::texts(["one", "two"]);
     request.dimensions = Some(2);
-    let response = agent.models().embed(request).await.unwrap();
+    let response = agent.embed(request).await.unwrap();
     assert_eq!(response.model, ModelRef::new("default", "vectors"));
     assert_eq!(response.input_tokens, Some(5));
     assert_eq!(response.vectors[0].index, 0);
@@ -79,7 +79,7 @@ async fn embedding_task_types_and_missing_usage_are_preserved() {
         let mut request = EmbeddingRequest::texts(["search"]);
         request.purpose = EmbeddingPurpose::Query;
         request.dimensions = Some(2);
-        let response = agent.models().embed(request).await.unwrap();
+        let response = agent.embed(request).await.unwrap();
         assert_eq!(response.input_tokens, None);
         let body = fixture.captured.lock().unwrap()[0].1.clone();
         if kind == AdapterKind::Gemini {
@@ -117,7 +117,6 @@ async fn invalid_embeddings_and_unsupported_capabilities_do_not_succeed() {
         .unwrap();
     assert!(
         agent
-            .models()
             .embed(EmbeddingRequest::texts(["one", "two"]))
             .await
             .is_err()
@@ -131,14 +130,9 @@ async fn invalid_embeddings_and_unsupported_capabilities_do_not_succeed() {
             estimated_tokens: Some(1),
         },
     }])];
-    assert!(agent.models().embed(request).await.is_err());
+    assert!(agent.embed(request).await.is_err());
     assert_eq!(fixture.captured.lock().unwrap().len(), 1);
-    assert!(
-        agent
-            .models()
-            .models(ModelOperation::ImageGeneration)
-            .is_empty()
-    );
+    assert!(agent.models(ModelOperation::ImageGeneration).is_empty());
     agent.close().await;
     assert!(
         TestBuilder::default()
@@ -423,8 +417,8 @@ async fn shared_auth_models_stream_tools_reasoning_and_history_round_trip() {
     let mut request = RunRequest::new("s", "19+23");
     request.model_stage = "planner".into();
     let mut handle = agent.start(request).unwrap();
-    let mut events = handle.take_events();
-    let result = tokio::time::timeout(Duration::from_secs(5), handle.wait())
+    let mut events = agent.events(&mut handle).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), agent.wait(handle))
         .await
         .unwrap()
         .unwrap();
@@ -641,9 +635,9 @@ async fn cancellation_drops_pending_http_stream_and_releases_session() {
         .await
         .unwrap()
         .unwrap();
-    handle.cancel();
+    agent.cancel(&handle).unwrap();
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(3), handle.wait())
+        tokio::time::timeout(Duration::from_secs(3), agent.wait(handle))
             .await
             .unwrap(),
         Err(AgentError::Cancelled)
@@ -653,8 +647,8 @@ async fn cancellation_drops_pending_http_stream_and_releases_session() {
         .unwrap()
         .unwrap();
     let second = agent.start(RunRequest::new("s", "again")).unwrap();
-    second.cancel();
-    let _ = second.wait().await;
+    agent.cancel(&second).unwrap();
+    let _ = agent.wait(second).await;
     agent.close().await;
 }
 

@@ -24,26 +24,24 @@ revision 是最后一条消息的序号；消息 ID 由会话、分支、generat
 普通 ReAct 也保存执行检查点，并按前缀将完整消息同步到 ConversationStore；
 崩溃恢复时先补齐未同步的历史，再继续执行。
 
-需要跨进程保留普通会话时，可使用 `eliteforge-agent-memory` 的 `SqliteConversationStore`：
+应用通过 Agent 查询和追加会话；存储连接由插件创建和关闭：
 
 ```rust
-let conversations = Arc::new(SqliteConversationStore::open(
-    "conversations.db", SqliteConversationOptions::default(),
-).await?);
-let execution = Arc::new(eliteforge_agent_state_sqlite::SqliteStateStore::open(
-    "execution.db", eliteforge_agent_state_sqlite::SqliteOptions::default(),
-).await?);
+use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
+
 let agent = AgentBuilder::new()
+    .plugin(SqliteStoragePlugin::new("agent.sqlite"))
     .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
-    .plugin(ConversationStorePlugin::from_arc(conversations.clone()))
-    .plugin(execution.clone().plugin())
     .build().await?;
+let key = ConversationKey::new("chat-1");
+let history = agent.conversation(&key).await?;
+agent.append_conversation(&key, history.revision, vec![Message::user("补充资料")]).await?;
 ```
 
 默认不按空闲时间删除会话；显式设置非零 `session_ttl` 才启用过期清理，活跃租约不受影响。
 超过条数或字节上限会拒绝追加，不会裁剪原始历史。租约续期保持 owner 不变；
 进程退出后租约到期可重新获取，旧 owner 的写入会被拒绝。
-关闭顺序是 `agent.close()`，再调用 `conversations.close()` 和 `execution.close()`；多个 Agent 共用存储时由宿主统一关闭。
+应用调用 `agent.close().await`，插件负责关闭它创建的会话和执行存储连接。
 
 自定义 DAG 节点可以显式记录交互：
 
@@ -120,41 +118,44 @@ Reducer 无法通过修改最新工具交互、丢失调用配对或把历史数
 
 `SummaryStore` 保存派生摘要。框架提供 `SqliteSummaryStore`，
 默认不保存；通过 `ModelCompressor::with_store` 开启。
-下面沿用前面的 GenaiChatAdapter，模型名称需替换为该连接中实际可用的名称。
+依赖存储的组件在插件安装阶段组合，应用只配置插件：
 
 ```rust
-use eliteforge_agent_context::{CompressionOptions, ModelCompressor, SqliteSummaryStore, SummaryStoreOptions};
+use eliteforge_agent_context::{CompressionOptions, ModelCompressor};
+use eliteforge_agent_official_plugin_storage_sqlite::{SqliteStoragePlugin, SummaryStoreService};
+use async_trait::async_trait;
 use std::sync::Arc;
 
-let summaries = Arc::new(SqliteSummaryStore::open(
-    "summaries.db", SummaryStoreOptions::default(),
-).await?);
-let compressor = ModelCompressor::new(
-    ModelRef::new("default", "summary-model"),
-    CompressionOptions::default(),
-)?.with_store(summaries.clone(), "history-summary-v1")?;
+struct SummaryCompressionPlugin { model: ModelRef }
+#[async_trait]
+impl Plugin for SummaryCompressionPlugin {
+    fn id(&self) -> &str { "app.summary-compression" }
+    fn dependencies(&self) -> Vec<String> { vec!["storage.sqlite".into()] }
+    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        let store = context.services().get::<SummaryStoreService>()
+            .ok_or_else(|| PluginError::message("SummaryStore is required"))?;
+        let compressor = ModelCompressor::new(self.model.clone(), CompressionOptions::default())
+            .and_then(|compressor| compressor.with_store(store.0.clone(), "history-summary-v1"))
+            .map_err(|error| PluginError::message(error.to_string()))?;
+        ContextReducerPlugin::new(compressor).install(context).await
+    }
+}
 
-// 使用简单默认布局时：
 let agent = AgentBuilder::new()
-    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(SqliteStoragePlugin::new("agent.sqlite"))
     .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, vec![
-        ModelDescriptor::new("chat-model"),
-        ModelDescriptor::new("summary-model"),
+        ModelDescriptor::new("chat-model"), ModelDescriptor::new("summary-model"),
     ]))
-    .plugin(ModelStrategyPlugin(Arc::new(FixedModelStrategy(
-        ModelRef::new("default", "chat-model"),
-    ))))
-    .plugin(ContextReducerPlugin::new(compressor))
+    .plugin(ModelStrategyPlugin(Arc::new(FixedModelStrategy(ModelRef::new("default", "chat-model")))))
+    .plugin(SummaryCompressionPlugin { model: ModelRef::new("default", "summary-model") })
     .build().await?;
-
 let result = agent.run(RunRequest::new("chat-1", "继续上次的话题")).await;
 let shutdown = agent.close().await;
-summaries.close().await?;
 println!("{}", result?.output);
 assert!(shutdown.is_success());
 ```
 
-显式配置布局时，把 `compressor` 传给历史块的 `.reduce_with(compressor)`，
+显式配置布局时，在插件安装阶段把 `compressor` 传给历史块的 `.reduce_with(compressor)`，
 不要再注册 `ContextReducerPlugin`。自定义组装器则在自身内部组合来源、布局和策略；
 同时注册这些独立配置会在创建 Agent 时报告冲突，避免配置被静默忽略。
 
@@ -226,7 +227,7 @@ Loop 将预览和引用写入消息，完整原文保存在 ArtifactStore。Arti
 1. 暂停该存储范围的新写入，并等待在途运行结束或进入可核对的停止状态。
 2. 收集仍保留的会话、工作流检查点、长期记忆和业务记录中的附件引用。
 3. 核对历史写入失败、取消后留下的已发布附件；恢复仍需使用的附件加入保留集合。
-4. 仅对已确认不再引用、且达到应用保留期限的附件调用 `ArtifactStore::remove`。
+4. 仅对已确认不再引用、且达到应用保留期限的附件调用 `agent.execute(RemoveArtifact(id))`。
 
 在途运行可能尚未把引用写入历史，所以不能边运行边根据一次引用快照清理。
 首版提供原子发布、分页读取和显式删除；宿主负责完整引用清单、保留期限和清理调度。
@@ -244,19 +245,31 @@ Loop 将预览和引用写入消息，完整原文保存在 ArtifactStore。Arti
 | `ContextContributor` | 不自动检索长期记忆 | `MemoryContributor` |
 | `ToolProvider` | 不注册记忆工具 | `MemoryTools`：搜索、读取；可显式开启保存和删除 |
 
-```rust
-let memories = Arc::new(SqliteLongTermMemory::open(
-    "memories.db", MemoryStoreOptions::default(),
-).await?);
-let contributor = MemoryContributor::new("memory", "authorized-scope", memories.clone())?;
-let tools = MemoryTools::new(memories.clone(), "authorized-scope")?;
+以下自定义组合插件复用已配置的长期记忆服务，不在应用代码中打开连接：
 
-// 下面按项注册存储；不要与提供相同服务的 SqliteStoragePlugin 重复注册。
-// 已有 builder 需配置会话与执行存储，并在 ContextLayout 中设置 memory 块额度和位置。
-let builder = builder
-    .plugin(LongTermMemoryPlugin::from_arc(memories.clone()))
-    .plugin(ContextContributorPlugin::new("memory-block", contributor))
-    .plugin(ToolProviderPlugin::new("memory-tools", tools));
+```rust
+struct MemoryContextPlugin { namespace: String }
+#[async_trait::async_trait]
+impl Plugin for MemoryContextPlugin {
+    fn id(&self) -> &str { "app.memory-context" }
+    fn dependencies(&self) -> Vec<String> { vec!["storage.sqlite".into()] }
+    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        let memory = context.services().get::<LongTermMemoryService>()
+            .ok_or_else(|| PluginError::message("LongTermMemory is required"))?;
+        let contributor = MemoryContributor::new("memory", &self.namespace, memory.0.clone())
+            .map_err(|error| PluginError::message(error.to_string()))?;
+        let tools = MemoryTools::new(memory.0.clone(), &self.namespace)
+            .map_err(|error| PluginError::message(error.to_string()))?;
+        ContextContributorPlugin::new("memory-block", contributor).install(context).await?;
+        ToolProviderPlugin::new("memory-tools", tools).install(context).await
+    }
+}
+
+// builder 已配置 SqliteStoragePlugin，并在 ContextLayout 中设置 memory 块额度和位置。
+let agent = builder
+    .plugin(MemoryContextPlugin { namespace: "authorized-scope".into() })
+    .build().await?;
+let matches = agent.search_memory("authorized-scope", MemoryQuery::new("Rust")).await?;
 ```
 
 默认检索按空白切分关键词，所有词都要匹配，按更新时间和 ID 排序；ASCII 不区分大小写，

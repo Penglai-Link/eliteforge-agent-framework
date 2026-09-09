@@ -12,6 +12,7 @@ members = [
     "crates/eliteforge-agent-official-plugin-agui",
     "crates/eliteforge-agent-official-plugin-tools-human",
     "crates/eliteforge-agent-official-plugin-storage-sqlite",
+    "crates/eliteforge-agent-official-plugin-pack",
     "crates/eliteforge-agent-sqlite-extensions",
     "crates/eliteforge-agent-test-support",
     "integration-tests",

@@ -787,16 +787,10 @@ async fn asking_for_input_pauses_before_later_side_effects_in_the_same_batch() {
     assert_eq!(act.count(), 0);
     assert_eq!(model.requests().len(), 1);
 
-    let response = InteractionManager(
-        agent
-            .service::<InteractionStoreService>()
-            .unwrap()
-            .0
-            .clone(),
-    )
-    .answer("session", result.interactions[0].id, json!("use staging"))
-    .await
-    .unwrap();
+    let response = agent
+        .answer("session", result.interactions[0].id, json!("use staging"))
+        .await
+        .unwrap();
     agent.run(response).await.unwrap();
     let requests = model.requests();
     let resumed_messages = &requests[1].messages;

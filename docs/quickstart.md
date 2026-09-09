@@ -7,6 +7,7 @@
 | 场景 | 入口 |
 |---|---|
 | 最小可运行 Agent | [创建第一个 Agent](#创建第一个-agent) |
+| 一次配置多个插件 | [使用插件包](#使用插件包) |
 | 边生成边推送给前端 | [流式输出](#流式输出) |
 | 运行中追加指令或取消 | [控制运行](#控制运行) |
 | 保持同一会话上下文 | [连续对话](#连续对话) |
@@ -48,20 +49,46 @@ export OPENAI_API_KEY="your-api-key"
 cargo run -p eliteforge-agent-integration-tests --features live-model --bin default_model
 ```
 
-代理服务可额外配置 `MODEL_ENDPOINT` 和 `MODEL_API_KEY`。其他协议通过 `MODEL_ADAPTER` 选择。需要在代码中指定时，直接 `.plugin(GenaiPlugin::new(model))`；详细配置见 [plugins.md](plugins.md)。
+代理服务可额外配置 `MODEL_ENDPOINT` 和 `MODEL_API_KEY`。其他协议通过 `MODEL_ADAPTER` 选择。需要在代码中指定时，直接 `.plugin(GenaiPlugin::new(model))`；详细配置见[模型插件](model-plugins.md)。
 
 对应源码：[default_model.rs](../integration-tests/src/bin/default_model.rs)。`SqliteStoragePlugin` 会注册会话、执行状态、交互、长期记忆、摘要和附件存储；服务端通常复用同一个 Agent，进程退出时再调用 `agent.close()`。
 
+## 使用插件包
+
+安装 `eliteforge-agent-official-plugin-pack` 后，一个包默认装配全部官方插件：模型、SQLite、用户问答、AGUI、MCP 和 OTel。
+
+```rust
+use eliteforge_agent_framework::AgentBuilder;
+use eliteforge_agent_official_plugin_pack::{
+    EliteForgeOfficialPluginPack,
+    agui::AgUiStream,
+};
+
+let agent = AgentBuilder::new()
+    .plugin_pack(EliteForgeOfficialPluginPack::new("agent.sqlite"))
+    .build().await?;
+```
+
+AGUI 已默认启用，调用 `agent.start_with_output::<AgUiStream>(request)` 取得运行和输出流。
+消费流、等待结果和关闭 Agent 的完整程序见[离线插件包示例](../crates/eliteforge-agent-official-plugin-pack/examples/official_pack.rs)：
+
+```sh
+cargo run -p eliteforge-agent-official-plugin-pack --example official_pack -- agent.sqlite
+```
+
+这个示例使用本地演示模型，无需凭据。MCP 默认没有服务器，工具集为空；OTel 使用宿主的全局 provider。
+替换模型、配置 MCP 服务器和遥测 provider，以及自定义和嵌套包，见[插件包](plugins.md#插件包)。
+
 ## 流式输出
 
-`run(request).await` 等价于 `start(request)?.wait().await`。需要把中间事件推送给 UI 或 SSE 时，先启动运行，再取得事件接收器：
+`run(request).await` 等价于 `agent.wait(agent.start(request)?).await`。需要把中间事件推送给 UI 或 SSE 时，先启动运行，再取得事件接收器：
 
 ```rust
 use eliteforge_agent_framework::{AgentEvent, RunRequest};
 use tokio::sync::broadcast::error::RecvError;
 
 let mut handle = agent.start(RunRequest::new("chat-1", "你好"))?;
-let mut events = handle.take_events();
+let mut events = agent.events(&mut handle)?;
 
 let consume = async {
     loop {
@@ -79,11 +106,11 @@ let consume = async {
     }
 };
 
-let (result, ()) = tokio::join!(handle.wait(), consume);
+let (result, ()) = tokio::join!(agent.wait(handle), consume);
 println!("最终结果：{}", result?.output);
 ```
 
-`take_events()` 会保留运行启动后、取得接收器前产生的事件；`subscribe()` 只接收订阅之后的事件。两者都是有界实时通道，收到 `Lagged` 时应用应提示输出不完整，并用最终结果校正展示。接入 AG-UI 时使用[AG-UI 示例](agui.md#注册与使用)。
+`agent.events(&mut handle)` 首次调用会保留运行启动后、取得接收器前产生的事件，后续调用只接收新事件。`agent.subscribe(&handle)` 只订阅调用之后的事件，不取走初始接收器。两者都是有界实时通道，收到 `Lagged` 时应用应提示输出不完整，并用最终结果校正展示。接入 AG-UI 时使用[AG-UI 示例](agui.md#注册与使用)。
 
 ## 控制运行
 
@@ -91,12 +118,13 @@ println!("最终结果：{}", result?.output);
 
 ```rust
 let mut handle = agent.start(RunRequest::new("chat-1", "分析项目"))?;
-let control = handle.control();
-let waiting = tokio::spawn(handle.wait());
+let control = agent.control(&handle)?;
+let running_agent = agent.clone();
+let waiting = tokio::spawn(async move { running_agent.wait(handle).await });
 
-control.steer("重点分析插件注册流程")?;
-// control.cancel()?;
-// control.revoke_tools(&["dangerous-tool".to_string()])?;
+agent.steer(&control, "重点分析插件注册流程")?;
+// agent.cancel(&control)?;
+// agent.revoke_tools(&control, &["dangerous-tool".to_string()])?;
 
 let result = waiting.await??;
 println!("最终结果：{}", result.output);
@@ -212,7 +240,7 @@ let agent = AgentBuilder::new()
 ```rust
 let handle = agent.start(RunRequest::new("article-2", "介绍 Rust"))?;
 let run_id = handle.run_id;
-let result = handle.wait().await?;
+let result = agent.wait(handle).await?;
 println!("{:?}: {}", result.status, result.output);
 
 let mut request = RunRequest::new("article-2", "");
@@ -279,6 +307,6 @@ println!("{}", result?.output);
 ## 下一步
 
 - 了解模块边界、执行链和恢复语义：阅读[Framework 架构](architecture.md)。
-- 接入自定义模型、工具、上下文或中间件：阅读[Plugin 与扩展点](plugins.md)。
+- 接入自定义模型、工具、上下文或中间件：阅读[插件开发指南](plugins.md#按场景选择扩展点)。
 - 接入审批、AG-UI、MCP 和 SQLite：阅读[用户交互](interactions.md)、[AG-UI](agui.md)、[SQLite 存储](sqlite-storage.md)。
 - 运行仓库验证：参见[实现状态](implementation-status.md)。

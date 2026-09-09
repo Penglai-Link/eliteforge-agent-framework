@@ -40,6 +40,13 @@ impl AgentBuilder {
         self
     }
 
+    /// Add a group of configured plugins to this Agent's dependency graph.
+    /// Duplicate IDs and dependency errors are reported by `build`, before installation.
+    pub fn plugin_pack(mut self, pack: impl PluginPack) -> Self {
+        self.plugins.extend(pack.into_plugins());
+        self
+    }
+
     pub async fn build(mut self) -> Result<Agent, AgentError> {
         let after = self.plugins.iter().map(|p| p.id().to_owned()).collect();
         self.plugins.push(Arc::new(crate::plugins::DefaultsPlugin {
@@ -47,7 +54,7 @@ impl AgentBuilder {
             default_models: self.default_models,
         }));
         let mut container = PluginContainer::build(self.plugins).await?;
-        let (agent_loop, services, sinks) = match (|| -> Result<_, AgentError> {
+        let (agent_loop, services, sinks, outputs) = match (|| -> Result<_, AgentError> {
             let registry = container.services();
             let agent_loop = registry
                 .get::<LoopService>()
@@ -212,7 +219,20 @@ impl AgentBuilder {
                 .iter()
                 .map(|s| s.0.clone())
                 .collect();
-            Ok((agent_loop, services, sinks))
+            let outputs: Vec<_> = registry
+                .all::<RunOutputService>()
+                .iter()
+                .map(|s| s.0.clone())
+                .collect();
+            let mut types = std::collections::HashSet::new();
+            for output in &outputs {
+                if !types.insert(output.output_type()) {
+                    return Err(AgentError::InvalidConfiguration(
+                        "multiple plugins provide the same run output type".into(),
+                    ));
+                }
+            }
+            Ok((agent_loop, services, sinks, outputs))
         })() {
             Ok(services) => services,
             Err(error) => {
@@ -223,7 +243,9 @@ impl AgentBuilder {
             }
         };
         Ok(Agent {
+            operations: services.operations.clone(),
             inner: Arc::new(AgentInner {
+                id: RunId::new_v4(),
                 cleanup: Mutex::new(CleanupState {
                     container: Some(container),
                     started: false,
@@ -233,9 +255,11 @@ impl AgentBuilder {
                 agent_loop,
                 services,
                 sinks,
+                outputs,
                 runs: Mutex::new(RunRegistry {
                     closed: false,
                     active: HashMap::new(),
+                    operations: HashMap::new(),
                 }),
                 drained: Notify::new(),
                 cleanup_done: Notify::new(),
@@ -247,6 +271,7 @@ impl AgentBuilder {
 struct RunRegistry {
     closed: bool,
     active: HashMap<String, CancellationToken>,
+    operations: HashMap<RunId, CancellationToken>,
 }
 
 struct CleanupState {
@@ -257,10 +282,12 @@ struct CleanupState {
 }
 
 struct AgentInner {
+    id: RunId,
     cleanup: Mutex<CleanupState>,
     agent_loop: Arc<dyn AgentLoop>,
     services: AgentServices,
     sinks: Vec<Arc<dyn EventSink>>,
+    outputs: Vec<Arc<dyn RunOutputFactory>>,
     runs: Mutex<RunRegistry>,
     drained: Notify,
     cleanup_done: Notify,
@@ -269,34 +296,348 @@ struct AgentInner {
 #[derive(Clone)]
 pub struct Agent {
     inner: Arc<AgentInner>,
+    operations: Arc<dyn ModelOperations>,
 }
 
-impl AgentRuntime for Agent {
-    type Handle = RunHandle;
-    fn service<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        Agent::service(self)
-    }
-    fn start(&self, request: RunRequest) -> Result<Self::Handle, AgentError> {
-        Agent::start(self, request)
-    }
+/// Opaque realtime connection owned by the Agent's model runtime.
+#[derive(Clone)]
+pub struct RealtimeHandle {
+    owner: RunId,
+    session: Arc<dyn RealtimeSession>,
 }
 
 impl Agent {
-    pub fn models(&self) -> Arc<dyn ModelOperations> {
-        self.inner.services.operations.clone()
+    /// An Agent view with per-call model options; all views share lifecycle and services.
+    pub fn with_model_options(&self, options: ModelInvocationOptions) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            operations: self.operations.with_options(options),
+        }
     }
 
-    /// Read a unique service installed by a plugin. Registrations are immutable;
-    /// this does not add or replace services. After container shutdown returns None.
-    pub fn service<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
-        self.inner
-            .cleanup
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .container
-            .as_ref()?
-            .services()
-            .get::<T>()
+    pub fn models(&self, operation: ModelOperation) -> Vec<ModelRef> {
+        self.operations.models(operation)
+    }
+
+    pub async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AgentError> {
+        self.operations.embed(request).await
+    }
+    pub async fn embed_query(
+        &self,
+        space: &EmbeddingSpace,
+        request: EmbeddingRequest,
+    ) -> Result<EmbeddingResponse, AgentError> {
+        self.operations.embed_query(space, request).await
+    }
+    pub async fn rerank(&self, request: RerankRequest) -> Result<RerankResponse, AgentError> {
+        self.operations.rerank(request).await
+    }
+    pub async fn generate_image(
+        &self,
+        request: ImageGenerationRequest,
+    ) -> Result<ImageGenerationResponse, AgentError> {
+        self.operations.generate_image(request).await
+    }
+    pub async fn submit_video(
+        &self,
+        request: VideoGenerationRequest,
+    ) -> Result<VideoJob, AgentError> {
+        self.operations.submit_video(request).await
+    }
+    pub async fn query_video(&self, job: &VideoJob) -> Result<VideoJob, AgentError> {
+        self.operations.query_video(job).await
+    }
+    pub async fn cancel_video(&self, job: &VideoJob) -> Result<(), AgentError> {
+        self.operations.cancel_video(job).await
+    }
+    pub async fn transcribe(
+        &self,
+        request: SpeechRecognitionRequest,
+    ) -> Result<SpeechRecognitionResponse, AgentError> {
+        self.operations.transcribe(request).await
+    }
+    pub async fn synthesize(
+        &self,
+        request: SpeechSynthesisRequest,
+    ) -> Result<SpeechSynthesisResponse, AgentError> {
+        self.operations.synthesize(request).await
+    }
+    pub async fn connect_realtime(
+        &self,
+        request: RealtimeRequest,
+    ) -> Result<RealtimeHandle, AgentError> {
+        Ok(RealtimeHandle {
+            owner: self.inner.id,
+            session: self.operations.connect_realtime(request).await?,
+        })
+    }
+    fn check_realtime_owner(&self, handle: &RealtimeHandle) -> Result<(), AgentError> {
+        if handle.owner != self.inner.id {
+            return Err(AgentError::InvalidConfiguration(
+                "realtime session belongs to a different Agent".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub async fn send_realtime(
+        &self,
+        handle: &RealtimeHandle,
+        input: RealtimeInput,
+    ) -> Result<(), AgentError> {
+        self.check_realtime_owner(handle)?;
+        Ok(handle.session.send(input).await?)
+    }
+    pub async fn next_realtime(
+        &self,
+        handle: &RealtimeHandle,
+    ) -> Result<Option<RealtimeEvent>, AgentError> {
+        self.check_realtime_owner(handle)?;
+        Ok(handle.session.next().await?)
+    }
+    pub async fn close_realtime(&self, handle: &RealtimeHandle) -> Result<(), AgentError> {
+        self.check_realtime_owner(handle)?;
+        Ok(handle.session.close().await?)
+    }
+
+    /// Dispatch an extension request using this Agent's installed service.
+    pub async fn execute<O: AgentOperation>(&self, operation: O) -> Result<O::Output, AgentError> {
+        let id = RunId::new_v4();
+        let cancellation = CancellationToken::new();
+        {
+            let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
+            if runs.closed {
+                return Err(AgentError::Closed);
+            }
+            runs.operations.insert(id, cancellation.clone());
+        }
+        let _registration = OperationRegistration {
+            inner: self.inner.clone(),
+            id,
+        };
+        let services = {
+            let state = self.inner.cleanup.lock().unwrap_or_else(|e| e.into_inner());
+            let registry = state
+                .container
+                .as_ref()
+                .ok_or(AgentError::Closed)?
+                .services();
+            registry
+                .get::<O::Service>()
+                .map(|service| vec![service])
+                .unwrap_or_else(|| registry.all::<O::Service>())
+        };
+        let service =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation.select(services)))
+                .map_err(|_| AgentError::Run("plugin operation selection panicked".into()))??;
+        let operation_cancellation = cancellation.clone();
+        let execution = std::panic::AssertUnwindSafe(async move {
+            operation.execute(service, operation_cancellation).await
+        })
+        .catch_unwind();
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(AgentError::Closed),
+            result = execution => result.unwrap_or_else(|_| Err(AgentError::Run("plugin operation panicked".into()))),
+        }
+    }
+
+    pub async fn pending_interactions(
+        &self,
+        session: &str,
+    ) -> Result<Vec<InteractionRecord>, AgentError> {
+        self.execute(PendingInteractions(session.into())).await
+    }
+
+    pub async fn interaction(
+        &self,
+        session: &str,
+        interaction_id: RunId,
+    ) -> Result<InteractionRecord, AgentError> {
+        self.execute(GetInteraction {
+            session_id: session.into(),
+            interaction_id,
+        })
+        .await
+    }
+    pub async fn checkpoint(&self, run_id: RunId) -> Result<Checkpoint, AgentError> {
+        self.execute(LoadCheckpoint(run_id)).await
+    }
+    pub async fn latest_checkpoint(&self, session: &str) -> Result<Option<Checkpoint>, AgentError> {
+        self.execute(LatestCheckpoint(session.into())).await
+    }
+
+    /// Save an answer and return the request for the next execution. Saving and
+    /// resuming remain separate so retries do not repeat business execution.
+    pub async fn answer(
+        &self,
+        session: &str,
+        interaction_id: RunId,
+        value: serde_json::Value,
+    ) -> Result<RunRequest, AgentError> {
+        self.execute(AnswerInteraction {
+            session_id: session.into(),
+            interaction_id,
+            value,
+        })
+        .await
+    }
+
+    pub async fn conversation(
+        &self,
+        key: &ConversationKey,
+    ) -> Result<ConversationSnapshot, AgentError> {
+        self.execute(ReadConversation(key.clone())).await
+    }
+
+    pub async fn append_conversation(
+        &self,
+        key: &ConversationKey,
+        revision: u64,
+        messages: Vec<Message>,
+    ) -> Result<(), AgentError> {
+        self.execute(AppendConversation {
+            key: key.clone(),
+            revision,
+            messages,
+        })
+        .await
+    }
+
+    pub async fn memory(&self, namespace: &str, id: &str) -> Result<MemoryEntry, AgentError> {
+        self.execute(GetMemory {
+            namespace: namespace.into(),
+            id: id.into(),
+        })
+        .await
+    }
+    pub async fn search_memory(
+        &self,
+        namespace: &str,
+        query: MemoryQuery,
+    ) -> Result<Vec<MemoryEntry>, AgentError> {
+        self.execute(SearchMemory {
+            namespace: namespace.into(),
+            query,
+        })
+        .await
+    }
+    pub async fn save_memory(
+        &self,
+        namespace: &str,
+        value: MemoryWrite,
+        expected: Option<String>,
+    ) -> Result<MemoryEntry, AgentError> {
+        self.execute(SaveMemory {
+            namespace: namespace.into(),
+            value,
+            expected,
+        })
+        .await
+    }
+    pub async fn delete_memory(
+        &self,
+        namespace: &str,
+        id: &str,
+        expected: &str,
+    ) -> Result<(), AgentError> {
+        self.execute(DeleteMemory {
+            namespace: namespace.into(),
+            id: id.into(),
+            expected: expected.into(),
+        })
+        .await
+    }
+
+    /// Reserve the requested output before admitting a run. Missing plugins fail
+    /// before model/tool execution, just like other invalid configuration.
+    pub fn start_with_output<T: Send + 'static>(
+        &self,
+        request: RunRequest,
+    ) -> Result<(RunHandle, T), AgentError> {
+        if self.is_closed() {
+            return Err(AgentError::Closed);
+        }
+        if !self
+            .inner
+            .outputs
+            .iter()
+            .any(|output| output.output_type() == std::any::TypeId::of::<T>())
+        {
+            return Err(AgentError::MissingService(std::any::type_name::<T>()));
+        }
+        let mut handle = self.start(request)?;
+        let output = self.output(&mut handle)?;
+        Ok((handle, output))
+    }
+
+    /// Take one configured output once. Preparation already happened in start;
+    /// this only transfers ownership and cannot miss the first published event.
+    pub fn output<T: Send + 'static>(&self, handle: &mut RunHandle) -> Result<T, AgentError> {
+        self.check_owner(&handle.control)?;
+        handle.outputs.take()
+    }
+
+    fn check_owner(&self, control: &RunControl) -> Result<(), AgentError> {
+        if control.owner != self.inner.id {
+            return Err(AgentError::InvalidConfiguration(
+                "run belongs to a different Agent".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Obtain a control token before moving the owning handle into Agent::wait.
+    pub fn control(&self, handle: &RunHandle) -> Result<RunControl, AgentError> {
+        self.check_owner(&handle.control)?;
+        Ok(handle.control())
+    }
+    pub fn cancel(&self, run: &impl AsRef<RunControl>) -> Result<(), AgentError> {
+        self.check_owner(run.as_ref())?;
+        run.as_ref().cancel();
+        Ok(())
+    }
+    pub fn steer(
+        &self,
+        run: &impl AsRef<RunControl>,
+        message: impl Into<String>,
+    ) -> Result<(), AgentError> {
+        self.check_owner(run.as_ref())?;
+        run.as_ref().steer(message)
+    }
+    pub fn revoke_tools(
+        &self,
+        run: &impl AsRef<RunControl>,
+        ids: &[String],
+    ) -> Result<(), AgentError> {
+        self.check_owner(run.as_ref())?;
+        run.as_ref().revoke_tools(ids)
+    }
+    pub fn budget_usage(&self, run: &impl AsRef<RunControl>) -> Result<Usage, AgentError> {
+        self.check_owner(run.as_ref())?;
+        Ok(run.as_ref().budget_usage())
+    }
+    /// The first receiver retains events published since start. Later receivers
+    /// subscribe to new events only. Slow consumers can receive Lagged.
+    pub fn events(
+        &self,
+        handle: &mut RunHandle,
+    ) -> Result<broadcast::Receiver<EventEnvelope>, AgentError> {
+        self.check_owner(&handle.control)?;
+        Ok(handle.take_events())
+    }
+    /// Subscribe only to future events, without taking the initial receiver.
+    pub fn subscribe(
+        &self,
+        handle: &RunHandle,
+    ) -> Result<broadcast::Receiver<EventEnvelope>, AgentError> {
+        self.check_owner(&handle.control)?;
+        Ok(handle.events.subscribe())
+    }
+    /// Wait for the authoritative result. Dropping this future or its RunHandle
+    /// cancels the execution, even while control tokens remain alive.
+    pub async fn wait(&self, handle: RunHandle) -> Result<RunResult, AgentError> {
+        self.check_owner(&handle.control)?;
+        handle.wait().await
     }
 
     /// Configuration schemas and capabilities for host workflow editors.
@@ -327,12 +668,32 @@ impl Agent {
 
     fn start_inherited(
         &self,
-        request: RunRequest,
+        mut request: RunRequest,
         parent: Option<&RunContext>,
     ) -> Result<RunHandle, AgentError> {
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| AgentError::Run("Agent::start requires a Tokio runtime".into()))?;
         self.validate_request(&request)?;
+        if self.is_closed() {
+            return Err(AgentError::Closed);
+        }
+        let execution_id = RunId::new_v4();
+        let mut outputs = RunOutputs::default();
+        let mut extensions = request.extensions.clone();
+        for factory in &self.inner.outputs {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                factory.prepare(&request, execution_id, &mut extensions, &mut outputs)
+            }))
+            .map_err(|_| {
+                AgentError::InvalidConfiguration("output preparation panicked".into())
+            })??;
+            if !outputs.contains_type(factory.output_type()) {
+                return Err(AgentError::InvalidConfiguration(
+                    "output factory did not prepare its declared output type".into(),
+                ));
+            }
+        }
+        request.extensions = extensions;
         let cancellation = parent.map_or_else(CancellationToken::new, |p| p.children.child_token());
         {
             let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
@@ -364,7 +725,7 @@ impl Agent {
                 request.limits.max_parallel_tools,
             )),
             revoked_tools: Arc::default(),
-            execution_id: RunId::new_v4(),
+            execution_id,
             lineage: parent.map_or(
                 RunLineage {
                     root_run_id: run_id,
@@ -471,6 +832,7 @@ impl Agent {
             completion,
             run_id,
             control: RunControl {
+                owner: self.inner.id,
                 run_id,
                 revoked_tools,
                 usage,
@@ -480,6 +842,7 @@ impl Agent {
             events,
             initial_events: Some(initial_events),
             result: Some(result),
+            outputs,
         })
     }
 
@@ -588,6 +951,9 @@ impl Agent {
             for token in runs.active.values() {
                 token.cancel();
             }
+            for token in runs.operations.values() {
+                token.cancel();
+            }
         }
         self.inner.services.operations.stop();
         let launch = {
@@ -607,13 +973,11 @@ impl Agent {
                     let notified = inner.drained.notified();
                     tokio::pin!(notified);
                     notified.as_mut().enable();
-                    if inner
-                        .runs
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .active
-                        .is_empty()
-                    {
+                    let empty = {
+                        let runs = inner.runs.lock().unwrap_or_else(|e| e.into_inner());
+                        runs.active.is_empty() && runs.operations.is_empty()
+                    };
+                    if empty {
                         break;
                     }
                     notified.await;
@@ -722,6 +1086,26 @@ struct RunRegistration {
     session_id: String,
 }
 
+struct OperationRegistration {
+    inner: Arc<AgentInner>,
+    id: RunId,
+}
+impl Drop for OperationRegistration {
+    fn drop(&mut self) {
+        if let Some(cancellation) = self
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .operations
+            .remove(&self.id)
+        {
+            cancellation.cancel();
+        }
+        self.inner.drained.notify_waiters();
+    }
+}
+
 impl Drop for RunRegistration {
     fn drop(&mut self) {
         self.inner
@@ -762,6 +1146,7 @@ impl RunCompletion {
 /// `wait` future) must remain alive; dropping that owner still cancels the run.
 #[derive(Clone)]
 pub struct RunControl {
+    owner: RunId,
     run_id: RunId,
     revoked_tools: Arc<Mutex<std::collections::BTreeSet<String>>>,
     usage: Arc<Mutex<crate::budget::UsageLedger>>,
@@ -774,24 +1159,24 @@ impl RunControl {
         self.run_id
     }
 
-    pub fn revoke_tools(&self, ids: &[String]) -> Result<(), AgentError> {
+    fn revoke_tools(&self, ids: &[String]) -> Result<(), AgentError> {
         crate::types::record_revocations(&self.revoked_tools, ids)
     }
 
     /// Conservative charged usage including in-flight reservations, not a bill.
-    pub fn budget_usage(&self) -> Usage {
+    fn budget_usage(&self) -> Usage {
         self.usage
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .including_reservations()
     }
-    pub fn cancel(&self) {
+    fn cancel(&self) {
         self.cancellation.cancel();
     }
     /// Queue text for the loop's next steering boundary. Success acknowledges
     /// in-memory admission, not persistence or model processing. Closed,
     /// cancelled and unsupported executions reject steering.
-    pub fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
+    fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
         let mut state = self.steering.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed || self.cancellation.is_cancelled() {
             return Err(AgentError::Run(
@@ -811,37 +1196,25 @@ pub struct RunHandle {
     events: broadcast::Sender<EventEnvelope>,
     initial_events: Option<broadcast::Receiver<EventEnvelope>>,
     result: Option<oneshot::Receiver<Result<RunResult, AgentError>>>,
+    outputs: RunOutputs,
+}
+
+impl AsRef<RunControl> for RunHandle {
+    fn as_ref(&self) -> &RunControl {
+        &self.control
+    }
+}
+impl AsRef<RunControl> for RunControl {
+    fn as_ref(&self) -> &RunControl {
+        self
+    }
 }
 
 impl RunHandle {
-    /// Obtain cloneable controls before moving this handle into `wait`.
-    /// Controls do not own the result receiver or keep the event stream open.
-    pub fn control(&self) -> RunControl {
+    fn control(&self) -> RunControl {
         self.control.clone()
     }
-
-    pub fn revoke_tools(&self, ids: &[String]) -> Result<(), AgentError> {
-        self.control.revoke_tools(ids)
-    }
-
-    /// Conservative charged usage including in-flight reservations, not a bill.
-    pub fn budget_usage(&self) -> Usage {
-        self.control.budget_usage()
-    }
-
-    pub fn cancel(&self) {
-        self.control.cancel();
-    }
-
-    pub fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
-        self.control.steer(message)
-    }
-    /// Returns a new subscription. Use take_events immediately after start to
-    /// retain events emitted before subscribing. Slow consumers may lag.
-    pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
-        self.events.subscribe()
-    }
-    pub fn take_events(&mut self) -> broadcast::Receiver<EventEnvelope> {
+    fn take_events(&mut self) -> broadcast::Receiver<EventEnvelope> {
         self.initial_events
             .take()
             .unwrap_or_else(|| self.events.subscribe())
@@ -849,7 +1222,7 @@ impl RunHandle {
     /// Consume the owner and wait for its final result. Obtain `control()`
     /// beforehand to steer or cancel from another task. Dropping this future
     /// cancels the run, even if control clones remain alive.
-    pub async fn wait(mut self) -> Result<RunResult, AgentError> {
+    async fn wait(mut self) -> Result<RunResult, AgentError> {
         self.result
             .take()
             .expect("run result receiver")

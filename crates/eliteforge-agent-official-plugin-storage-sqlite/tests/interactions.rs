@@ -77,13 +77,12 @@ async fn build(
     seen: Arc<Mutex<Vec<ChatRequest>>>,
     count: Arc<Mutex<Vec<Value>>>,
     approval: bool,
-) -> (Agent, AgUiPlugin) {
-    let agui = AgUiPlugin::default();
+) -> Agent {
     let mut builder = AgentBuilder::new().plugin(SqliteStoragePlugin::new(path))
         .plugin(ChatModelPlugin::new(Script { first, requests: seen })).plugin(HumanInteractionPlugin)
         .plugin(ToolProviderPlugin::new("work", StaticToolProvider::new(vec![ToolBinding::new(
             ToolDescriptor::new("work", "work", "work", json!({"type":"object","required":["value"],"properties":{"value":{"type":"integer"}},"additionalProperties":false})), Counted(count)
-        )]))).plugin(agui.clone());
+        )]))).plugin(AgUiPlugin::default());
     if approval {
         builder = builder.plugin(ToolPolicyPlugin::new("approve", Approve));
     }
@@ -108,18 +107,8 @@ async fn build(
             .unwrap(),
         ));
     }
-    (builder.build().await.unwrap(), agui)
+    builder.build().await.unwrap()
 }
-fn manager(agent: &Agent) -> InteractionManager {
-    InteractionManager(
-        agent
-            .service::<InteractionStoreService>()
-            .unwrap()
-            .0
-            .clone(),
-    )
-}
-
 #[tokio::test]
 async fn all_loops_persist_questions_answers_and_agui_interrupts_across_restart() {
     for mode in ["react", "workflow", "dag"] {
@@ -127,7 +116,7 @@ async fn all_loops_persist_questions_answers_and_agui_interrupts_across_restart(
         let path = dir.path().join("agent.db");
         let seen = Arc::new(Mutex::new(vec![]));
         let calls = Arc::new(Mutex::new(vec![]));
-        let (agent, agui) = build(
+        let agent = build(
             &path,
             mode,
             Some(ToolCall::new("ask-1", "ask_user", questions())),
@@ -136,10 +125,10 @@ async fn all_loops_persist_questions_answers_and_agui_interrupts_across_restart(
             false,
         )
         .await;
-        let (handle, mut stream) = agui
-            .start(&agent, RunRequest::new("chat", "Edit my video"))
+        let (handle, mut stream) = agent
+            .start_with_output::<AgUiStream>(RunRequest::new("chat", "Edit my video"))
             .unwrap();
-        let result = handle.wait().await.unwrap();
+        let result = agent.wait(handle).await.unwrap();
         assert_eq!(result.status, RunStatus::AwaitingInput);
         let question = result.interactions[0].clone();
         let mut events = vec![];
@@ -149,42 +138,42 @@ async fn all_loops_persist_questions_answers_and_agui_interrupts_across_restart(
         let end = events.last().unwrap();
         assert_eq!(end["type"], "RUN_FINISHED");
         assert!(end.to_string().contains("ask_user"));
-        let records = manager(&agent).pending("chat").await.unwrap();
+        let records = agent.pending_interactions("chat").await.unwrap();
         assert_eq!(records.len(), 1);
         assert!(records[0].tool_call.is_some());
         assert!(agent.close().await.is_success());
         drop(agent);
-        let (agent, _) = build(&path, mode, None, seen.clone(), calls, false).await;
+        let agent = build(&path, mode, None, seen.clone(), calls, false).await;
         assert_eq!(
-            manager(&agent).pending("chat").await.unwrap()[0].request,
+            agent.pending_interactions("chat").await.unwrap()[0].request,
             question
         );
         assert!(
-            manager(&agent)
+            agent
                 .answer("other", question.id, selected(&question))
                 .await
                 .is_err()
         );
         assert!(
-            manager(&agent)
+            agent
                 .answer("chat", question.id, json!({"answers":{}}))
                 .await
                 .is_err()
         );
         let answer = selected(&question);
-        let resume = manager(&agent)
+        let resume = agent
             .answer("chat", question.id, answer.clone())
             .await
             .unwrap();
         // Crash between answer acceptance and continuation is safe.
         assert!(agent.close().await.is_success());
         drop(agent);
-        let (agent, resumed_agui) =
-            build(&path, mode, None, seen.clone(), Arc::default(), false).await;
+        let agent = build(&path, mode, None, seen.clone(), Arc::default(), false).await;
         let mut recovery = resume.clone();
         recovery.resume.as_mut().unwrap().response = None;
-        let (resumed_handle, mut resumed_stream) = resumed_agui.start(&agent, recovery).unwrap();
-        let final_result = resumed_handle.wait().await.unwrap();
+        let (resumed_handle, mut resumed_stream) =
+            agent.start_with_output::<AgUiStream>(recovery).unwrap();
+        let final_result = agent.wait(resumed_handle).await.unwrap();
         let mut resumed_events = vec![];
         while let Some(event) = resumed_stream.recv().await {
             resumed_events.push(serde_json::to_value(event).unwrap());
@@ -199,8 +188,8 @@ async fn all_loops_persist_questions_answers_and_agui_interrupts_across_restart(
                 .contains("input_required")
         );
         assert_eq!(final_result.status, RunStatus::Completed, "{mode}");
-        assert!(manager(&agent).pending("chat").await.unwrap().is_empty());
-        let record = manager(&agent).0.get("chat", question.id).await.unwrap();
+        assert!(agent.pending_interactions("chat").await.unwrap().is_empty());
+        let record = agent.interaction("chat", question.id).await.unwrap();
         assert!(record.answered_at_unix_ms.is_some());
         assert_eq!(record.response.unwrap().value, answer);
         assert_eq!(
@@ -226,7 +215,7 @@ async fn react_approval_executes_only_original_arguments_and_identical_resume_is
         let path = dir.path().join("agent.db");
         let seen = Arc::new(Mutex::new(vec![]));
         let calls = Arc::new(Mutex::new(vec![]));
-        let (agent, _) = build(
+        let agent = build(
             &path,
             "react",
             Some(ToolCall::new("call-1", "work", json!({"value":17}))),
@@ -239,21 +228,13 @@ async fn react_approval_executes_only_original_arguments_and_identical_resume_is
         assert!(calls.lock().unwrap().is_empty());
         assert_eq!(result.status, RunStatus::AwaitingInput);
         let id = result.interactions[0].id;
-        let record = manager(&agent).0.get("s", id).await.unwrap();
+        let record = agent.interaction("s", id).await.unwrap();
         assert_eq!(record.tool_call.unwrap().arguments, json!({"value":17}));
         agent.close().await;
         drop(agent);
-        let (agent, _) = build(&path, "react", None, seen.clone(), calls.clone(), true).await;
-        let resume = manager(&agent)
-            .answer("s", id, json!(approved))
-            .await
-            .unwrap();
-        assert!(
-            manager(&agent)
-                .answer("s", id, json!(!approved))
-                .await
-                .is_err()
-        );
+        let agent = build(&path, "react", None, seen.clone(), calls.clone(), true).await;
+        let resume = agent.answer("s", id, json!(approved)).await.unwrap();
+        assert!(agent.answer("s", id, json!(!approved)).await.is_err());
         let result = agent.run(resume.clone()).await.unwrap();
         assert_eq!(result.status, RunStatus::Completed);
         assert_eq!(calls.lock().unwrap().len(), usize::from(approved));
@@ -352,8 +333,8 @@ async fn terminal_resume_repairs_transcript_without_repeating_the_model() {
         .await
         .unwrap();
     let handle = agent.start(RunRequest::new("s", "hello")).unwrap();
-    let run_id = handle.control().run_id();
-    assert!(handle.wait().await.is_err());
+    let run_id = agent.control(&handle).unwrap().run_id();
+    assert!(agent.wait(handle).await.is_err());
     let mut check = conversations.open("s").await.unwrap();
     assert_eq!(check.snapshot().await.unwrap().messages.len(), 1);
     check.finish(ConversationOutcome::Stopped).await.unwrap();

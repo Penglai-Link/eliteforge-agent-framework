@@ -110,9 +110,9 @@ async fn cancelled_loop_awaits_tool_resource_shutdown_before_result() {
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    handle.cancel();
+    agent.cancel(&handle).unwrap();
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(2), handle.wait())
+        tokio::time::timeout(Duration::from_secs(2), agent.wait(handle))
             .await
             .unwrap(),
         Err(AgentError::Cancelled)
@@ -187,8 +187,8 @@ async fn resource_and_middleware_cleanup_failures_preserve_the_primary_error() {
             .await
             .unwrap();
         let handle = agent.start(RunRequest::new("cleanup", "input")).unwrap();
-        let mut events = handle.subscribe();
-        let error = handle.wait().await.unwrap_err();
+        let mut events = agent.subscribe(&handle).unwrap();
+        let error = agent.wait(handle).await.unwrap_err();
         assert_eq!(matches!(error.primary(), AgentError::Cancelled), cancelled);
         let AgentError::WithCleanup { primary, cleanup } = &error else {
             panic!("missing middleware error: {error}");

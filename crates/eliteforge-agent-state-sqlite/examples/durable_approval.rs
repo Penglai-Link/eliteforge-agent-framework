@@ -3,9 +3,8 @@
 //! plugin (e.g. genai) to drive the same workflow with an actual model.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_state_sqlite::*;
+use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
 use serde_json::{Value, json};
-use std::sync::Arc;
 
 struct Arithmetic;
 #[async_trait]
@@ -82,12 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("usage: durable_approval start <database> <amount> | answer <database> <run UUID> <interaction UUID> <true|false>".into()),
     };
     request.limits.max_steps = 4;
-    let store = Arc::new(SqliteStateStore::open(&args[2], SqliteOptions::default()).await?);
-    let conversations = Arc::new(
-        eliteforge_agent_memory::SqliteConversationStore::open(&args[2], Default::default())
-            .await?,
-    );
-    let agent = AgentBuilder::new().plugin(ConversationStorePlugin::from_arc(conversations.clone())).plugin(store.clone().plugin()).plugin(ChatModelPlugin::new(Arithmetic))
+    let agent = AgentBuilder::new().plugin(SqliteStoragePlugin::new(&args[2])).plugin(ChatModelPlugin::new(Arithmetic))
         .plugin(AgentLoopPlugin::new(WorkflowLoop::new(WorkflowDefinition { id:"approval-example".into(), version:1, stages:vec![WorkflowStage::new("calculate")] })?))
         .plugin(ToolPolicyPlugin::new("approval", Approval))
         .plugin(ToolProviderPlugin::new("tools", StaticToolProvider::new(vec![ToolBinding::new(ToolDescriptor::new("double", "double", "Double an integer", json!({"type":"object","properties":{"amount":{"type":"integer"}},"required":["amount"],"additionalProperties":false})), Double)])))
@@ -95,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let outcome = async {
         let handle = agent.start(request)?;
         let run_id = handle.run_id;
-        let result = handle.wait().await?;
+        let result = agent.wait(handle).await?;
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({"run_id":run_id,"result":result}))?
@@ -104,8 +98,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     .await;
     let report = agent.close().await;
-    conversations.close().await?;
-    store.close().await?;
     if !report.is_success() {
         return Err(format!("shutdown failed: {report:?}").into());
     }

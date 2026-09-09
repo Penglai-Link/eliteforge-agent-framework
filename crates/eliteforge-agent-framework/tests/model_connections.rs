@@ -154,8 +154,8 @@ async fn routing_rebuilds_context_for_smaller_model_and_reports_actual_target() 
         .await
         .unwrap();
     let mut handle = agent.start(RunRequest::new("s", "new")).unwrap();
-    let mut events = handle.take_events();
-    assert_eq!(handle.wait().await.unwrap().output, "small");
+    let mut events = agent.events(&mut handle).unwrap();
+    assert_eq!(agent.wait(handle).await.unwrap().output, "small");
     let primary = failed.calls.lock().unwrap().clone();
     let backup = healthy.calls.lock().unwrap().clone();
     assert_eq!(primary[0].1.len(), 3);

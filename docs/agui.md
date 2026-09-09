@@ -34,20 +34,18 @@ eliteforge-agent-official-plugin-agui = { path = "../eliteforge-agent-framework/
 
 在已配置模型和 SQLite 存储的 AgentBuilder 上注册插件，完整配置见[用户问答与工具审批](interactions.md)：
 
-插件注册唯一安装标记及 EventService。启动前通过 `Agent::service<T>()` 检查标记，
-未安装或使用了另一个实例时直接拒绝，不启动模型或工具。
+插件注册输出工厂和事件服务。`agent.start()` 在执行前创建本次运行的输出通道，
+然后发布事件；应用不需要保留插件实例。
 
 ```rust
-use eliteforge_agent_official_plugin_agui::AgUiPlugin;
+use eliteforge_agent_official_plugin_agui::{AgUiPlugin, AgUiStream};
 use eliteforge_agent_framework::RunRequest;
 
-let agui = AgUiPlugin::default();
-let agent = builder.plugin(agui.clone()).build().await?;
+let agent = builder.plugin(AgUiPlugin::default()).build().await?;
 
-// 使用安装时的同一实例或它的 clone 启动。
-let (handle, mut events) =
-    agui.start(&agent, RunRequest::new("chat-1", "分析项目"))?;
-let control = handle.control();
+let mut handle = agent.start(RunRequest::new("chat-1", "分析项目"))?;
+let mut events = agent.output::<AgUiStream>(&mut handle)?;
+let control = agent.control(&handle)?;
 
 let consume = async {
     while let Some(frame) = events.recv_sse().await? {
@@ -56,10 +54,13 @@ let consume = async {
     }
     Ok::<(), eliteforge_agent_official_plugin_agui::ag_ui::Error>(())
 };
-let (result, delivered) = tokio::join!(handle.wait(), consume);
+let (result, delivered) = tokio::join!(agent.wait(handle), consume);
 delivered?;
 let result = result?;
 ```
+
+`agent.output()` 只能取出一次对应类型的输出。需要在启动前确认插件已安装时，可用
+`agent.start_with_output::<AgUiStream>(request)` 同时取得句柄和输出流；缺少插件会在执行前报错。
 
 `events.recv()` 返回 SDK 的 `Event`，`events.recv_sse()` 返回编码后的 SSE 帧。
 消费方应识别 `RUN_ERROR`；`recv_sse()` 的 `Err` 只表示编码失败。
@@ -70,7 +71,7 @@ data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"...","delta":"你好"}
 
 ```
 
-`control` 可以交给接收用户消息的任务，继续调用 `steer()`、`cancel()` 或 `revoke_tools()`。
+`control` 可以交给接收用户消息的任务，继续调用 `agent.steer(&control, ...)`、`agent.cancel(&control)` 或 `agent.revoke_tools(&control, ...)`。
 保留控制句柄不会阻止事件流结束。丢弃事件接收器只停止消费；丢弃 `RunHandle` 或它的
 等待 future 会取消执行。HTTP 断开时是否取消 Agent，由宿主决定。
 
@@ -84,23 +85,31 @@ cargo run -p eliteforge-agent-official-plugin-agui --example sse
 
 ## 事件映射
 
-| Framework 输出 | AG-UI 事件 | 说明 |
-|---|---|---|
-| RunStarted | RUN_STARTED | `threadId` 使用 session_id；`runId` 使用本次 executionId，恢复时生成新值 |
-| 模型调用、DAG 节点、显式步骤 | STEP_STARTED / STEP_FINISHED | 步骤结束表示执行已结束，不等同于成功 |
-| MessageStarted / TextDelta / MessageFinished | TEXT_MESSAGE_START / CONTENT / END | 第一段文本到达时打开消息；最终回复补齐未流式返回的后缀 |
-| ReasoningDelta | REASONING_START、REASONING_MESSAGE_START / CONTENT / END、REASONING_END | 只发送模型公开返回的推理文本；可配置关闭 |
-| 模型返回的 tool_calls | TOOL_CALL_START / ARGS / END | 参数作为完整 JSON 发送；END 表示参数发送结束，结果随后到达 |
-| ToolResult | TOOL_CALL_RESULT | 保留 content、structured、isError、effect 和 resultReference |
-| StateSnapshot / StateDelta | STATE_SNAPSHOT / STATE_DELTA | 应用显式发送客户端状态；增量采用 RFC 6902 |
-| ActivitySnapshot / ActivityDelta | ACTIVITY_SNAPSHOT / ACTIVITY_DELTA | 活动 ID、类型与快照配对，增量字段为 `patch` |
-| Custom | CUSTOM | 应用自行约定 name/value |
-| Steered | CUSTOM: framework.steered | 指令已写入历史，不表示模型已处理 |
-| 非文本内容、结构化模型回复 | CUSTOM: framework.message | 保留原有内容类型及 structured，不强行转换成回答文本 |
-| RunFinished: Completed | RUN_FINISHED，success | result 带最终 RunResult |
-| AwaitingInput / RecoveryRequired | RUN_FINISHED，interrupt | 分别等待用户输入或人工核对执行结果 |
-| StepLimit / ToolCallLimit | RUN_ERROR | code 为 AGENT_LIMIT_REACHED |
-| RunCancelled / RunFailed | RUN_ERROR | 分别为 AGENT_CANCELLED、AGENT_RUN_FAILED |
+框架内部事件记录 Agent 执行过程中发生的事情，插件将其转换成前端接收的 AGUI 事件。
+下表省略 `AgentEvent::` 和 `OutputEvent::` 前缀；`OutputEvent` 通过 `AgentEvent::Output` 发布。
+「数据」列说明转换后的 AGUI 关键字段，不是完整 JSON。
+
+| 框架内部事件 | AGUI事件 | 描述 | 数据 |
+|---|---|---|---|
+| `RunStarted` | `RUN_STARTED` | 开始本次运行 | `threadId`：会话 `session_id`；`runId`：本次 `executionId`，恢复时生成新值 |
+| `StepStarted / StepFinished` | `STEP_STARTED / STEP_FINISHED` | 开始或结束一个步骤，例如调用模型；结束不代表成功 | `stepName`：步骤名称，附带节点执行身份和步骤 ID，用于区分同名步骤 |
+| `WorkflowNodeChanged` | `STEP_STARTED / STEP_FINISHED`；`CUSTOM` | Workflow 节点开始运行时打开步骤，离开运行状态时结束步骤，并发送节点状态 | `stepName`：`node/{node_id}`；自定义事件 `name="framework.node"`，`value` 包含 `nodeId` 和 `status` |
+| `MessageStarted / TextDelta / MessageFinished` | `TEXT_MESSAGE_START / TEXT_MESSAGE_CONTENT / TEXT_MESSAGE_END` | 开始消息、逐段输出文字、结束消息；首段非空文本到达时打开消息，最终回复补齐未流式返回的后缀 | `messageId`：消息 ID；开始事件的 `role="assistant"`；内容事件的 `delta`：本次追加的文字，例如 `"你好"` |
+| `ReasoningDelta`；消息结束或中止事件 | `REASONING_START / REASONING_MESSAGE_START / REASONING_MESSAGE_CONTENT / REASONING_MESSAGE_END / REASONING_END` | 逐段发送模型公开返回的推理文本，在消息结束或中止时关闭；可配置关闭推理输出 | 推理 ID 由原消息 ID 加 `/reasoning` 生成；内容事件的 `delta`：本次追加的推理文本 |
+| `MessageFinished.tool_calls` | `TOOL_CALL_START / TOOL_CALL_ARGS / TOOL_CALL_END` | 声明模型要调用的工具并发送参数；END 表示参数发送结束，工具结果随后到达 | `toolCallId`：调用的 `invocation_id`；`toolCallName`：工具名称；`parentMessageId`：所属消息；ARGS 的 `delta`：完整参数 JSON 字符串 |
+| `ToolResult` | `TOOL_CALL_RESULT` | 返回工具执行结果，并关联原工具调用 | `toolCallId`：原调用 ID；`messageId`：结果消息 ID；`content`：JSON 字符串，包含 `content`、`structured`、`isError`、`effect`、`resultReference` |
+| `StateSnapshot` | `STATE_SNAPSHOT` | 应用主动发送一份完整的前端状态 | `snapshot`：完整状态，例如 `{"progress":0}` |
+| `StateDelta` | `STATE_DELTA` | 应用主动更新前端状态的部分字段 | `delta`：RFC 6902 补丁，例如 `[{"op":"replace","path":"/progress","value":50}]` |
+| `ActivitySnapshot` | `ACTIVITY_SNAPSHOT` | 应用发送一项活动的完整内容，例如任务进度卡片 | `messageId`：插件生成的活动消息 ID；`activityType`：活动类型；`content`：完整活动内容 |
+| `ActivityDelta` | `ACTIVITY_DELTA` | 更新已发送的活动内容 | `messageId`、`activityType`：与活动快照配对；`patch`：RFC 6902 补丁 |
+| `Custom` | `CUSTOM` | 应用发送自行约定的通知，例如视频预览地址 | `name`：事件名称；`value`：事件数据，例如 `name="video.preview"`、`value={"url":"…"}` |
+| `Steered` | `CUSTOM` | 运行中追加的用户指令已写入历史，模型未必已经处理 | `name="framework.steered"`；`value.text`：追加的指令文本 |
+| `MessageFinished`（含非文本内容或结构化回复） | `CUSTOM` | 传递图片等非文本内容或结构化数据，保留原始内容类型 | `name="framework.message"`；`value` 包含 `messageId`、`content`、`structured` |
+| `RunFinished { status: Completed }` | `RUN_FINISHED` | 本次运行正常完成 | `threadId`、`runId`：会话与本次执行 ID；`outcome` 表示 `success`；已收到 `OutputEvent::RunResult` 时，`result` 携带最终 `RunResult` |
+| `RunFinished { status: AwaitingInput / RecoveryRequired }` | `RUN_FINISHED` | 本次执行暂停，等待用户回答或人工核对执行结果 | `outcome` 表示 `interrupt`；中断信息包含 ID 和原因；有持久化交互时附带提示、响应 schema，工具审批还携带 `toolCallId` |
+| `RunFinished { status: StepLimit / ToolCallLimit }` | `RUN_ERROR` | 达到最大执行步数或工具调用次数 | `code="AGENT_LIMIT_REACHED"`；`message`：执行次数超限说明 |
+| `RunCancelled` | `RUN_ERROR` | 本次运行被取消 | `code="AGENT_CANCELLED"`；`message`：取消说明 |
+| `RunFailed` | `RUN_ERROR` | 本次运行执行失败 | `code="AGENT_RUN_FAILED"`；`message`：默认通用错误说明，开启 `include_error_details` 后返回异常正文 |
 
 框架现有 `TextDelta`、`ReasoningDelta` 和工具观测事件继续保留。插件消费带消息身份的
 `OutputEvent`，避免同一段文本被发送两次。模型只返回完整结果时也能生成完整的消息事件。
@@ -129,10 +138,10 @@ RunResult 的最终回复与最近一条完整文本相同时不重复发送；�
 - 工具审批使用标准 `reason: "tool_call"`，`toolCallId` 指向对应的 invocation_id。
   审批通过或拒绝后，结果均关联这个调用；拒绝不会执行工具。
 - 内置执行器将普通 `AwaitInput` 也保存为持久化字符串问答。应用通过
-  `InteractionManager.answer()` 保存答案，再启动返回的恢复请求。只有未发布持久化交互的
+  `agent.answer()` 保存答案，再启动返回的恢复请求。只有未发布持久化交互的
   自定义 Loop 使用提示性 interrupt，此时不能将其 ID 作为可恢复的 interaction_id。
 - 每次恢复使用新输出流及 executionId。该流不混入旧执行或子 Agent 的事件；子 Agent 可
-  独立使用插件启动，本版本不自动合并为 SUBAGENT 事件。
+  配置插件后通过自己的 `agent.start()` 启动，本版本不自动合并为 SUBAGENT 事件。
 
 ## 自定义节点和客户端状态
 
@@ -173,7 +182,7 @@ ToolResult，并保留模型返回的 `ToolCall.invocation_id`，不要为了发
 
 通道满、消息超限、非法 Patch 或事件顺序错误，会关闭已经向客户端打开的消息/步骤，
 随后发出一个明确的 RUN_ERROR。没有静默丢弃后继续宣告成功，也不会因此重复调用工具。
-协议流失败和 Agent 执行失败是两件事；执行的最终结果仍以 `handle.wait()` 为准。
+协议流失败和 Agent 执行失败是两件事；执行的最终结果仍以 `agent.wait(handle)` 为准。
 运行异常默认使用通用错误文本，宿主显式设置 `include_error_details` 后才输出异常正文。
 
 此插件提供事件输出，不实现完整的 RunAgentInput HTTP 端点、客户端工具执行、

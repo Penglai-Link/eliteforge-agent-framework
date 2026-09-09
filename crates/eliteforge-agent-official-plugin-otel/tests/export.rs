@@ -166,8 +166,11 @@ async fn cancelled_model_future_ends_spans_with_cancelled_outcome() {
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    handle.cancel();
-    assert!(matches!(handle.wait().await, Err(AgentError::Cancelled)));
+    agent.cancel(&handle).unwrap();
+    assert!(matches!(
+        agent.wait(handle).await,
+        Err(AgentError::Cancelled)
+    ));
     agent.close().await;
     let spans = exporter.get_finished_spans().unwrap();
     assert_eq!(spans.len(), 2);
@@ -213,8 +216,8 @@ async fn cleanup_failure_does_not_reclassify_a_cancelled_run() {
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .unwrap();
-    handle.cancel();
-    let error = handle.wait().await.unwrap_err();
+    agent.cancel(&handle).unwrap();
+    let error = agent.wait(handle).await.unwrap_err();
     assert!(matches!(error, AgentError::WithCleanup { .. }));
     assert!(matches!(error.primary(), AgentError::Cancelled));
     agent.close().await;
@@ -424,7 +427,7 @@ async fn explicit_retry_after_reopening_links_attempts_and_allocates_a_new_invoc
         .unwrap();
     let h = a.start(RunRequest::new("session", "input")).unwrap();
     let run_id = h.run_id;
-    assert!(h.wait().await.is_err());
+    assert!(a.wait(h).await.is_err());
     let before: DagWorkflowState =
         serde_json::from_value(db.load(run_id).await.unwrap().state).unwrap();
     let invocation = before.nodes["private-node"].invocation_id;
@@ -634,8 +637,11 @@ async fn cancelled_dag_node_ends_its_model_and_node_spans() {
     tokio::time::timeout(Duration::from_secs(3), entered.notified())
         .await
         .unwrap();
-    handle.cancel();
-    assert!(matches!(handle.wait().await, Err(AgentError::Cancelled)));
+    agent.cancel(&handle).unwrap();
+    assert!(matches!(
+        agent.wait(handle).await,
+        Err(AgentError::Cancelled)
+    ));
     agent.close().await;
     db.close().await.unwrap();
     let spans = exporter.get_finished_spans().unwrap();
@@ -680,8 +686,8 @@ async fn interrupted_node_continuation_keeps_invocation_across_agent_recreation(
     tokio::time::timeout(Duration::from_secs(3), entered.notified())
         .await
         .unwrap();
-    h.cancel();
-    assert!(h.wait().await.is_err());
+    a.cancel(&h).unwrap();
+    assert!(a.wait(h).await.is_err());
     a.close().await;
     db.close().await.unwrap();
     drop(a);
@@ -994,7 +1000,7 @@ async fn approval_resume_parents_restored_tools_and_models_to_the_new_node_span(
         request.resume = resume.clone();
         let h = a.start(request).unwrap();
         let run_id = h.run_id;
-        let result = h.wait().await.unwrap();
+        let result = a.wait(h).await.unwrap();
         if resume.is_none() {
             assert_eq!(result.status, RunStatus::AwaitingInput);
             resume = Some(ResumeRequest {

@@ -2,7 +2,6 @@
 //! This example performs real API calls only when explicitly run.
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_model_genai::*;
-use eliteforge_agent_state_sqlite::{SqliteOptions, SqliteStateStore};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -19,7 +18,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ids = vec![planner.clone(), executor.clone()];
     ids.sort();
     ids.dedup();
-    // Alternatively call provider.discover().await, then apply host authorization.
     let strategy = StageModelStrategy {
         stages: [
             (
@@ -37,13 +35,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into(),
         fallback: None,
     };
-    let state = Arc::new(
-        SqliteStateStore::open(
-            std::env::var("STATE_DB").unwrap_or_else(|_| ":memory:".into()),
-            SqliteOptions::default(),
-        )
-        .await?,
-    );
     let mut plan = WorkflowStage::new("plan");
     plan.instructions.push(Message::system(
         "Create a concise implementation plan. The next stage will implement it.",
@@ -55,10 +46,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let agent = AgentBuilder::new()
         .plugin(
             eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new(
-                "agent.sqlite",
+                std::env::var("STATE_DB").unwrap_or_else(|_| "agent.sqlite".into()),
             ),
         )
-        .plugin(state.clone().plugin())
         .plugin(AgentLoopPlugin::new(WorkflowLoop::new(
             WorkflowDefinition {
                 id: "shared-model-phases".into(),
@@ -82,7 +72,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .await;
     let report = agent.close().await;
-    state.close().await?;
     println!("{}", outcome?.output);
     if !report.is_success() {
         return Err(format!("shutdown failed: {report:?}").into());

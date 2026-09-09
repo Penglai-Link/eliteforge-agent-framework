@@ -1,199 +1,807 @@
-# Plugin 与扩展点
+# 插件与扩展开发指南
 
-应用创建插件，`AgentBuilder::plugin(...)` 收集插件，`build().await` 按依赖顺序安装并校验服务。`GenaiPlugin`、`SqliteStoragePlugin`、`McpToolsPlugin` 都是插件；`GenaiChatAdapter` 是插件内部的模型协议实现。
+这篇指南回答三个问题：**业务能力实现哪个接口、项目需要什么依赖、写好的实现怎样在 Agent 中生效。**
 
-```mermaid
-flowchart LR
-    App[应用] --> Framework[eliteforge-agent-framework：装配、运行与关闭]
-    Framework --> Genai[eliteforge-agent-official-plugin-model-genai]
-    Framework --> Core[eliteforge-agent-core：公共契约与运行支撑]
-    Genai --> Core
-    Custom[用户自定义插件] --> Core
-    Core --> Kernel[eliteforge-agent-plugin-kernel：通用插件容器]
-```
+下面先介绍如何给客服 Agent 添加商店说明，再扩展到订单工具、执行拦截和应用主动查询。
+示例以文档中的代码片段展示。只想使用现成插件，可以直接阅读[插件包](#插件包)。
 
-箭头表示生产依赖。插件的集成测试和示例可以通过 dev-dependency 使用 Framework。`eliteforge-agent-core` 重新导出 `Plugin`、`PluginContext`、`PluginError`，自定义插件只需依赖 Core；Kernel 不依赖 Core，也不包含模型、Agent 或宿主业务类型。
+本文说明当前已经实现的 API。“用框架宏声明能力、显式选包后自动装配”的目标和接口草案，
+单独记录在[能力包与自动装配设计](capability-packs.md)，尚未替换当前的 `PluginPack` 接口。
 
-## 默认装配
+## 阅读路线
 
-| 配置项 | 默认行为 | 显式配置场景 |
+| 你现在要做什么 | 从哪里开始 |
+|---|---|
+| 第一次添加业务能力，不知道从哪里开始 | [引入依赖](#引入依赖) → [提供系统上下文](#提供系统上下文) |
+| 不明白 Provider、Plugin 和插件包的关系 | [基本概念](#基本概念) |
+| 知道业务需求，不知道该实现哪个接口 | [按场景选择扩展点](#按场景选择扩展点) |
+| 想理解插件怎样注册、生效和关闭 | [基本概念](#基本概念) → [依赖与生命周期](#依赖与生命周期) |
+| 想一次配置官方插件或自己的组合 | [插件包](#插件包) |
+| 想知道多个 Provider 怎样进入 Agent | [构建时如何收集能力](#构建时如何收集能力) |
+| 想判断多个插件能不能共存 | [多个插件与配置替换](#多个插件与配置替换) |
+| 已选好接口，需要核对注册类型和调用时机 | [扩展点参考](plugin-extension-reference.md) |
+| 想配置模型协议、多连接或 Embedding | [模型插件](model-plugins.md) |
+
+## 基本概念
+
+**提供系统上下文，只需要实现 `ContextProvider` 中的业务方法。**
+这个实现负责生成指令；应用再把它配置给 Agent，框架才会在准备模型输入时调用它。
+
+当前 API 使用 `ContextPlugin::new(id, provider)` 完成这一步配置。
+`ContextPlugin` 是现成的注册封装，**它没有额外的上下文业务能力**：指令内容来自传入的 Provider。
+应用不需要为了添加一个 Provider，再手写一个 `Plugin` 实现。
+
+| 概念 | 作用 | 示例 |
 |---|---|---|
-| 执行循环 | ReAct | 串行工作流、DAG、自定义循环 |
-| Chat 模型插件 | 默认启用 `genai` feature；需要 Chat 且没有自定义连接时安装 Genai | 自定义适配器，或 `.default_models(false)` |
-| 连接名 | `default` | 多账户、多个端点或独立连接 |
-| 模型 ID | 从 `MODEL` 读取；不硬编码商业模型 | `GenaiPlugin::new(model)` 或请求指定模型引用 |
-| 协议 | OpenAI Chat Completions | Responses、Anthropic、Gemini、Ollama 等 |
-| endpoint | 协议预设地址 | 代理、兼容服务、私有部署 |
-| auth | 对应供应商的凭据环境变量 | 自定义凭据来源 |
-| Embedding | 仅注册显式配置的模型 | `.embedding_model(model)` 或环境变量 `EMBEDDING_MODEL` |
-| 工具、上下文、事件 | 空工具、空固定上下文、NoopEvents | MCP、上下文块、遥测等 |
-| 持久化存储 | 显式安装 | `SqliteStoragePlugin::new(path)` |
+| 能力接口 | 定义一个业务扩展点，由框架在对应时机调用 | `ContextProvider` 提供系统或开发者指令 |
+| 能力实现 | 保存业务配置，实现接口中的方法 | `ShopContext` 生成商店说明 |
+| 注册封装 | 将一个能力实现接入现有插件安装流程 | `ContextPlugin` 注册传入的 Provider |
+| `Plugin` | 定义安装过程，可创建资源、解析依赖并注册多种能力 | `OrdersPlugin` 注册订单服务和查询工具 |
+| `PluginPack` | 组合一组安装配置，供应用一次引入 | 官方插件，或包装了业务 Provider 的注册封装 |
 
-自动 Genai 读取 `MODEL`、可选 `EMBEDDING_MODEL`、`MODEL_ENDPOINT`、`MODEL_API_KEY` 和 `MODEL_ADAPTER`。`MODEL_ADAPTER` 可取 `openai`、`openai-responses`、`anthropic`、`gemini`、`ollama`、`cohere`；默认 `openai`。未设置 `MODEL_API_KEY` 时使用供应商预设变量，例如 `OPENAI_API_KEY`。这些环境配置只在安装自动插件或 `GenaiPlugin::default()` 时读取。`GenaiPlugin::new(model)` 使用显式 builder 配置和供应商预设。
-
-自定义 Chat 连接已注册时，自动插件不读取上述环境变量，也不添加第二个 Chat 连接。`default-features = false` 可以从 Framework 的生产依赖中移除 Genai。需要的模型或存储缺失时，构建返回配置错误。
-
-```rust
-use eliteforge_agent_framework::{AgentBuilder, RunRequest};
-use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
-
-// MODEL 和 OPENAI_API_KEY 已配置；GenaiPlugin 自动装配。
-let agent = AgentBuilder::new()
-    .plugin(SqliteStoragePlugin::new("agent.sqlite"))
-    .build().await?;
-let result = agent.run(RunRequest::new("chat", "你好")).await;
-agent.close().await;
-println!("{}", result?.output);
-```
-
-需要显式配置时，直接创建插件：
-
-```rust
-use eliteforge_agent_official_plugin_model_genai::{GenaiPlugin, AdapterKind, AuthData};
-
-let plugin = GenaiPlugin::new("chat-model")
-    .connection("gateway")
-    .adapter(AdapterKind::OpenAIResp)
-    .endpoint("https://gateway.example/v1/")
-    .auth(AuthData::from_env("GATEWAY_KEY"))
-    .embedding_model("embedding-model");
-let builder = AgentBuilder::new().plugin(plugin);
-```
-
-高级场景可先配置 `GenaiChatAdapter` 的共享 SDK client、超时、代理和 TLS，再使用 `GenaiPlugin::from_adapter(adapter, models)`。普通接入不需要构造 Adapter 或 ModelConnection。
-
-## 模型能力
-
-扩展点按操作定义，输入模态单独声明。没有统一的 `ModelProvider::generate`。
-
-| 操作 | Core 扩展点 | 注册类型 | 应用调用 |
-|---|---|---|---|
-| 对话与工具调用 | `ChatModel` | `ModelConnectionService` | `Agent::run(RunRequest)` |
-| 向量化 | `EmbeddingModel` | `EmbeddingModelService` | `agent.models().embed(...)` |
-| 重排序 | `RerankModel` | `RerankModelService` | `.rerank(...)` |
-| 生成图片 | `ImageGenerationModel` | `ImageGenerationModelService` | `.generate_image(...)` |
-| 生成视频 | `VideoGenerationModel` | `VideoGenerationModelService` | `.submit_video(...)` / `.query_video(...)` / `.cancel_video(...)` |
-| 语音识别 | `SpeechRecognitionModel` | `SpeechRecognitionModelService` | `.transcribe(...)` |
-| 语音合成 | `SpeechSynthesisModel` | `SpeechSynthesisModelService` | `.synthesize(...)` |
-| 实时会话 | `RealtimeModel` / `RealtimeSession` | `RealtimeModelService` | `.connect_realtime(...)` |
-
-所有注册类型都是多贡献角色，可以注册多个实现。唯一键为 `(connection, model, operation)`；重复绑定在 build 时失败。同名模型可以分别提供 Chat 和 Embedding，不会混用请求格式。Chat 连接还可以为单个模型设置独立的 Adapter 和协议。
-
-上述操作有各自的数据结构和实际调度路径。随仓库提供的 Genai 插件实现 Chat，以及 OpenAI、Gemini、Cohere 的文本 Embedding。Rerank、图片生成、视频生成、语音和实时会话由自定义能力插件提供；Framework 的运行时和测试覆盖这些扩展点，Genai 不会宣称或注册 SDK 没有提供的能力。
-
-`ChatRequest` / `ChatResponse` 是 Framework 与模型适配器之间的协议无关格式。`RunRequest` / `RunResult` 是上层应用与 Agent 的交互格式。Embedding 等独立操作使用自己的 Request / Response，不通过 Chat 模拟。
-
-## 选择模型
+应用通过 `AgentBuilder` 的 `.plugin(...)` 或 `.plugin_pack(...)` 配置插件，
+在 `build().await` 时安装插件。运行和关闭等操作统一通过 Agent 实例完成。
+添加 Cargo 依赖只让代码可引用，**还需要注册，插件才会生效**。
+Provider 本身不要求实现 `Plugin`。简单能力使用现成的注册封装；需要组织安装过程时，
+再阅读[什么时候需要自己实现 Plugin](#什么时候需要自己实现-plugin)。
 
 ```text
-请求指定 connection/model
-          ↓ 未指定
-当前操作的阶段规则
-          ↓ 未设置
-当前操作的默认模型
-          ↓ 未设置
-唯一满足输入能力的模型
-          ↓ 没有或不唯一
-明确返回错误
+ShopContext                    生成商店说明
+    ↓ 交给
+ContextPlugin                  保存 ID 和 Provider，安装时注册
+    ↓ 配置到 AgentBuilder
+build().await                  安装并汇总上下文实现
+    ↓
+agent.run(request)             准备模型输入时调用 ShopContext::context
 ```
 
-Chat 请求使用 `RunRequest.model` 和 `model_stage`；其他操作使用 `request.choice.model` 和 `request.choice.stage`。显式选择不兼容或未注册模型会失败，不会静默切换。最终组成的 ChatRequest 在中间件之后再次检查能力、工具权限和预算。
+## 引入依赖
 
-```rust
-use eliteforge_agent_framework::*;
+### 区分插件项目和应用项目
 
-let routing = ModelRouting::default()
-    .default_for(ModelOperation::Chat, ModelRef::new("gateway", "chat-model"))
-    .default_for(ModelOperation::Embedding, ModelRef::new("gateway", "embedding-model"))
-    .stage_for(ModelOperation::Chat, "review", ModelRef::new("gateway", "review-model"));
-let builder = AgentBuilder::new().plugin(ModelRoutingPlugin(routing));
+一个可复用插件通常放在 library crate 中；创建和运行 Agent 的应用放在 binary crate 中。
+以一个商店客服业务项目 `shop-assistant` 为例，在同一个 Cargo workspace 中管理插件和应用：
 
-let mut request = RunRequest::new("session", "检查代码");
-request.model = Some(ModelRef::new("gateway", "review-model"));
+```text
+shop-assistant/                            业务项目
+├─ Cargo.toml                             workspace 与公共依赖
+├─ shop-plugin/                            你开发的插件库
+│  ├─ Cargo.toml
+│  └─ src/lib.rs
+└─ shop-agent/                             使用插件的应用
+   ├─ Cargo.toml
+   └─ src/main.rs
 ```
 
-复杂 Chat 策略可以通过 `ModelStrategyPlugin` 安装 `FixedModelStrategy`、`StageModelStrategy`、`RoutingStrategy` 或自定义实现；显式请求仍然优先。只有配置 Chat 的有序回退策略才会切换候选模型。已经发布增量内容后，不自动重试。Embedding 等独立操作不自动重试，以免重复收费或改变向量空间。
+框架作为外部 Cargo 依赖引入。业务项目只包含自己的插件和应用代码。
 
-## 多模态与协议
+### 业务项目根目录的 Cargo.toml
 
-Chat 的文字、图片、音频、视频输入都由有序 `ContentBlock` 表达。模型用 `ModelDescriptor::with_input_modalities(...)` 声明能力，默认仅文本。图片/视频理解属于 Chat 输入能力，图片/视频生成属于独立操作。
+根目录统一声明 workspace 成员和框架依赖，插件与应用继承这些依赖：
 
-```rust
-let plugin = GenaiPlugin::empty()
-    .adapter(AdapterKind::Gemini)
-    .chat_model(ModelDescriptor::new("multimodal-model")
-        .with_input_modalities([Modality::Text, Modality::Image, Modality::Audio, Modality::Video]));
+```toml
+[workspace]
+members = ["shop-plugin", "shop-agent"]
+resolver = "2"
+
+[workspace.dependencies]
+eliteforge-agent-core = "0.1.0"
+eliteforge-agent-framework = { version = "0.1.0", default-features = false }
+eliteforge-agent-official-plugin-pack = "0.1.0"
 ```
 
-模型声明还受 Adapter 实际支持范围约束。当前 Genai 对 Gemini 传递原生图片、音频和视频块；OpenAI、Responses、Anthropic、Ollama 的 Chat 路径开放文本和图片。媒体预算需要 `estimated_tokens` 或连接自定义 TokenEstimator。`ResourceReference` 只是资源引用，是否读取由宿主显式决定，不能据此声称模型已理解资源内容。
+这里假设使用的 Cargo 源已提供上述 crate 的 `0.1.0` 版本，仅用于演示依赖声明，
+不表示这些包已发布到 crates.io。接入时使用实际可用的版本和源；使用私有源时，
+在 `.cargo/config.toml` 中配置源，并在对应依赖中添加 `registry`。
 
-协议属于模型操作绑定。一个 Genai 连接中，Chat 可以使用 Responses，Embedding 仍调用 Embeddings endpoint；同连接不同 Chat 模型也可使用不同协议：
+### 插件项目的 Cargo.toml
 
-```rust
-use eliteforge_agent_official_plugin_model_genai::OpenAiChatProtocol;
-let plugin = GenaiPlugin::new("chat-model")
-    .chat_model_with_protocol(ModelDescriptor::new("responses-model"), OpenAiChatProtocol::Responses)
-    .embedding_model("embedding-model");
+```toml
+[package]
+name = "shop-plugin"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+eliteforge-agent-core = { workspace = true }
+async-trait = "0.1"
+serde_json = "1"
+tokio-util = { version = "0.7", features = ["rt"] }
 ```
 
-`ModelMessageContext` 保存模型原生 continuation，绑定连接、模型、协议和格式版本。只有完全匹配的绑定才能重放原生数据；切换模型或协议时使用公共消息内容，不把签名和私有状态跨协议复用。
+- `eliteforge-agent-core`：`Plugin`、`PluginContext`、各种扩展接口及注册类型。插件作者的主要依赖。
+- `async-trait`：用于示例中的异步接口实现。
+- `serde_json`：订单工具的参数和 JSON Schema；只写商店指令插件时可以不引入。
+- `tokio-util`：主动查询接口接收 `CancellationToken`；没有这类操作时可以不引入。
 
-## Embedding 与索引
+`shop-plugin` 的生产依赖不需要 Framework。它描述自己的能力，不创建 Agent。
+如果插件需要数据库驱动、HTTP client 等实现依赖，在这个项目中另外声明。
 
-```rust
-let mut request = EmbeddingRequest::texts(["第一段文字", "第二段文字"]);
-request.choice.model = Some(ModelRef::new("gateway", "embedding-model"));
-request.dimensions = Some(1024);
-let vectors = agent.models().embed(request).await?;
+### 应用项目的 Cargo.toml
+
+```toml
+[package]
+name = "shop-agent"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shop-plugin = { path = "../shop-plugin" }
+eliteforge-agent-framework = { workspace = true }
+eliteforge-agent-official-plugin-pack = { workspace = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-批量结果校验数量、输入索引、维度和有限数值，并按输入顺序返回。缺失用量保持 `None`。`EmbeddingPurpose` 区分 Query、Document 和 Similarity，Adapter 负责映射供应商的任务类型。
+`shop-plugin` 是应用自己的插件库，Framework 负责装配和执行，官方包提供模型、存储、问答、
+AGUI、MCP 和遥测。`tokio` 提供异步运行时。
 
-持久化向量索引还应记录 `EmbeddingSpace { model, revision, dimensions, preprocessing }`，并通过插件贡献 `EmbeddingSpaceService(space)`。查询使用 `embed_query(&space, request)`；运行时要求模型绑定及四项配置完全一致。框架不会自动更换向量模型、执行预处理或验证远端可变别名实际指向的权重；宿主应使用固定版本并按声明完成预处理。
+`workspace = true` 表示继承业务项目根目录声明的依赖。
+`shop-plugin` 的 `path` 相对应用的 `Cargo.toml`，指向同一业务项目中的插件库。
 
-## 调用控制和生命周期
+Cargo 包名里的 `-` 在 Rust 的 `use` 路径里写成 `_`，例如 `shop-plugin` 对应 `shop_plugin`。
 
-独立模型操作支持 `ModelInvocationOptions` 的超时、取消、输入字节上限和批量上限。WorkflowNode 通过 `services.operations.with_options(ModelInvocationOptions::for_run(context, limits))` 共享运行取消；Embedding 同时使用运行 token 预算和持久化预留，未知用量保守记账。图像、视频和语音的计费单位没有折算成 Chat token。
+## 提供系统上下文
 
-Agent 关闭时停止接收新模型操作、取消在途请求并等待它们释放，随后关闭插件。取消本地 HTTP 请求不能撤销远端已执行的操作。视频返回包含模型、协议和 job ID 的可序列化句柄；查询和取消始终使用原绑定。视频取消仅在能力声明支持时调用。实时会话有独立的输入、事件、关闭接口，关闭 Agent 或丢弃会话会触发适配器的取消信号。
+目标：让模型收到“你是星河商店的客服，请使用中文回答”这条系统指令。
+下面先写 Provider，再把它配置给 Agent。这个场景不需要自己实现 `Plugin`。
 
-## 自定义插件
+### 第一步：实现 ContextProvider
+
+将下面代码放在业务项目的 `shop-plugin/src/lib.rs` 中：
 
 ```rust
-use eliteforge_agent_core::{Plugin, PluginContext, PluginError, EmbeddingModelService, ModelRef};
 use async_trait::async_trait;
-use std::sync::Arc;
+use eliteforge_agent_core::{AgentError, ContextProvider, Message, RunContext};
 
-struct MyEmbeddingPlugin;
+pub struct ShopContext {
+    name: String,
+}
+
+impl ShopContext {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
 #[async_trait]
-impl Plugin for MyEmbeddingPlugin {
-    fn id(&self) -> &str { "my.embedding" }
-    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        // MyEmbeddingAdapter 实现 eliteforge_agent_core::EmbeddingModel。
-        context.contribute(EmbeddingModelService::new(
-            ModelRef::new("local", "my-embedding-model"), Arc::new(MyEmbeddingAdapter),
-        ).protocol("my-provider/embed"))
+impl ContextProvider for ShopContext {
+    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
+        Ok(vec![Message::system(format!(
+            "你是{}的客服，请使用中文回答。",
+            self.name
+        ))])
     }
 }
 ```
 
-`provide(T)` 用于唯一角色，`contribute(T)` 用于多个贡献；同类型不能混用。插件可以声明依赖并注册资源清理回调。安装失败会回滚，正常关闭按依赖逆序清理。不要在 `install` 中开始业务模型调用。
+`ShopContext` 保存商店名称，`context` 返回模型指令。业务逻辑到这里就写完了。
+内置执行器准备每轮模型输入时，会调用已配置的 Provider；这里的方法也可以使用传入的 `RunContext`。
+系统和开发者指令使用 `ContextProvider`，检索到的业务数据使用[上下文贡献接口](#加入检索结果)。
 
-## 其他扩展点
+如果指令就是一段固定文字，可以直接使用已经实现 `ContextProvider` 的 `FixedContext`：
 
-| 领域 | 公共契约 / 注册入口 | 配套实现 |
+```rust
+use eliteforge_agent_core::FixedContext;
+
+let provider = FixedContext::new("你是星河商店的客服，请使用中文回答。");
+```
+
+### 第二步：把 Provider 配置给 Agent
+
+当前 `AgentBuilder::plugin` 接收实现了 `Plugin` 的对象，使用 `ContextPlugin` 将 Provider 接入这个入口：
+
+```rust
+use eliteforge_agent_core::ContextPlugin;
+use eliteforge_agent_framework::AgentBuilder;
+use eliteforge_agent_official_plugin_pack::EliteForgeOfficialPluginPack;
+use shop_plugin::ShopContext;
+
+let agent = AgentBuilder::new()
+    .plugin_pack(EliteForgeOfficialPluginPack::new("agent.sqlite"))
+    .plugin(ContextPlugin::new(
+        "shop.context",
+        ShopContext::new("星河商店"),
+    ))
+    .build().await?;
+```
+
+`ShopContext` 生成指令，`ContextPlugin` 负责安装注册；换成 `FixedContext` 时也是同样的注册方式。
+`shop.context` 是这项安装配置在当前 Agent 内的 ID，用于重复检查、依赖排序和错误定位。
+
+片段位于异步函数中，模型配置见[默认模型装配](model-plugins.md#默认装配)。
+应用使用 `agent.run(...)` 发起运行，结束使用后调用 `agent.close().await` 关闭资源，错误路径也应执行关闭逻辑。
+
+如果多个应用需要同一组能力，可以由包作者统一声明，应用只引入一个包，见[仅组合 Provider 的包](#仅组合-provider-的包)。
+
+### ContextPlugin 具体做了什么
+
+`ContextPlugin` 是框架提供的 `struct`，已经实现了 `Plugin`。它只有以下注册职责：
+
+| 时机 | 行为 |
+|---|---|
+| `ContextPlugin::new(id, provider)` | 保存安装 ID，用 `Arc` 持有传入的 Provider |
+| `build()` 调用它的 `install` | 将 Provider 注册为一个 `ContextService` |
+| Agent 准备模型输入 | 框架调用注册的 Provider，由 Provider 返回指令 |
+
+`ContextPlugin` 不生成指令、不检索知识，也不负责上下文裁剪或记忆存储。
+这些能力分别由 Provider 或对应的其他扩展接口实现。
+安装时，注册封装执行的核心代码是：
+
+```rust
+context.contribute(ContextService(self.implementation.clone()))
+```
+
+这一行解释了封装的内部行为；使用者只需传入 Provider，无需重复这段注册代码。
+工具来源、事件监听和中间件分别有 `ToolProviderPlugin`、`EventPlugin`、`RunMiddlewarePlugin` 等同类封装。
+
+## 什么时候需要自己实现 Plugin
+
+当安装过程需要解析其他服务、异步建立连接、注册多种相关能力或登记关闭回调时，再实现 `Plugin`。
+给 Provider 传入名称、规则等普通配置，使用上一节的注册封装即可。
+
+例如，一个订单插件可以在 `install` 中创建订单服务，同时注册模型查询工具和应用主动查询入口。
+完整注册过程见[订单工具](#提供模型可调用的工具)，依赖及资源规则见[依赖与生命周期](#依赖与生命周期)。
+
+| 你要做什么 | 需要编写什么 |
+|---|---|
+| 添加系统上下文 | `ContextProvider` 实现；使用 `ContextPlugin` 注册 |
+| 添加一段固定指令 | 使用 `FixedContext` 和 `ContextPlugin` |
+| 复用一组已经创建好的 Provider | 用注册封装组成 `PluginPack`，应用只安装包 |
+| 安装时创建并管理业务资源 | `Plugin::install`，并登记适用的关闭回调 |
+| 一次安装工具、上下文等多种能力 | 自定义 `Plugin`，或将独立注册配置组成包 |
+
+## 按场景选择扩展点
+
+先根据**谁发起调用、你要改变哪一步**选择接口。一个插件可以同时注册多个扩展点。
+
+| 业务场景 | 首先关注的扩展点 | 下一步 |
 |---|---|---|
-| 执行循环 | `AgentLoop` / `AgentLoopPlugin` | ReAct、WorkflowLoop、DagWorkflowLoop |
-| 工作流节点 | `WorkflowNode` / `WorkflowNodePlugin` | ReactWorkflowNode、自定义节点 |
-| 工具 | `Tool`、`ToolProvider` / `ToolProviderPlugin` | StaticToolProvider、MCP、人类交互 |
-| 工具策略 | `ToolPolicy` / `ToolPolicyPlugin` | 审批、自定义规则 |
-| 会话 | `ConversationStore` / `ConversationStorePlugin` | SQLite |
-| 执行状态 | `StateStore` / `StateStorePlugin` | SQLite checkpoint、journal、租约 |
-| 用户交互 | `InteractionStore` / `InteractionStorePlugin` | SQLite、HumanInteractionPlugin |
-| 长期记忆 | `LongTermMemory` / `LongTermMemoryPlugin` | SQLite 检索与记忆工具 |
-| 上下文 | ContextContributor、ContextLayout、ContextBudgetPolicy、ContextReducer、ContextAssembler | 固定块、历史、摘要、附件 |
-| 执行拦截 | RunMiddleware、ModelMiddleware、ToolMiddleware、WorkflowNodeMiddleware | 遥测、转存、自定义拦截 |
-| 生命周期通知 | RunLifecycleHook | 自定义通知 |
-| 事件展示 | EventSink / EventPlugin | TelemetryPlugin、AgUiPlugin |
+| 添加角色、系统规则或开发者指令 | `ContextProvider` | 已在[入门示例](#提供系统上下文)中实现 |
+| 每次调用模型前检索知识、记忆或业务数据 | `ContextContributor` + `ContextLayout` | [加入检索结果](#加入检索结果) |
+| 让模型决定什么时候查订单、调接口 | `Tool`，必要时再实现 `ToolProvider` | [提供模型可调用的工具](#提供模型可调用的工具) |
+| 工具执行前拒绝操作或要求审批 | `ToolPolicy` | [权限与人工交互](#权限与人工交互) |
+| 模型主动向用户提问 | `HumanInteractionPlugin` 或返回交互请求的 `Tool` | [权限与人工交互](#权限与人工交互) |
+| 统计、拦截或修改一次执行的结果 | 对应层级的 `Middleware` | [拦截执行](#拦截执行) |
+| 只关心一次运行开始和结束 | `RunLifecycleHook` | [接收通知与输出](#接收通知与输出) |
+| 收集文本增量、工具事件、错误等 | `EventSink` | [接收通知与输出](#接收通知与输出) |
+| 为应用提供自己的输出流类型 | `RunOutputFactory` + `EventSink` | [接收通知与输出](#接收通知与输出) |
+| 应用主动查询插件能力，参数由应用决定 | `AgentOperation` | [让应用主动调用插件能力](#让应用主动调用插件能力) |
+| 接入新的模型协议或多模态服务 | `ChatModel` 或相应的模型接口 | [接入模型](#接入模型) |
+| 更换会话、执行状态或记忆存储 | 对应的存储接口 | [替换存储](#替换存储) |
+| 增加固定业务步骤、分支或并行任务 | `WorkflowNode` + DAG 配置 | [扩展工作流](#扩展工作流) |
+| 整体改变 Agent 的决策执行方式 | `AgentLoop` | [扩展工作流](#扩展工作流) |
 
-官方插件包使用 `eliteforge-agent-official-plugin-*` 命名；其他模块使用 `eliteforge-agent-*` 命名，通用插件内核为 `eliteforge-agent-plugin-kernel`；`eliteforge-agent-context`、`eliteforge-agent-memory`、`eliteforge-agent-state-sqlite` 是可复用组件库，组合插件为 `eliteforge-agent-official-plugin-storage-sqlite`。宿主的身份、授权、Space/Platform、配置继承和额度套餐不进入 Core 或 Kernel。
+### 提供模型可调用的工具
+
+以“查询订单”为例，分成三部分：
+
+- `ToolDescriptor`：告诉模型工具叫什么、有什么作用、参数是什么。`id` 是框架内部身份，`call_name` 是模型调用名。
+- `Tool::call`：模型给出参数后，框架实际执行的业务代码。
+- `ToolProvider`：为当前运行提供工具列表。固定列表直接用 `StaticToolProvider`；根据用户权限或当前任务动态提供工具时，再自行实现 `lease`。
+
+下面用内存中的固定订单 `A100 → 已发货` 演示 `lookup_order` 的调用链。
+接真实业务时，把目录查询替换为自己的数据库或接口调用。
+
+```text
+模型返回 lookup_order(order_id="A100")
+    ↓
+框架校验参数、权限、取消和预算
+    ↓
+ToolMiddleware → LookupOrderTool::call
+    ↓
+ToolOutput("订单 A100：已发货")
+    ↓
+结果加入消息 → 模型继续回答
+```
+
+下面代码定义订单数据、查询工具及其注册过程，可放在插件库的 `orders` 模块中：
+
+```rust
+use async_trait::async_trait;
+use eliteforge_agent_core::*;
+use serde_json::{Value, json};
+use std::{collections::BTreeMap, sync::Arc};
+use tokio_util::sync::CancellationToken;
+
+struct OrderCatalog {
+    orders: BTreeMap<String, String>,
+}
+
+pub struct OrderCatalogService(Arc<OrderCatalog>);
+
+struct LookupOrderTool {
+    catalog: Arc<OrderCatalog>,
+}
+
+#[async_trait]
+impl Tool for LookupOrderTool {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        if context.is_cancelled() {
+            return Err(ToolError::Failed("订单查询已取消".into()));
+        }
+        let id = arguments["order_id"]
+            .as_str()
+            .ok_or_else(|| ToolError::Failed("order_id 必须是字符串".into()))?;
+        match self.catalog.orders.get(id) {
+            Some(status) => Ok(ToolOutput::text(format!("订单 {id}：{status}"))),
+            None => Ok(ToolOutput::error(format!("没有找到订单 {id}"))),
+        }
+    }
+}
+
+pub struct OrdersPlugin;
+
+#[async_trait]
+impl Plugin for OrdersPlugin {
+    fn id(&self) -> &str {
+        "shop.orders"
+    }
+
+    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        let catalog = Arc::new(OrderCatalog {
+            orders: BTreeMap::from([("A100".into(), "已发货".into())]),
+        });
+        // 主动查询操作与模型工具共享同一份订单数据。
+        context.provide(OrderCatalogService(catalog.clone()))?;
+        let descriptor = ToolDescriptor::new(
+            "shop.orders.lookup",
+            "lookup_order",
+            "根据订单号查询订单状态",
+            json!({
+                "type": "object",
+                "properties": {"order_id": {"type": "string"}},
+                "required": ["order_id"],
+                "additionalProperties": false
+            }),
+        );
+        context.contribute(ToolProviderService(Arc::new(StaticToolProvider::new(
+            vec![ToolBinding::new(descriptor, LookupOrderTool { catalog })],
+        ))))
+    }
+}
+```
+
+在插件库入口用 `pub mod orders;` 导出模块后，应用安装插件：
+
+```rust
+use shop_plugin::orders::OrdersPlugin;
+
+let builder = builder.plugin(OrdersPlugin);
+```
+
+`OrdersPlugin::install` 内通过 `contribute(ToolProviderService(...))` 注册工具来源。
+固定工具也可直接配置 `ToolProviderPlugin::new(id, StaticToolProvider::new(bindings))`。
+
+工具返回的业务失败可使用 `ToolOutput::error`；无法可靠完成调用时返回 `ToolError`。
+工具派发后丢失结果属于“不确定是否已执行”，不要自行把这种情况当作普通失败反复重试。
+MCP 服务器已提供工具时，直接配置官方包的 `.mcp(...)`，无需再实现一层 `Tool`。
+
+### 加入检索结果
+
+**系统规则使用 `ContextProvider`；检索到的文档、记忆和订单数据使用 `ContextContributor`。**
+内置执行器要求 `ContextProvider` 返回受信任的 System/Developer 指令。
+`ContextContributor::contribute` 则返回一个有 ID 的 `ContextBlock`，例如 `ContextBlock::data("shop.knowledge", content)`。
+
+开发步骤：
+
+1. 实现 `block_id()`，为来源指定稳定 ID。
+2. 实现 `contribute(&ContextInput)`，根据当前输入、模型、阶段、历史和预算查询数据。
+3. 使用 `ContextContributorPlugin::new(id, implementation)` 注册。
+4. 同时用 `ContextLayoutPlugin` 配置块顺序和 token 配额；布局必须包含指令、历史和每个自定义块。
+
+固定数据也能用同一条装配链，下面的片段展示必须一起配置的两个插件：
+
+```rust
+use eliteforge_agent_core::*;
+
+let builder = builder
+    .plugin(ContextContributorPlugin::new(
+        "shop.knowledge",
+        FixedContextContributor(ContextBlock::data("shop.knowledge", "退货期限为 7 天。")),
+    ))
+    .plugin(ContextLayoutPlugin(ContextLayout(vec![
+        ContextBlockConfig::new(INSTRUCTIONS_BLOCK, BlockBudget::tokens(1000)),
+        ContextBlockConfig::new("shop.knowledge", BlockBudget::tokens(1000)),
+        ContextBlockConfig::new(HISTORY_BLOCK, BlockBudget::tokens(4000)),
+    ])));
+```
+
+检索数据超长时关注 `ContextReducer`；需要重新分配各块预算时关注 `ContextBudgetPolicy`。
+只有要整体接管组装流程时才实现 `ContextAssembler`；这时应把来源、布局、预算和裁剪规则一起配置在自己的组装器内部。
+可运行的检索、摘要压缩和附件示例见[上下文窗口](context-windows.md)。
+
+### 拦截执行
+
+先选拦截范围，再实现 `intercept`。例如统计一次运行耗时，使用 `RunMiddleware`：
+
+```rust
+use async_trait::async_trait;
+use eliteforge_agent_core::{
+    AgentError, RunContext, RunMiddleware, RunNext, RunRequest, RunResult,
+};
+use std::time::Instant;
+
+pub struct TimingMiddleware;
+
+#[async_trait]
+impl RunMiddleware for TimingMiddleware {
+    async fn intercept(
+        &self,
+        _: &RunRequest,
+        _: &RunContext,
+        next: RunNext<'_>,
+    ) -> Result<RunResult, AgentError> {
+        let started = Instant::now();
+        let result = next.run().await;
+        eprintln!(
+            "run finished: success={}, elapsed={:?}",
+            result.is_ok(),
+            started.elapsed()
+        );
+        result
+    }
+}
+```
+
+注册时使用现成的适配器：
+
+```rust
+use eliteforge_agent_core::RunMiddlewarePlugin;
+use shop_plugin::timing::TimingMiddleware;
+
+let builder = builder.plugin(RunMiddlewarePlugin::new("shop.timing", TimingMiddleware));
+```
+
+| 想包围哪一段执行 | 接口 | 继续执行的方法 |
+|---|---|---|
+| 一次 `agent.run/start` 对应的执行 | `RunMiddleware` | `next.run().await` |
+| 一次 DAG 节点执行 | `WorkflowNodeMiddleware` | `next.run(input, context).await` |
+| 一次 Chat 模型调用 | `ModelMiddleware` | `next.run(request, context).await` |
+| 一次工具调用 | `ToolMiddleware` | `next.run().await` |
+
+`ModelMiddleware` 用于 Chat 调用；Embedding、图片等独立模型操作不经过这条 Chat 中间件链。
+`next` 只能消费一次。先注册的中间件在外层，实际顺序还受插件依赖排序影响：
+
+```text
+A 前置 → B 前置 → 业务执行 → B 后置 → A 后置
+```
+
+只统计开始/结束而不改变执行时，也可以用 `RunLifecycleHook`。
+上面的耗时示例只记录正常返回路径；取消或超时可能丢弃 future，资源关闭必须使用下文的生命周期机制。
+返回值、错误和取消语义详见[Middleware 与 Hook](extensions.md)。
+
+### 权限与人工交互
+
+工具是否允许执行、是否需要审批，用 `ToolPolicy::evaluate` 返回 `Allow`、`Deny` 或 `RequireApproval`，
+通过 `ToolPolicyPlugin::new(id, policy)` 注册。不要用生命周期 Hook 返回错误来代替权限策略。
+
+模型需要主动向用户提问时，官方包已经提供 `HumanInteractionPlugin`，模型可以调用 `ask_user`。
+自定义交互工具也可返回 `ToolOutput::request_input(InteractionRequest)`。
+
+```text
+工具请求提问 / 策略要求审批
+    ↓
+运行返回 AwaitingInput，交互记录被持久化
+    ↓
+应用展示问题 → agent.answer(session, id, answer)
+    ↓
+得到恢复请求 → agent.run(resume_request)
+```
+
+应用用户身份及外部业务授权仍由宿主处理。使用自定义 `AgentLoop` 时，它还必须声明并实现工具策略执行能力。
+完整提问、审批与跨进程恢复代码见[用户交互](interactions.md)。
+
+### 接收通知与输出
+
+| 你需要什么 | 使用什么 | 注册与触发 |
+|---|---|---|
+| 一次运行开始/结束通知 | `RunLifecycleHook` | `RunLifecycleHookPlugin`；回调 `on_started/on_finished` |
+| 文本增量、工具活动等运行事件 | `EventSink` | `EventPlugin`；接收 `on_event` 或发布时的 `on_published` |
+| 应用订阅框架原始事件 | Agent 自带入口 | `agent.events(&mut handle)`，无需自定义插件 |
+| 给前端发送 AGUI | 官方 `AgUiPlugin` | 包已安装；用 `agent.start_with_output::<AgUiStream>` |
+| 自定义协议输出 | `RunOutputFactory` + `EventSink` | 注册 `RunOutputService` 与 `EventService` |
+
+`RunLifecycleHook` 只接收通知，不能修改运行结果，失败会被隔离。
+`EventSink::on_event` 通过有界观测队列消费，慢消费者可能丢事件；`on_published` 在发布路径同步调用，不能阻塞。
+这些接口不承担可靠业务消息投递或资源关闭保证。
+
+自定义输出时，在同步的 `prepare` 中创建每次执行独立的通道，把接收端写入 `RunOutputs`，
+把发送端放入该次运行的 `Extensions`；再由 `EventSink` 转换并发送事件。
+`prepare` 在首个运行事件前执行，同一接收端只能通过 `agent.output::<T>` 取一次。
+完整实现可参考[AGUI 插件](../crates/eliteforge-agent-official-plugin-agui/src/lib.rs)，前端接法见[AGUI 文档](agui.md)。
+
+### 让应用主动调用插件能力
+
+“用户点击查询订单按钮”由应用决定参数，可以使用 `agent.execute(FindOrder { ... })`。
+它直接调用已安装的服务，不需要先让模型生成工具调用。
+
+沿用上面的 `OrdersPlugin` 注册的 `OrderCatalogService`，请求类型通过 `AgentOperation::Service` 声明要使用的服务：
+
+```rust
+// 应用主动调用的请求；参数由应用传入。
+pub struct FindOrder {
+    pub order_id: String,
+}
+
+#[async_trait]
+impl AgentOperation for FindOrder {
+    type Service = OrderCatalogService;
+    type Output = Option<String>;
+
+    async fn execute(
+        self,
+        service: Arc<Self::Service>,
+        cancellation: CancellationToken,
+    ) -> Result<Self::Output, AgentError> {
+        if cancellation.is_cancelled() {
+            return Err(AgentError::Cancelled);
+        }
+        Ok(service.0.orders.get(&self.order_id).cloned())
+    }
+}
+```
+
+把这段实现放在订单插件所在模块中，与工具共享同一份订单数据。
+应用只操作 Agent：
+
+```rust
+use shop_plugin::orders::FindOrder;
+
+let status = agent.execute(FindOrder { order_id: "A100".into() }).await?;
+```
+
+默认要求服务唯一；多个候选服务时，实现 `select` 按请求中的名字或其他明确规则选择。
+Agent 负责准入、取消和关闭顺序。该调用不会经过模型工具的 `ToolPolicy`/`ToolMiddleware` 链；
+需要业务鉴权时，由宿主或该操作实现负责。
+取消 token 的生命周期覆盖本次调用，返回、调用方丢弃 future 或 Agent 关闭时都会取消。
+
+### 接入模型
+
+已有协议先配置 Genai；只改变选择哪个模型时，关注 `ModelRoutingPlugin` 或 `ModelSelectionStrategy`。
+只有需要实现协议适配时，才实现 `ChatModel::generate`，再用 `ChatModelPlugin` 或 `ModelConnectionPlugin` 注册。
+
+Embedding、重排序、图片、视频、语音和实时会话各有独立接口和服务注册类型。
+不能因为实现了 `ChatModel` 就获得这些能力。注册方法与适用接口见[模型扩展点](plugin-extension-reference.md#模型)，
+协议、路由、环境变量及完整配置见[模型插件](model-plugins.md)。
+
+### 替换存储
+
+先明确需要替换的数据：
+
+| 要存什么 | 实现哪些接口 | 注册适配器 |
+|---|---|---|
+| 对话消息 | `ConversationStore` + `ConversationSession` | `ConversationStorePlugin` |
+| 执行 checkpoint、journal 和租约 | `StateStore` | `StateStorePlugin` |
+| 提问、审批和答案 | `InteractionStore` | `InteractionStorePlugin` |
+| 跨对话长期记忆 | `LongTermMemory` | `LongTermMemoryPlugin` |
+| 历史摘要 | `SummaryStore`（Context crate） | 自定义插件注册 `SummaryStoreService` |
+| 附件与工具大结果 | `ArtifactStore`（Context crate） | 自定义插件注册 `ArtifactStoreService` |
+
+每种角色在同一个 Agent 内只有一个实现。官方包的 SQLite 插件已经注册了上面全部角色。
+换 SQLite 路径或参数时，修改包的 `.storage(...)`。
+**要改用另一套存储实现，应单独装配插件或建立自己的插件包**：当前官方包的 `storage` 参数只接受 `SqliteStoragePlugin`。
+
+例如，会话存储可换成你自己的实现，执行状态和交互存储继续使用其他已实现的插件；
+不要再同时安装覆盖这些角色的整套 SQLite 存储插件。
+
+会话存储还要实现消息一致性、版本检查和租约释放，执行存储还要实现原子状态迁移；
+接口详细职责见[存储参考](plugin-extension-reference.md#存储)与[执行契约](execution-contracts.md)。
+
+### 扩展工作流
+
+已有 DAG 调度能表达流程时，实现一个 `WorkflowNode`：声明 `kind()`、配置 schema、
+`validate` 和 `execute`，通过 `WorkflowNodePlugin::new(id, node)` 注册，再在 DAG 定义中引用该 `kind`。
+节点只有被流程引用并调度时才会执行；只注册插件不会自动增加流程步骤。
+
+需要替换整个决策循环时，实现 `AgentLoop`，使用 `AgentLoopPlugin::new(loop)` 注册。
+同时声明模型、状态、交互、恢复、工具策略等需求，框架在构建时校验。
+这是高级扩展；循环需要自己遵守取消、持久化和工具执行契约。
+完整 DAG 示例与恢复规则见[DAG 工作流](dag-workflows.md)。
+
+## 插件包
+
+当前 `PluginPack` 接口返回 `Vec<Arc<dyn Plugin>>`，用于组合安装配置。
+包内可以全部是 Provider 的注册封装，也可以包含管理连接的插件，包作者不必为每个 Provider 自己实现 `Plugin`。
+应用只调用 `.plugin_pack(pack)`，包内成员会随 `build()` 一起安装。
+
+### 仅组合 Provider 的包
+
+下面这个业务包只提供两项上下文能力。`ShopContext` 和 `FixedContext` 都是 Provider 实现，
+包作者用当前 API 所需的 `ContextPlugin` 完成注册声明：
+
+```rust
+use eliteforge_agent_core::{ContextPlugin, FixedContext, Plugin, PluginPack, PluginPackBuilder};
+use shop_plugin::ShopContext;
+use std::sync::Arc;
+
+pub struct ShopContextPack;
+
+impl PluginPack for ShopContextPack {
+    fn into_plugins(self) -> Vec<Arc<dyn Plugin>> {
+        PluginPackBuilder::new()
+            .plugin(ContextPlugin::new("shop.context", ShopContext::new("星河商店")))
+            .plugin(ContextPlugin::new(
+                "shop.rules",
+                FixedContext::new("查询订单状态时以订单工具返回的结果为准。"),
+            ))
+            .into_plugins()
+    }
+}
+```
+
+应用在已有的模型和存储配置上添加 `.plugin_pack(ShopContextPack)` 即可，两个 Provider 都会生效。
+这里没有自定义 `impl Plugin`，但当前包接口仍要求通过注册封装容纳 Provider，
+不能直接把 `ShopContext` 放进 `into_plugins` 的返回列表。
+
+### 官方插件包
+
+`EliteForgeOfficialPluginPack` 默认安装当前全部 6 个官方插件：
+
+| 插件 | 默认行为 | 修改配置 |
+|---|---|---|
+| Genai | 安装时读取 `MODEL` 等模型环境配置 | `.model(plugin)`；支持自定义模型插件 |
+| SQLite | 显式路径下保存会话、状态、交互、记忆、摘要、附件 | `.storage(SqliteStoragePlugin)` |
+| 用户问答 | 注册 `ask_user` 工具 | `.human_interaction(false)` 可关闭 |
+| AGUI | 每次运行准备 AGUI 输出 | `.agui(plugin)` 修改配置；`.without_agui()` 可关闭 |
+| MCP | 注册 ID 为 `tools.mcp` 的空工具源 | `.mcp(plugin)` 配置服务器；未配置时查询返回空列表 |
+| OTel | 构建时读取宿主全局 tracer/meter provider | `.telemetry(plugin)` 替换默认 provider；没有 exporter 时不导出 |
+
+`model`、`storage`、`human`、`agui`、`mcp`、`telemetry` 模块从官方包重新导出相应插件类型。
+具体配置例子见[快速上手](quickstart.md#使用插件包)；模型环境变量见[模型插件](model-plugins.md#默认装配)。
+`.without_model()` 只移除包内模型；Framework 的自动补充开关仍由 `.default_models(false)` 控制。
+
+### 组合多种能力
+
+可以把上下文包、订单插件和耗时中间件继续组合成业务包：
+
+```rust
+use eliteforge_agent_core::{Plugin, PluginPack, PluginPackBuilder, RunMiddlewarePlugin};
+use shop_plugin::{orders::OrdersPlugin, timing::TimingMiddleware};
+use std::sync::Arc;
+
+struct ShopPluginPack;
+
+impl PluginPack for ShopPluginPack {
+    fn into_plugins(self) -> Vec<Arc<dyn Plugin>> {
+        PluginPackBuilder::new()
+            .plugin_pack(ShopContextPack)
+            .plugin(OrdersPlugin)
+            .plugin(RunMiddlewarePlugin::new("shop.timing", TimingMiddleware))
+            .into_plugins()
+    }
+}
+```
+
+应用再调用 `.plugin_pack(ShopPluginPack)`。包只负责展开配置；包内插件、单独插件和嵌套包最终进入同一个依赖图。
+展开时不连接数据库、不启动业务任务；资源在插件 `install` 中创建。
+官方包的成员由[展开实现](../crates/eliteforge-agent-official-plugin-pack/src/lib.rs)显式维护，新增官方插件时要同步更新。
+
+## 构建时如何收集能力
+
+**当前框架会汇总已经注册的 Provider。** 它按服务注册类型查找实现，
+不是逐个检查任意对象实现了哪些 trait。
+
+```text
+应用配置一个包
+    ↓
+展开包中的安装配置
+    ↓
+build() 按依赖顺序安装
+    ├─ shop.context → ContextService(ShopContext)
+    └─ shop.rules   → ContextService(FixedContext)
+    ↓
+从同一个容器收集全部 ContextService
+    ↓
+形成 Agent 的 ContextProvider 列表
+    ↓
+每轮准备模型输入时调用这些 Provider
+```
+
+`AgentBuilder::build` 使用 `all::<ContextService>()` 取得列表，再取出其中的 Provider。
+工具来源和事件监听也按各自的服务类型汇总。多个上下文实现按安装及注册顺序保留；
+实际消息还会经过上下文布局和预算处理。
+
+当前行为的边界：
+
+| 操作 | 是否会加入 Agent 的上下文来源 |
+|---|---|
+| 在依赖 crate 中编写 `impl ContextProvider` | 不会，还没有声明使用哪个实例 |
+| 把 Provider 交给 `ContextPlugin`，再直接或通过包安装 | 会 |
+| 在自定义插件中调用 `contribute(ContextService(...))` | 会 |
+| 仅把业务对象作为自身类型注册 | 不会，业务对象类型与 `ContextService` 是不同注册键 |
+
+应用通过包安装全部成员的行为已经存在；目标方案使用 `#[capability(...)]` 声明包归属，
+由框架自动收集并注册所选包的能力。业务侧无需直接操作发现库，见[能力包自动装配](capability-packs.md)。
+
+## 多个插件与配置替换
+
+有两个不同的身份需要区分：插件通过字符串 `id()` 标识，服务通过具体 Rust 类型标识。
+
+| 写法 | 含义 | 多个实现时的行为 |
+|---|---|---|
+| `provide(T)` | 注册一个唯一角色 | 同类型第二次注册报 `DuplicateService` |
+| `contribute(T)` | 向某种能力的实现列表追加一项 | 按安装及注册顺序保留多个实现 |
+| 同一个 T 混用两种方式 | 注册语义冲突 | 报 `ServiceKindConflict` |
+| 重复插件 ID | 同一 Agent 内身份冲突 | 安装前报 `DuplicatePluginId` |
+
+多个贡献怎么用，由对应扩展点决定：事件插件都接收事件，中间件形成调用链，工具来源合并，
+模型按连接和模型选择规则解析，自定义操作通过 `select` 选服务。
+工具身份、模型绑定、上下文块 ID、工作流节点 kind、运行输出类型还各有进一步的唯一性校验。
+
+框架不按插件 Rust 类型自动覆盖旧实例，也没有“后注册的插件自动成为默认实现”的规则。
+同类型插件能否多实例，取决于 ID、注册的服务角色和该领域的约束。
+
+官方包已经包含 SQLite；在包外再次 `.plugin(SqliteStoragePlugin::new(...))` 会重复。
+正确的配置替换发生在包展开之前：
+
+```rust
+let pack = EliteForgeOfficialPluginPack::new("agent.sqlite")
+    .storage(SqliteStoragePlugin::new("other.sqlite"));
+```
+
+这里最终只安装一个存储插件。多个独立 Agent 可以分别使用自己的存储配置。
+
+## 依赖与生命周期
+
+### 解析另一个插件的服务
+
+需要另一个插件先安装时，在 `dependencies()` 返回它的**插件 ID**。
+例如，一个依赖订单目录的插件声明：
+
+```rust
+fn dependencies(&self) -> Vec<String> {
+    vec!["shop.orders".into()]
+}
+```
+
+然后在自己的 `install` 中解析所需服务：
+
+```rust
+let catalog = context.services()
+    .get::<shop_plugin::orders::OrderCatalogService>()
+    .ok_or_else(|| PluginError::message("缺少订单目录服务"))?;
+```
+
+`dependencies` 控制安装顺序；`get<T>`/`all<T>` 按服务类型解析，两者不能互相代替。
+解析后把引用传给你创建的业务实现。运行期间应用仍调用 Agent，不从容器取出内部服务自行调度。
+
+如果你希望支持多种供应商插件，不要把依赖 ID 写死为某个厂商；将依赖 ID 做成插件配置，
+并始终对所需服务类型进行检查。缺失依赖或依赖环会在任何插件安装前失败。
+
+### 资源在哪创建、在哪关闭
+
+| 时机 | 该做什么 |
+|---|---|
+| `new`、各配置方法 | 保存配置，校验同步参数 |
+| `PluginPack::into_plugins` | 组合插件配置 |
+| `Plugin::install` | 创建连接或后台任务，立即注册清理回调，再注册服务 |
+| 扩展点回调 | 执行业务，遵守传入的取消信号和限额 |
+| `agent.close().await` | 停止接收新操作，取消并等待在途操作，调用插件关闭回调 |
+| 安装失败、取消或 Drop | 回滚已持有的资源，执行适用的清理回调 |
+
+拿到资源后，先注册清理，再继续可能失败或被取消的异步操作。
+`on_shutdown` 用于异步关闭；`on_cleanup` 用于 Drop/取消时的同步兜底。
+需要同时提供二者的资源，应让清理可重复调用，例如“先发取消信号，再等待后台任务退出”。
+回调按注册的逆序处理。若关闭被超时打断，同步兜底仍要能释放或停止资源。
+
+插件内部任务用插件生命周期管理；一次运行内的工具连接或临时会话分别使用 `ToolLease`、
+`ConversationSession` 等对应作用域。`RunLifecycleHook::on_finished` 是通知，不是必达的资源释放点。
+真实连接和清理注册可参考[MCP 插件](../crates/eliteforge-agent-official-plugin-tools-mcp/src/lib.rs)
+与[SQLite 插件](../crates/eliteforge-agent-official-plugin-storage-sqlite/src/lib.rs)。
+
+## 常见问题
+
+| 现象 | 原因与处理 |
+|---|---|
+| 只引入依赖，能力没有生效 | 还没有调用 `.plugin(...)` 或 `.plugin_pack(...)` 注册 |
+| 实现了接口，框架仍没调用 | 核对是否注册到该扩展点要求的 `...Service`，以及调用场景是否会触发它 |
+| 加上第二个存储插件就构建失败 | 重复插件 ID 或唯一存储角色冲突；修改现有配置，或重新组合存储插件 |
+| 明明有插件，`get<T>()` 仍返回空 | 具体注册类型不匹配，或该类型使用了 `contribute`，应在插件内部用 `all<T>()` |
+| 自定义上下文来源构建失败 | `ContextContributor` 还需要完整的 `ContextLayout`，包括每个来源的 ID 和配额 |
+| 想在 Hook 里拒绝运行 | 使用 `RunMiddleware`；拒绝工具或要求审批使用 `ToolPolicy` |
+| 想给 Agent 加一个自定义查询方法 | 定义 `AgentOperation` 请求，通过 `agent.execute(request)` 调用 |
+| 插件 install 失败后资源泄漏 | 资源取得后没有立即注册清理；补上异步关闭和必要的同步兜底 |
+
+更完整的接口、注册类型、调用时机和数量约束见[扩展点参考](plugin-extension-reference.md)。

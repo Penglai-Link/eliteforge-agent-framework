@@ -25,11 +25,12 @@ async fn collect(mut stream: AgUiStream) -> Vec<Event> {
     events
 }
 async fn complete(
+    agent: Agent,
     handle: RunHandle,
     stream: AgUiStream,
 ) -> (Result<RunResult, AgentError>, Vec<Event>) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        tokio::join!(handle.wait(), collect(stream))
+        tokio::join!(agent.wait(handle), collect(stream))
     })
     .await
     .unwrap()
@@ -95,11 +96,17 @@ async fn streaming_suffix_reasoning_sse_and_multiple_runs_remain_isolated() {
         .build()
         .await
         .unwrap();
-    let (a, a_stream) = plugin.start(&agent, RunRequest::new("a", "task")).unwrap();
-    let (b, b_stream) = plugin.start(&agent, RunRequest::new("b", "task")).unwrap();
+    let (a, a_stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("a", "task"))
+        .unwrap();
+    let (b, b_stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("b", "task"))
+        .unwrap();
     let a_id = a.run_id;
-    let ((a_result, a_events), (b_result, b_events)) =
-        tokio::join!(complete(a, a_stream), complete(b, b_stream));
+    let ((a_result, a_events), (b_result, b_events)) = tokio::join!(
+        complete(agent.clone(), a, a_stream),
+        complete(agent.clone(), b, b_stream)
+    );
     assert_eq!(a_result.unwrap().output, "你好\n世界");
     assert_eq!(b_result.unwrap().output, "你好\n世界");
     for events in [&a_events, &b_events] {
@@ -204,10 +211,10 @@ async fn offloaded_tool_results_preserve_reference_and_tool_lifecycle() {
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("tools", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("tools", "task"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert_eq!(result.unwrap().tool_calls, 1);
     assert_eq!(count.load(Ordering::SeqCst), 1);
     validate_client(&events).await;
@@ -274,10 +281,10 @@ async fn parallel_dag_nodes_with_identical_provider_call_ids_have_distinct_messa
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("dag", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("dag", "task"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert_eq!(result.unwrap().status, RunStatus::Completed);
     validate_client(&events).await;
     let mut ids = BTreeSet::new();
@@ -347,11 +354,11 @@ async fn approval_round_trip(approved: bool, legacy: bool) {
     let plugin = AgUiPlugin::default();
     let count = Arc::new(AtomicUsize::new(0));
     let agent = approval_agent(&plugin, &store, &count).await;
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("approval", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("approval", "task"))
         .unwrap();
     let id = handle.run_id;
-    let (result, first_events) = complete(handle, stream).await;
+    let (result, first_events) = complete(agent.clone(), handle, stream).await;
     let result = result.unwrap();
     assert_eq!(result.status, RunStatus::AwaitingInput);
     assert_eq!(count.load(Ordering::SeqCst), 0);
@@ -416,8 +423,8 @@ async fn approval_round_trip(approved: bool, legacy: bool) {
         }),
         resolutions: vec![],
     });
-    let (handle, stream) = plugin.start(&agent, request).unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert_eq!(result.unwrap().status, RunStatus::Completed);
     assert_eq!(count.load(Ordering::SeqCst), usize::from(approved));
     validate_client(&events).await;
@@ -555,10 +562,10 @@ async fn state_activity_custom_and_final_only_loop_outputs_work_with_the_sdk_cli
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("video", "render"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("video", "render"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert!(result.is_ok());
     validate_client(&events).await;
     assert_eq!(text(&events), "render complete");
@@ -578,10 +585,10 @@ async fn malformed_patch_fails_the_stream_without_changing_execution() {
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("state", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("state", "task"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert!(result.is_ok());
     assert_eq!(code(&events), Some("AGUI_INVALID_PATCH"));
     assert_eq!(types(&events, EventType::RunFinished), 0);
@@ -601,10 +608,13 @@ async fn overflow_reports_incomplete_output_and_never_fabricates_run_success() {
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("overflow", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("overflow", "task"))
         .unwrap();
-    assert_eq!(handle.wait().await.unwrap().status, RunStatus::Completed);
+    assert_eq!(
+        agent.wait(handle).await.unwrap().status,
+        RunStatus::Completed
+    );
     let events = collect(stream).await;
     assert_eq!(types(&events, EventType::RunStarted), 1);
     assert_eq!(code(&events), Some("AGUI_STREAM_OVERFLOW"));
@@ -634,10 +644,10 @@ async fn rejected_final_text_still_closes_previously_visible_messages() {
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("mismatch", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("mismatch", "task"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert!(result.is_ok());
     assert_eq!(text(&events), "visible text");
     assert_eq!(types(&events, EventType::TextMessageStart), 1);
@@ -674,15 +684,15 @@ async fn cloned_control_cancellation_closes_the_stream_once() {
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("cancel", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("cancel", "task"))
         .unwrap();
-    let control = handle.control();
-    let completion = tokio::spawn(complete(handle, stream));
+    let control = agent.control(&handle).unwrap();
+    let completion = tokio::spawn(complete(agent.clone(), handle, stream));
     tokio::time::timeout(Duration::from_secs(5), entered.notified())
         .await
         .unwrap();
-    control.cancel();
+    agent.cancel(&control).unwrap();
     let (result, events) = completion.await.unwrap();
     assert!(matches!(result, Err(AgentError::Cancelled)));
     assert_eq!(text(&events), "partial");
@@ -694,15 +704,14 @@ async fn cloned_control_cancellation_closes_the_stream_once() {
 
 #[tokio::test]
 async fn missing_plugin_is_rejected_before_an_unobserved_run_can_continue() {
-    let plugin = AgUiPlugin::default();
     let agent = TestBuilder::default()
         .plugin(ChatModelPlugin::new(Streaming))
         .build()
         .await
         .unwrap();
     assert!(matches!(
-        plugin.start(&agent, RunRequest::new("missing", "task")),
-        Err(AgentError::InvalidConfiguration(_))
+        agent.start_with_output::<AgUiStream>(RunRequest::new("missing", "task")),
+        Err(AgentError::MissingService(_))
     ));
     agent.close().await;
 }
@@ -718,23 +727,22 @@ impl EventSink for StartProbe {
     async fn on_event(&self, _: &RunContext, _: &AgentEvent) {}
 }
 #[tokio::test]
-async fn a_different_plugin_instance_is_rejected_before_run_admission() {
-    let installed = AgUiPlugin::default();
-    let other = AgUiPlugin::default();
+async fn configured_plugin_is_prepared_by_agent_without_retaining_its_instance() {
     let started = Arc::new(AtomicUsize::new(0));
     let agent = TestBuilder::default()
-        .plugin(installed)
+        .plugin(AgUiPlugin::default())
         .plugin(EventPlugin::new("probe", StartProbe(started.clone())))
         .plugin(ChatModelPlugin::new(Streaming))
         .build()
         .await
         .unwrap();
-    assert!(
-        other
-            .start(&agent, RunRequest::new("wrong", "task"))
-            .is_err()
-    );
-    assert_eq!(started.load(Ordering::SeqCst), 0);
+    let mut handle = agent.start(RunRequest::new("configured", "task")).unwrap();
+    let stream = agent.output::<AgUiStream>(&mut handle).unwrap();
+    assert!(agent.output::<AgUiStream>(&mut handle).is_err());
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert!(result.is_ok());
+    validate_client(&events).await;
+    assert_eq!(started.load(Ordering::SeqCst), 1);
     agent.close().await;
 }
 
@@ -755,15 +763,17 @@ async fn escaped_session_id_is_checked_before_admission_and_valid_ids_keep_run_s
         .unwrap();
     for id in ["\u{0001}".repeat(200), "\"".repeat(240), "\\".repeat(240)] {
         assert!(matches!(
-            plugin.start(&agent, RunRequest::new(id, "task")),
+            agent.start_with_output::<AgUiStream>(RunRequest::new(id, "task")),
             Err(AgentError::InvalidConfiguration(_))
         ));
     }
     assert_eq!(started.load(Ordering::SeqCst), 0);
     // Escaping itself is allowed when both the source and protocol frame fit.
     for id in ["normal", "会话\\\"-\u{0001}"] {
-        let (handle, stream) = plugin.start(&agent, RunRequest::new(id, "task")).unwrap();
-        let (result, events) = complete(handle, stream).await;
+        let (handle, stream) = agent
+            .start_with_output::<AgUiStream>(RunRequest::new(id, "task"))
+            .unwrap();
+        let (result, events) = complete(agent.clone(), handle, stream).await;
         assert!(result.is_ok());
         assert_eq!(code(&events), None);
         validate_client(&events).await;
@@ -795,8 +805,8 @@ fn dropping_the_executor_runtime_without_terminal_publication_ends_the_stream() 
             .build()
             .await
             .unwrap();
-        let (handle, stream) = plugin
-            .start(&agent, RunRequest::new("aborted", "task"))
+        let (handle, stream) = agent
+            .start_with_output::<AgUiStream>(RunRequest::new("aborted", "task"))
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), entered.notified())
             .await
@@ -806,7 +816,7 @@ fn dropping_the_executor_runtime_without_terminal_publication_ends_the_stream() 
     drop(runtime);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     runtime.block_on(async {
-        let (result, events) = complete(handle, stream).await;
+        let (result, events) = complete(agent.clone(), handle, stream).await;
         assert!(result.is_err());
         assert_eq!(code(&events), Some("AGUI_STREAM_INTERRUPTED"));
         assert_eq!(types(&events, EventType::TextMessageStart), 1);
@@ -842,10 +852,10 @@ async fn a_model_retry_without_visible_output_does_not_create_phantom_messages()
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("retry", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("retry", "task"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert!(result.is_ok());
     validate_client(&events).await;
     assert_eq!(types(&events, EventType::TextMessageStart), 1);
@@ -886,10 +896,10 @@ async fn oversized_payloads_fail_explicitly_after_closing_visible_text() {
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("large", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("large", "task"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert!(result.is_ok());
     assert_eq!(text(&events), "visible");
     assert_eq!(types(&events, EventType::TextMessageEnd), 1);
@@ -923,10 +933,10 @@ async fn run_error_details_are_hidden_unless_explicitly_enabled() {
             .build()
             .await
             .unwrap();
-        let (handle, stream) = plugin
-            .start(&agent, RunRequest::new("error", "task"))
+        let (handle, stream) = agent
+            .start_with_output::<AgUiStream>(RunRequest::new("error", "task"))
             .unwrap();
-        let (result, events) = complete(handle, stream).await;
+        let (result, events) = complete(agent.clone(), handle, stream).await;
         assert!(result.is_err());
         assert_eq!(code(&events), Some("AGENT_RUN_FAILED"));
         assert_eq!(
@@ -978,8 +988,8 @@ async fn slow_observers_cannot_drop_agui_messages_or_the_terminal_event() {
     let mut request = RunRequest::new("slow", "task");
     // Allow SQLite fsync/release under concurrent tests; the sink still outlives this budget.
     request.limits.cleanup_timeout = Duration::from_millis(100);
-    let (handle, stream) = plugin.start(&agent, request).unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert!(result.is_ok());
     validate_client(&events).await;
     assert_eq!(types(&events, EventType::TextMessageContent), 400);
@@ -1038,10 +1048,10 @@ async fn auxiliary_model_text_and_reasoning_never_enter_the_ui_stream() {
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("summary", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("summary", "task"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert!(result.is_ok());
     validate_client(&events).await;
     assert_eq!(text(&events), "public answer");
@@ -1143,10 +1153,10 @@ async fn parallel_calls_in_custom_loop_preserve_distinct_invocations() {
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("parallel", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("parallel", "task"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     assert_eq!(result.unwrap().status, RunStatus::Completed);
     assert_eq!(
         code(&events),
@@ -1213,10 +1223,10 @@ async fn final_only_output_after_progress_is_visible() {
         .build()
         .await
         .unwrap();
-    let (handle, stream) = plugin
-        .start(&agent, RunRequest::new("video-final", "task"))
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("video-final", "task"))
         .unwrap();
-    let (result, events) = complete(handle, stream).await;
+    let (result, events) = complete(agent.clone(), handle, stream).await;
     let result = result.unwrap();
     assert_eq!(code(&events), None);
     assert!(

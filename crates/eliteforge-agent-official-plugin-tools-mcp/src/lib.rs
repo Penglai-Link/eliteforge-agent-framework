@@ -1,6 +1,6 @@
 //! MCP tools backed by the official Rust SDK.
 //!
-//! Connections can be owned by a plugin, or explicitly shared by the host.
+//! Plugins configure connections owned and closed by the Agent.
 //! Remote tool failures remain typed results. Lost responses are indeterminate:
 //! this adapter never retries an operation which may have produced side effects.
 use async_trait::async_trait;
@@ -588,51 +588,100 @@ fn convert_result(result: rmcp::model::CallToolResult) -> Result<ToolOutput, Too
     })
 }
 
-enum Ownership {
-    Shared(McpClient),
-    Owned(Box<McpConfig>),
-}
+/// Configures an Agent-owned MCP connection. Connect and close happen during
+/// Agent build and shutdown; applications do not retain a separate client.
 pub struct McpToolsPlugin {
     id: String,
-    ownership: Ownership,
+    config: Option<McpConfig>,
+}
+impl Default for McpToolsPlugin {
+    /// Register an empty MCP tool source without opening a connection.
+    fn default() -> Self {
+        Self {
+            id: "tools.mcp".into(),
+            config: None,
+        }
+    }
 }
 impl McpToolsPlugin {
-    /// Host retains ownership and must explicitly close the shared client.
-    pub fn shared(id: impl Into<String>, client: McpClient) -> Self {
+    pub fn new(id: impl Into<String>, config: McpConfig) -> Self {
         Self {
             id: id.into(),
-            ownership: Ownership::Shared(client),
-        }
-    }
-    /// Each installation creates its own connection and owns its shutdown.
-    pub fn owned(id: impl Into<String>, config: McpConfig) -> Self {
-        Self {
-            id: id.into(),
-            ownership: Ownership::Owned(Box::new(config)),
+            config: Some(config),
         }
     }
 }
+
+pub struct McpClientService {
+    id: String,
+    client: Option<McpClient>,
+}
+
+/// Inspect a configured MCP server through `agent.execute(DiscoverMcpTools { ... })`.
+/// Tool execution itself goes through the Agent loop and its tool policies.
+pub struct DiscoverMcpTools {
+    pub plugin_id: String,
+}
+#[async_trait]
+impl eliteforge_agent_core::AgentOperation for DiscoverMcpTools {
+    type Service = McpClientService;
+    type Output = Vec<ToolDescriptor>;
+    fn select(&self, services: Vec<Arc<Self::Service>>) -> Result<Arc<Self::Service>, AgentError> {
+        services
+            .into_iter()
+            .find(|s| s.id == self.plugin_id)
+            .ok_or_else(|| {
+                AgentError::InvalidConfiguration(format!(
+                    "MCP plugin not installed: {}",
+                    self.plugin_id
+                ))
+            })
+    }
+    async fn execute(
+        self,
+        service: Arc<Self::Service>,
+        cancellation: CancellationToken,
+    ) -> Result<Self::Output, AgentError> {
+        let Some(client) = &service.client else {
+            return Ok(Vec::new());
+        };
+        Ok(client
+            .discover(&cancellation)
+            .await
+            .map_err(|e| AgentError::Run(e.to_string()))?
+            .into_iter()
+            .map(|tool| tool.descriptor)
+            .collect())
+    }
+}
+
 #[async_trait]
 impl Plugin for McpToolsPlugin {
     fn id(&self) -> &str {
         &self.id
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        let client = match &self.ownership {
-            Ownership::Shared(client) => client.clone(),
-            Ownership::Owned(config) => {
-                let client = McpClient::connect(config.as_ref().clone())
-                    .await
-                    .map_err(|e| PluginError::message(e.to_string()))?;
-                let cancel = client.clone();
-                context.on_cleanup(move || cancel.cancel());
-                let shutdown = client.clone();
-                context.on_shutdown(move || async move {
-                    shutdown.close().await.map_err(|e| e.to_string())
-                });
-                client
-            }
+        let Some(config) = &self.config else {
+            context.contribute(McpClientService {
+                id: self.id.clone(),
+                client: None,
+            })?;
+            return context.contribute(ToolProviderService(Arc::new(
+                eliteforge_agent_core::StaticToolProvider::default(),
+            )));
         };
+        let client = McpClient::connect(config.clone())
+            .await
+            .map_err(|e| PluginError::message(e.to_string()))?;
+        let cancel = client.clone();
+        context.on_cleanup(move || cancel.cancel());
+        let shutdown = client.clone();
+        context
+            .on_shutdown(move || async move { shutdown.close().await.map_err(|e| e.to_string()) });
+        context.contribute(McpClientService {
+            id: self.id.clone(),
+            client: Some(client.clone()),
+        })?;
         context.contribute(ToolProviderService(Arc::new(client)))
     }
 }

@@ -1,9 +1,7 @@
 use async_trait::async_trait;
-use eliteforge_agent_context::*;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_storage_sqlite::*;
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
 
 struct Noop;
 #[async_trait]
@@ -27,23 +25,16 @@ async fn sqlite_bundle_reopens_conversations_memory_summaries_and_binary_artifac
             .plugin(AgentLoopPlugin::new(Noop))
     };
     let agent = build().build().await.unwrap();
-    let conversations = agent
-        .service::<ConversationStoreService>()
-        .unwrap()
-        .0
-        .clone();
-    let mut session = conversations.open("chat").await.unwrap();
-    session.append(&[Message::user("retained")]).await.unwrap();
-    let snapshot = session.snapshot().await.unwrap();
-    session
-        .finish(ConversationOutcome::Completed)
+    let conversation = ConversationKey::new("chat");
+    agent
+        .append_conversation(&conversation, 0, vec![Message::user("retained")])
         .await
         .unwrap();
-    let memory = agent.service::<LongTermMemoryService>().unwrap().0.clone();
-    let entry = memory
-        .save(
+    let snapshot = agent.conversation(&conversation).await.unwrap();
+    let entry = agent
+        .save_memory(
             "user-a",
-            &MemoryWrite {
+            MemoryWrite {
                 id: "preference".into(),
                 content: "portrait".into(),
                 source: MemorySource {
@@ -56,7 +47,6 @@ async fn sqlite_bundle_reopens_conversations_memory_summaries_and_binary_artifac
         )
         .await
         .unwrap();
-    let summaries = agent.service::<SummaryStoreService>().unwrap().0.clone();
     let key = SummaryKey {
         conversation: snapshot.key,
         generation: snapshot.generation,
@@ -72,87 +62,121 @@ async fn sqlite_bundle_reopens_conversations_memory_summaries_and_binary_artifac
         summary: "retained summary".into(),
     };
     assert!(
-        summaries
-            .compare_exchange(&key, None, &summary)
+        agent
+            .execute(SaveSummary {
+                key: key.clone(),
+                expected: None,
+                value: summary.clone()
+            })
             .await
             .unwrap()
     );
-    let artifacts = agent.service::<ArtifactStoreService>().unwrap().0.clone();
     let bytes = vec![0, 1, 255, 0, 42];
-    let artifact = artifacts
-        .put(bytes.clone(), CancellationToken::new())
-        .await
-        .unwrap();
+    let artifact = agent.execute(PutArtifact(bytes.clone())).await.unwrap();
     assert!(agent.close().await.is_success());
-    assert!(conversations.open("chat").await.is_err());
+    assert!(matches!(
+        agent.conversation(&conversation).await,
+        Err(AgentError::Closed)
+    ));
+    assert!(matches!(
+        agent.execute(PutArtifact(vec![1])).await,
+        Err(AgentError::Closed)
+    ));
     let agent = build().build().await.unwrap();
-    let mut session = agent
-        .service::<ConversationStoreService>()
-        .unwrap()
-        .0
-        .open("chat")
-        .await
-        .unwrap();
     assert_eq!(
-        session.snapshot().await.unwrap().messages[0].content.text(),
+        agent.conversation(&conversation).await.unwrap().messages[0]
+            .content
+            .text(),
         "retained"
     );
-    session
-        .finish(ConversationOutcome::Completed)
-        .await
-        .unwrap();
+    assert_eq!(agent.memory("user-a", "preference").await.unwrap(), entry);
     assert_eq!(
         agent
-            .service::<LongTermMemoryService>()
-            .unwrap()
-            .0
-            .get("user-a", "preference")
+            .search_memory("user-a", MemoryQuery::new("portrait"))
             .await
             .unwrap(),
-        entry
+        vec![entry.clone()]
     );
     assert_eq!(
         agent
-            .service::<SummaryStoreService>()
-            .unwrap()
-            .0
-            .load(&key)
+            .execute(LoadSummary(key.clone()))
             .await
             .unwrap()
             .unwrap()
             .value,
         summary
     );
-    let artifacts = agent.service::<ArtifactStoreService>().unwrap().0.clone();
     assert_eq!(
-        artifacts
-            .read(&artifact.id, 1, 3, CancellationToken::new())
+        agent
+            .execute(ReadArtifact {
+                id: artifact.id.clone(),
+                offset: 1,
+                length: 3
+            })
             .await
             .unwrap()
             .bytes,
         bytes[1..4]
     );
+    assert!(
+        agent
+            .execute(ReadArtifact {
+                id: artifact.id.clone(),
+                offset: 6,
+                length: 1
+            })
+            .await
+            .is_err()
+    );
+    agent
+        .execute(RemoveArtifact(artifact.id.clone()))
+        .await
+        .unwrap();
+    assert!(
+        agent
+            .execute(ReadArtifact {
+                id: artifact.id,
+                offset: 0,
+                length: 1
+            })
+            .await
+            .is_err()
+    );
+    let stored = agent
+        .execute(LoadSummary(key.clone()))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !agent
+            .execute(DeleteSummary {
+                key: key.clone(),
+                expected: "stale".into()
+            })
+            .await
+            .unwrap()
+    );
+    assert!(
+        agent
+            .execute(DeleteSummary {
+                key: key.clone(),
+                expected: stored.version
+            })
+            .await
+            .unwrap()
+    );
+    assert!(agent.execute(LoadSummary(key)).await.unwrap().is_none());
     assert!(matches!(
-        artifacts
-            .read(&artifact.id, 6, 1, CancellationToken::new())
-            .await,
-        Err(ArtifactError::InvalidRange)
+        agent.delete_memory("user-a", "preference", "stale").await,
+        Err(AgentError::LongTermMemory(MemoryError::Conflict))
     ));
-    let cancelled = CancellationToken::new();
-    cancelled.cancel();
-    assert!(matches!(
-        artifacts.put(vec![1], cancelled).await,
-        Err(ArtifactError::Cancelled)
-    ));
-    artifacts
-        .remove(&artifact.id, CancellationToken::new())
+    agent
+        .delete_memory("user-a", "preference", &entry.version)
         .await
         .unwrap();
     assert!(matches!(
-        artifacts
-            .read(&artifact.id, 0, 1, CancellationToken::new())
-            .await,
-        Err(ArtifactError::NotFound)
+        agent.memory("user-a", "preference").await,
+        Err(AgentError::LongTermMemory(MemoryError::NotFound))
     ));
     assert!(agent.close().await.is_success());
 }
@@ -243,9 +267,9 @@ async fn sqlite_plugin_prepares_extensions_on_every_physical_connection() {
         .build()
         .await
         .unwrap();
-    let capabilities = agent.service::<SqliteCapabilitiesService>().unwrap();
-    assert_eq!(capabilities.0.len(), 5);
-    for (_, report) in &capabilities.0 {
+    let capabilities = agent.execute(ReadSqliteCapabilities).await.unwrap();
+    assert_eq!(capabilities.len(), 5);
+    for (_, report) in &capabilities {
         assert!(report.fts5);
         assert_eq!(report.simple, ExtensionStatus::Available);
         assert_eq!(report.vector, ExtensionStatus::Available);

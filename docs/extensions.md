@@ -2,7 +2,7 @@
 
 Plugin 是安装入口。Middleware 负责拦截执行，Hook 负责接收生命周期通知。
 三个概念分别对应装配、执行控制和生命周期，注册类型与调用入口独立。
-全部能力契约与现成实现见[扩展点清单](plugins.md)，分层与默认装配见[架构总览](architecture.md)。
+第一次开发插件先看[插件开发指南](plugins.md)；全部能力契约与注册方式见[扩展点参考](plugin-extension-reference.md)，分层与默认装配见[架构总览](architecture.md)。
 
 ```text
 Plugin.install

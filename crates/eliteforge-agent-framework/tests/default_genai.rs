@@ -71,7 +71,7 @@ async fn default_genai_environment_child() {
         "configured" => {
             let agent = result.unwrap();
             assert_eq!(
-                agent.models().models(ModelOperation::Chat),
+                agent.models(ModelOperation::Chat),
                 vec![ModelRef::new("default", "configured-model")]
             );
             agent.close().await;

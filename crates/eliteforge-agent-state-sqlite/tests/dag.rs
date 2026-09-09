@@ -179,7 +179,7 @@ async fn parallel_nodes_overlap_join_json_and_replay_after_reopening_database() 
     let a = agent(db.clone(), graph.clone(), implementation.clone()).await;
     let h = a.start(RunRequest::new("parallel", "input")).unwrap();
     let id = h.run_id;
-    let result = tokio::time::timeout(Duration::from_secs(3), h.wait())
+    let result = tokio::time::timeout(Duration::from_secs(3), a.wait(h))
         .await
         .unwrap()
         .unwrap();
@@ -236,7 +236,7 @@ async fn selected_branch_skips_transitively_and_join_does_not_wait_for_pruned_in
         let a = agent(db.clone(), graph, implementation.clone()).await;
         let h = a.start(RunRequest::new("branch", "input")).unwrap();
         let id = h.run_id;
-        tokio::time::timeout(Duration::from_secs(3), h.wait())
+        tokio::time::timeout(Duration::from_secs(3), a.wait(h))
             .await
             .unwrap()
             .unwrap();
@@ -281,8 +281,8 @@ async fn cancellation_drops_owned_tasks_and_requires_explicit_reconciliation() {
     let h = a.start(RunRequest::new("cancel", "input")).unwrap();
     let id = h.run_id;
     implementation.entered.notified().await;
-    h.cancel();
-    assert!(matches!(h.wait().await, Err(AgentError::Cancelled)));
+    a.cancel(&h).unwrap();
+    assert!(matches!(a.wait(h).await, Err(AgentError::Cancelled)));
     assert_eq!(implementation.dropped.load(Ordering::SeqCst), 1);
     assert_eq!(
         db.load(id).await.unwrap().status,
@@ -324,7 +324,7 @@ async fn failing_node_cancels_pending_sibling_and_does_not_start_downstream() {
     let a = agent(db.clone(), graph, implementation.clone()).await;
     let h = a.start(RunRequest::new("fail", "input")).unwrap();
     let id = h.run_id;
-    let error = tokio::time::timeout(Duration::from_secs(3), h.wait())
+    let error = tokio::time::timeout(Duration::from_secs(3), a.wait(h))
         .await
         .unwrap()
         .unwrap_err();
@@ -423,7 +423,7 @@ async fn persistence_errors_stop_dispatch_and_uncertain_result_is_not_overwritte
         let h = a.start(RunRequest::new("fault", "input")).unwrap();
         let id = h.run_id;
         assert!(matches!(
-            h.wait().await,
+            a.wait(h).await,
             Err(AgentError::State(StateError::Backend(_)))
         ));
         assert_eq!(
@@ -547,7 +547,7 @@ async fn parallel_react_nodes_share_budget_without_losing_nested_checkpoints() {
         .unwrap();
     let h = a.start(RunRequest::new("react", "input")).unwrap();
     let id = h.run_id;
-    let result = tokio::time::timeout(Duration::from_secs(3), h.wait())
+    let result = tokio::time::timeout(Duration::from_secs(3), a.wait(h))
         .await
         .unwrap()
         .unwrap();
@@ -656,7 +656,7 @@ async fn embedded_react_approval_resumes_only_after_matching_answer() {
     .await;
     let h = a.start(RunRequest::new("approval", "input")).unwrap();
     let id = h.run_id;
-    let waiting = h.wait().await.unwrap();
+    let waiting = a.wait(h).await.unwrap();
     assert_eq!(waiting.status, RunStatus::AwaitingInput);
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     let mut r = resume("approval", id);
@@ -689,8 +689,8 @@ async fn interrupted_embedded_tool_is_not_repeated_and_accepts_tool_reconciliati
     let h = a.start(RunRequest::new("unknown", "input")).unwrap();
     let id = h.run_id;
     entered.notified().await;
-    h.cancel();
-    assert!(h.wait().await.is_err());
+    a.cancel(&h).unwrap();
+    assert!(a.wait(h).await.is_err());
     assert_eq!(
         a.run(resume("unknown", id)).await.unwrap().status,
         RunStatus::RecoveryRequired
@@ -778,7 +778,7 @@ async fn concurrency_limit_and_repeated_lease_renewals_preserve_fencing() {
         .unwrap();
     let h = a.start(RunRequest::new("limit", "input")).unwrap();
     let id = h.run_id;
-    assert_eq!(h.wait().await.unwrap().status, RunStatus::Completed);
+    assert_eq!(a.wait(h).await.unwrap().status, RunStatus::Completed);
     assert_eq!(peak.load(Ordering::SeqCst), 2);
     assert_eq!(active.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -822,7 +822,7 @@ async fn explicit_retry_changes_invocation_and_rejects_stale_identity() {
         .unwrap();
     let h = a.start(RunRequest::new("retry", "input")).unwrap();
     let id = h.run_id;
-    assert!(h.wait().await.is_err());
+    assert!(a.wait(h).await.is_err());
     let old = state(db.as_ref(), id).await.nodes["flaky"].invocation_id;
     let mut bad = resume("retry", id);
     bad.resume
@@ -889,7 +889,7 @@ async fn parallel_approvals_can_be_answered_individually_without_replaying_sibli
         .unwrap();
     let h = a.start(RunRequest::new("approvals", "input")).unwrap();
     let id = h.run_id;
-    let waiting = h.wait().await.unwrap();
+    let waiting = a.wait(h).await.unwrap();
     assert_eq!(waiting.interactions.len(), 2);
     let mut first = resume("approvals", id);
     first.resume.as_mut().unwrap().response = Some(InteractionResponse {
@@ -989,9 +989,12 @@ async fn tool_parallel_safety_and_run_wide_slot_limit_apply_across_dag_nodes() {
         let mut request = RunRequest::new("tools", "input");
         request.limits.max_parallel_tools = slots;
         let h = a.start(request).unwrap();
-        assert!(h.steer("unaddressed instruction").is_err());
-        assert!(h.control().steer("also unaddressed").is_err());
-        assert_eq!(h.wait().await.unwrap().status, RunStatus::Completed);
+        assert!(a.steer(&h, "unaddressed instruction").is_err());
+        assert!(
+            a.steer(&a.control(&h).unwrap(), "also unaddressed")
+                .is_err()
+        );
+        assert_eq!(a.wait(h).await.unwrap().status, RunStatus::Completed);
         assert_eq!(peak.load(Ordering::SeqCst), expected_peak);
         assert_eq!(active.load(Ordering::SeqCst), 0);
         a.close().await;
@@ -1039,7 +1042,7 @@ async fn react_step_and_tool_admission_limits_are_shared_across_nodes() {
         request.limits.max_tool_calls = tools;
         let h = a.start(request).unwrap();
         let id = h.run_id;
-        assert_eq!(h.wait().await.unwrap().status, expected);
+        assert_eq!(a.wait(h).await.unwrap().status, expected);
         let s = state(db.as_ref(), id).await;
         assert!(s.model_steps <= steps);
         assert!(s.tool_calls <= tools);

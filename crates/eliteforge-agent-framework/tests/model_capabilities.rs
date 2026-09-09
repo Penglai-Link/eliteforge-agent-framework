@@ -94,7 +94,7 @@ async fn multiple_embeddings_select_by_request_then_stage_then_default_and_pin_s
         .build()
         .await
         .unwrap();
-    let models = agent.models();
+    let models = agent.clone();
     assert_eq!(models.models(ModelOperation::Embedding).len(), 2);
     assert_eq!(
         models.models(ModelOperation::Chat),
@@ -187,7 +187,6 @@ async fn duplicate_bindings_and_invalid_defaults_fail_at_build_ambiguity_at_call
         .unwrap();
     assert!(
         agent
-            .models()
             .embed(EmbeddingRequest::texts(["hi"]))
             .await
             .unwrap_err()
@@ -280,8 +279,7 @@ async fn operation_timeout_cancellation_and_agent_close_drop_inflight_calls() {
     };
     assert!(
         agent
-            .models()
-            .with_options(options)
+            .with_model_options(options)
             .embed(EmbeddingRequest::texts(["timeout"]))
             .await
             .is_err()
@@ -289,7 +287,7 @@ async fn operation_timeout_cancellation_and_agent_close_drop_inflight_calls() {
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
     entered.notified().await;
     let cancellation = CancellationToken::new();
-    let client = agent.models().with_options(ModelInvocationOptions {
+    let client = agent.with_model_options(ModelInvocationOptions {
         cancellation: cancellation.clone(),
         ..Default::default()
     });
@@ -297,7 +295,7 @@ async fn operation_timeout_cancellation_and_agent_close_drop_inflight_calls() {
     entered.notified().await;
     cancellation.cancel();
     assert!(matches!(task.await.unwrap(), Err(AgentError::Cancelled)));
-    let client = agent.models();
+    let client = agent.clone();
     let task = tokio::spawn(async move { client.embed(EmbeddingRequest::texts(["close"])).await });
     entered.notified().await;
     assert!(agent.close().await.is_success());
@@ -475,7 +473,7 @@ async fn dedicated_operations_dispatch_and_video_job_survives_serialization() {
         .build()
         .await
         .unwrap();
-    let models = agent.models();
+    let models = agent.clone();
     assert_eq!(
         models
             .rerank(RerankRequest {
@@ -558,20 +556,23 @@ async fn dedicated_operations_dispatch_and_video_job_survives_serialization() {
         })
         .await
         .unwrap();
-    session.send(RealtimeInput::Commit).await.unwrap();
+    agent
+        .send_realtime(&session, RealtimeInput::Commit)
+        .await
+        .unwrap();
     assert!(matches!(
-        session.next().await.unwrap(),
+        agent.next_realtime(&session).await.unwrap(),
         Some(RealtimeEvent::Transcript(_))
     ));
     assert!(
-        session
-            .send(RealtimeInput::Content("unsupported text".into()))
+        agent
+            .send_realtime(&session, RealtimeInput::Content("unsupported text".into()))
             .await
             .is_err()
     );
     agent.close().await;
-    assert!(session.next().await.is_err());
-    session.close().await.unwrap();
+    assert!(agent.next_realtime(&session).await.is_err());
+    agent.close_realtime(&session).await.unwrap();
 }
 
 #[test]

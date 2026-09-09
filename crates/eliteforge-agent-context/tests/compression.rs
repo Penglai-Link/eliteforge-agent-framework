@@ -134,8 +134,8 @@ async fn react_compression_uses_shared_invoker_without_rewriting_source_or_strea
         .await
         .unwrap();
     let mut handle = agent.start(request()).unwrap();
-    let mut events = handle.take_events();
-    let result = handle.wait().await.unwrap();
+    let mut events = agent.events(&mut handle).unwrap();
+    let result = agent.wait(handle).await.unwrap();
     assert_eq!(result.output, "answer");
     {
         let calls = provider.requests.lock().unwrap();

@@ -1,7 +1,8 @@
 //! OpenTelemetry observation with explicit provider ownership and bounded state.
 //!
-//! The host supplies providers and owns their exporter configuration, flushing,
-//! and shutdown. This crate never changes the global provider. Prompts, tool
+//! The default plugin reads the host's global providers during installation;
+//! `new` accepts explicit providers. The host owns exporter configuration,
+//! flushing and shutdown. This crate never changes the global provider. Prompts, tool
 //! arguments/results, model responses, sessions, credentials, and extensions
 //! are not collected as payloads. Error text is omitted unless the host supplies
 //! an explicit redactor. Optional identifiers remain span-only.
@@ -90,8 +91,19 @@ pub struct TelemetryPlugin {
     id: String,
     config: TelemetryConfig,
     redactor: Arc<dyn ErrorRedactor>,
-    start: Arc<StartSpan>,
-    metrics: Metrics,
+    instruments: Option<(Arc<StartSpan>, Metrics)>,
+}
+
+impl Default for TelemetryPlugin {
+    /// Use global providers at Agent build time; no export occurs without an exporter.
+    fn default() -> Self {
+        Self {
+            id: "agent.telemetry".into(),
+            config: TelemetryConfig::default(),
+            redactor: Arc::new(OmitErrorMessages),
+            instruments: None,
+        }
+    }
 }
 
 impl TelemetryPlugin {
@@ -121,17 +133,29 @@ impl TelemetryPlugin {
         {
             return Err(TelemetryConfigError("telemetry capacities must be nonzero"));
         }
-        let tracer = tracer_provider.tracer(SCOPE);
         Ok(Self {
             id: id.into(),
             config,
             redactor: Arc::new(OmitErrorMessages),
-            start: Arc::new(move |builder, parent| {
-                parent.with_span(tracer.build_with_context(builder, parent))
-            }),
-            metrics: Metrics::new(meter_provider.meter(SCOPE)),
+            instruments: Some(instruments(tracer_provider, meter_provider)),
         })
     }
+}
+
+fn instruments<TP, MP>(tracer_provider: &TP, meter_provider: &MP) -> (Arc<StartSpan>, Metrics)
+where
+    TP: TracerProvider,
+    TP::Tracer: Send + Sync + 'static,
+    <TP::Tracer as Tracer>::Span: Send + Sync + 'static,
+    MP: MeterProvider + ?Sized,
+{
+    let tracer = tracer_provider.tracer(SCOPE);
+    (
+        Arc::new(move |builder, parent| {
+            parent.with_span(tracer.build_with_context(builder, parent))
+        }),
+        Metrics::new(meter_provider.meter(SCOPE)),
+    )
 }
 
 #[async_trait]
@@ -141,11 +165,17 @@ impl Plugin for TelemetryPlugin {
     }
 
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        let (start, metrics) = self.instruments.clone().unwrap_or_else(|| {
+            instruments(
+                &opentelemetry::global::tracer_provider(),
+                opentelemetry::global::meter_provider().as_ref(),
+            )
+        });
         let observation = Arc::new(Observation {
             config: self.config.clone(),
             redactor: self.redactor.clone(),
-            start: self.start.clone(),
-            metrics: self.metrics.clone(),
+            start,
+            metrics,
             runs: Mutex::new(HashMap::new()),
         });
         // Register rollback before contributions, including partial installation.
