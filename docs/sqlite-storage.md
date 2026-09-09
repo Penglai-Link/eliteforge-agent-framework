@@ -5,10 +5,10 @@
 | 层次 | 实现 | 平台差异如何处理 |
 |---|---|---|
 | SQLite 本体 | `rusqlite` 的 `bundled` 模式 | `libsqlite3-sys` 用目标 C 工具链编译 SQLite 源码；交叉编译需要对应工具链 |
-| 中文分词、向量扩展 | 独立包 `sqlite-extensions` | 按编译目标选择 `sqlite-simple`、`sqlite-vec` 动态库，逐连接加载 |
-| 数据保存 | `agent-memory`、`agent-state-sqlite`、`agent-context` | 实现会话、状态、交互、长期记忆、摘要和附件存储 |
-| 插件装配 | `agent-storage-sqlite` | 打开连接、初始化扩展、注册存储服务、关闭连接 |
-| 执行 | `agent-framework` | 只使用存储抽象，不依赖 SQLite |
+| 中文分词、向量扩展 | 独立包 `eliteforge-agent-sqlite-extensions` | 按编译目标选择 `sqlite-simple`、`sqlite-vec` 动态库，逐连接加载 |
+| 数据保存 | `eliteforge-agent-memory`、`eliteforge-agent-state-sqlite`、`eliteforge-agent-context` | 实现会话、状态、交互、长期记忆、摘要和附件存储 |
+| 插件装配 | `eliteforge-agent-official-plugin-storage-sqlite` | 打开连接、初始化扩展、注册存储服务、关闭连接 |
+| 执行 | `eliteforge-agent-framework` | 只使用存储抽象，不依赖 SQLite |
 
 SQLite 核心的构建说明见 [rusqlite](https://github.com/rusqlite/rusqlite#notes-on-building-rusqlite-and-libsqlite3-sys)。
 通常不需要再封装一层“不同 CPU 的 SQLite 驱动”；已有驱动负责这部分。
@@ -17,7 +17,7 @@ SQLite 核心的构建说明见 [rusqlite](https://github.com/rusqlite/rusqlite#
 flowchart TD
     App[应用：指定数据库路径和扩展配置] --> Bundle[SqliteStoragePlugin]
     Bundle --> Stores[会话 / 执行 / 交互 / 记忆 / 摘要 / 附件]
-    Stores --> Extensions[sqlite-extensions：平台选择与连接初始化]
+    Stores --> Extensions[eliteforge-agent-sqlite-extensions：平台选择与连接初始化]
     Stores --> Driver[tokio-rusqlite / rusqlite]
     Extensions --> Driver
     Driver --> SQLite[libsqlite3-sys：编译 SQLite 核心]
@@ -25,7 +25,7 @@ flowchart TD
 
 ## 从 Tron 提取的部分
 
-`sqlite-extensions` 来自 Tron 的 `shared/sqlite_extensions.rs`，保留扩展加载模式、
+`eliteforge-agent-sqlite-extensions` 来自 Tron 的 `shared/eliteforge_agent_sqlite_extensions.rs`，保留扩展加载模式、
 平台识别和能力探测。它不读取 `TRON_*` 环境变量，也不依赖 Tron 源码目录或业务表。
 
 - 固定资源版本：`sqlite-simple v0.7.1`、`sqlite-vec v0.1.9`，保留许可证。
@@ -44,8 +44,8 @@ flowchart TD
 
 ```rust
 let agent = AgentBuilder::new()
-    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(models))
+    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, models))
     .build()
     .await?;
 ```
@@ -59,13 +59,13 @@ let agent = AgentBuilder::new()
 先为存储插件开启打包 feature：
 
 ```toml
-agent-storage-sqlite = { path = "../agent-framework/crates/agent-storage-sqlite", features = ["bundled-native"] }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-framework/crates/eliteforge-agent-official-plugin-storage-sqlite", features = ["bundled-native"] }
 ```
 
 再配置加载方式：
 
 ```rust
-use agent_storage_sqlite::{
+use eliteforge_agent_official_plugin_storage_sqlite::{
     ExtensionConfig, ExtensionMode, SqliteCapabilitiesService, SqliteStoragePlugin,
 };
 
@@ -75,7 +75,7 @@ extensions.vector = ExtensionMode::Preferred;
 
 let agent = AgentBuilder::new()
     .plugin(SqliteStoragePlugin::new("agent.sqlite").with_extensions(extensions))
-    .plugin(provider.plugin(models))
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, models))
     .build()
     .await?;
 

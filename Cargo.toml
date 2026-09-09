@@ -1,18 +1,19 @@
 [workspace]
 members = [
-    "crates/agent-plugin-kernel",
-    "crates/agent-framework",
-    "crates/agent-model-genai",
-    "crates/agent-state-sqlite",
-    "crates/agent-tools-mcp",
-    "crates/agent-context",
-    "crates/agent-memory",
-    "crates/agent-observability",
-    "crates/agent-agui",
-    "crates/agent-tools-human",
-    "crates/agent-storage-sqlite",
-    "crates/sqlite-extensions",
-    "crates/agent-test-support",
+    "crates/eliteforge-agent-plugin-kernel",
+    "crates/eliteforge-agent-framework",
+    "crates/eliteforge-agent-core",
+    "crates/eliteforge-agent-official-plugin-model-genai",
+    "crates/eliteforge-agent-state-sqlite",
+    "crates/eliteforge-agent-official-plugin-tools-mcp",
+    "crates/eliteforge-agent-context",
+    "crates/eliteforge-agent-memory",
+    "crates/eliteforge-agent-official-plugin-observability",
+    "crates/eliteforge-agent-official-plugin-agui",
+    "crates/eliteforge-agent-official-plugin-tools-human",
+    "crates/eliteforge-agent-official-plugin-storage-sqlite",
+    "crates/eliteforge-agent-sqlite-extensions",
+    "crates/eliteforge-agent-test-support",
 ]
 resolver = "2"
 

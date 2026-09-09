@@ -1,7 +1,7 @@
 # Framework 架构
 
-`agent-framework` 定义 Agent 的运行时模型：执行循环、模型与工具调用、上下文组装、预算、状态、交互、事件和资源关闭。
-`agent-plugin-kernel` 负责插件装配与资源生命周期。模型协议、存储、MCP、用户交互和遥测由配套插件提供。
+`eliteforge-agent-core` 定义公共数据、能力契约和可复用运行支撑；`eliteforge-agent-framework` 负责装配、Agent 与工作流执行、模型调度和资源关闭。
+`eliteforge-agent-plugin-kernel` 负责插件装配与资源生命周期。模型协议、存储、MCP、用户交互和遥测由配套插件提供。
 
 本文只说明整体架构和运行语义。扩展点、默认行为以及现有实现见[Plugin 与扩展点](plugins.md)；可运行的场景和代码见[快速上手](quickstart.md)。
 
@@ -20,13 +20,13 @@ flowchart TD
     ModelInvoker --> ContextPipeline[Context Pipeline\n快照、贡献、预算、裁剪]
     Loop --> ToolInvoker[ToolInvoker\n参数校验、撤销、执行]
     Loop --> State[状态与会话\n完整聊天记录 / 任务进度 / 交互]
-    ContextPipeline --> ModelProvider[ModelProvider\n协议适配]
-    ModelSelection -.选择 connection/model.-> ModelProvider
+    ContextPipeline --> ChatModel[ChatModel\n协议适配]
+    ModelSelection -.选择 connection/model.-> ChatModel
     ToolInvoker --> ToolProvider[ToolProvider\n宿主工具 / MCP]
     State --> Storage[存储插件\nSQLite 或自定义实现]
     Agent --> Events[EventSink\n实时事件与遥测]
-    Builder --> Kernel[agent-plugin-kernel\n依赖排序、服务注册、资源释放]
-    ModelProvider --> Kernel
+    Builder --> Kernel[eliteforge-agent-plugin-kernel\n依赖排序、服务注册、资源释放]
+    ChatModel --> Kernel
     ToolProvider --> Kernel
     Storage --> Kernel
 ```
@@ -36,11 +36,12 @@ flowchart TD
 | 模块 | 职责 | 不负责的内容 |
 |---|---|---|
 | 宿主应用 | 业务身份、权限、订阅、凭据、配置、HTTP/UI、业务路由 | 不把业务策略下沉到通用 Framework |
-| `agent-plugin-kernel` | 插件依赖排序、类型服务注册、安装回滚、异步关闭和 Drop 兜底 | 不定义 Agent 执行语义 |
-| `agent-framework` | Agent、执行循环、模型/工具调用、上下文、预算、状态、交互和运行控制 | 不依赖具体模型协议、数据库、MCP 或 OTel |
+| `eliteforge-agent-plugin-kernel` | 插件依赖排序、类型服务注册、安装回滚、异步关闭和 Drop 兜底 | 不定义 Agent 执行语义 |
+| `eliteforge-agent-core` | 模型/工具接口、请求/响应、上下文、状态、交互和运行支撑 | 不依赖具体插件或 Framework |
+| `eliteforge-agent-framework` | Agent、执行循环、服务装配、模型调度和运行控制 | 不包含供应商协议实现 |
 | 配套插件 | 实现模型协议、存储、工具、上下文、摘要、附件、AG-UI 和遥测 | 不替宿主管理业务权限和订阅 |
 
-Framework 不依赖 `genai`、SQLite、MCP 或 OpenTelemetry。DAG 使用 `petgraph` 校验拓扑，使用 Tokio 执行节点。
+Framework 的默认 `genai` feature 依赖 `eliteforge-agent-official-plugin-model-genai`；该插件仅依赖 Core。关闭默认 feature 可移除 Genai。SQLite、MCP 和 OpenTelemetry 仍由应用显式安装。DAG 使用 `petgraph` 校验拓扑，使用 Tokio 执行节点。
 宿主通过适配层接入 Framework，宿主自己的业务类型留在宿主内。
 
 ## 服务装配
@@ -76,7 +77,7 @@ AgentBuilder 读取服务
 
 ### 装配边界
 
-Framework 根据已注册的服务构造运行时，不负责创建模型连接、数据库、内存存储或网络客户端。
+Framework 根据已注册的服务构造运行时；需要 Chat 且没有自定义连接时，默认 Genai 插件读取模型环境配置。数据库和其他存储由应用显式安装。
 内置执行器需要持久化状态时，宿主必须显式安装对应存储插件。
 
 ```text
@@ -199,9 +200,9 @@ flowchart TD
     Policy --> Reduce[ContextReducer\nKeep / Recent / Select / Summary]
     Reduce --> Validate[校验消息、工具轮次、额度和失败策略]
     Validate --> Window[ContextWindow\nmessages + ContextAssemblyReport]
-    Window --> Request[ModelRequest\nmessages + tools + options + extensions]
+    Window --> Request[ChatRequest\nmessages + tools + options + extensions]
     Request --> Middleware[ModelMiddleware\nintercept + next]
-    Middleware --> Provider[ModelProvider\n协议适配器]
+    Middleware --> Provider[ChatModel\n协议适配器]
 ```
 
 上下文处理按以下顺序发生：
@@ -213,11 +214,11 @@ flowchart TD
 5. 每个 `ContextContributor` 在自己的额度内生成数据，`ContextBudgetPolicy` 为所有块分配独立预算，块之间不借用剩余额度。
 6. 每个块交给自己的 `ContextReducer`，可以保留、按消息/轮次裁剪、选择条目或调用摘要模型压缩；工具调用和工具结果必须保持完整关系。
 7. 组装器校验最终消息、指令不可变性、历史投影合法性和模型特定额度，输出 `ContextWindow` 与 `ContextAssemblyReport`。
-8. 只有组装完成后的 `window.messages` 才会进入 `ModelRequest`，随后经过 `ModelMiddleware`，最后交给 `ModelProvider`。
+8. 只有组装完成后的 `window.messages` 才会进入 `ChatRequest`，随后经过 `ModelMiddleware`，最后交给 `ChatModel`。
 
 上下文失败、成功、压缩恢复都会发布对应事件；因此 UI、Telemetry 或调试工具可以观察每个块的原始额度、最终额度和处理结果，而不需要解析模型适配器内部状态。
 
-相关代码入口：[context.rs](../crates/agent-framework/src/context.rs)、[models.rs](../crates/agent-framework/src/models.rs)。配置层扩展点见[Plugin 与扩展点](plugins.md#工具上下文与事件)。
+相关代码入口：[context.rs](../crates/eliteforge-agent-core/src/context.rs)、[models.rs](../crates/eliteforge-agent-framework/src/models.rs)。配置层扩展点见[Plugin 与扩展点](plugins.md#工具上下文与事件)。
 
 ## 模型与订阅
 
@@ -225,7 +226,7 @@ flowchart TD
 
 ```text
 ModelConnection
-├─ ModelProvider：协议客户端、地址、认证
+├─ ChatModel：协议客户端、地址、认证
 ├─ ModelDescriptor[]：可用模型及能力
 └─ TokenEstimator：上下文估算与预算预留
         │
@@ -239,14 +240,15 @@ ModelSelectionStrategy
 ModelInvoker
 ```
 
-`ModelProvider` 是连接内部的协议适配器：它负责把 Framework 的 `ModelRequest` 转换成供应商请求，再把结果写回 Framework。`ModelConnection` 则负责把这个适配器、可用模型列表和 token 估算器放到模型目录中。也就是说，`ModelProvider` 说明“怎么调用”，`ModelConnection` 说明“通过哪个连接可以调用哪些模型”。
+`ChatModel` 是连接内部的协议适配器：它负责把 Framework 的 `ChatRequest` 转换成供应商请求，再把结果写回 Framework。`ModelConnection` 则负责把这个适配器、可用模型列表和 token 估算器放到模型目录中。也就是说，`ChatModel` 说明“怎么调用”，`ModelConnection` 说明“通过哪个连接可以调用哪些模型”。
 
-`Model` 是旧的单模型简化接口，只接收一个 `ModelRequest` 并生成结果。通过 `ModelPlugin` 注册它时，Framework 会把它包装为 `ModelConnection("legacy", ["default"])`，以便继续复用同一套模型目录和选择流程。新代码不需要同时注册 `Model` 和 `ModelConnection`，推荐直接使用 `ModelConnectionPlugin`。
+应用直接创建 `GenaiPlugin`，或用 `ChatModelPlugin::new(adapter)` 注册自定义单模型实现。其他操作采用独立接口：EmbeddingModel、RerankModel、图片/视频生成、语音和实时会话。
 
 ```text
-新代码：ModelConnectionPlugin → ModelConnection → ModelCatalog → ModelInvoker
-旧代码：ModelPlugin → Model → Framework 包装为 legacy/default 连接
+GenaiPlugin / 自定义 Plugin → Core 注册契约 → Framework 模型目录与执行器
 ```
+
+请求指定优先于阶段规则和每项能力的默认模型，未配置规则时要求唯一兼容实现。协议绑定到具体连接/模型/操作；continuation 还绑定格式版本。详细调用示例见 [plugins.md](plugins.md)。
 
 模型连接、模型目录和选择策略属于运行时配置；订阅归属、账号权限、计费和凭据轮换由宿主管理。
 `ModelInvoker` 协调 `ContextAssembler`，并负责超时、重试、预算预留和结果验证。模型已输出增量后不自动重试；不确定失败按已预留额度保守计入预算。
@@ -260,7 +262,7 @@ flowchart LR
     Input[用户消息 / 工具结果]
     Input --> Conversation[ConversationStore\n完整聊天记录]
     Conversation --> Context[ContextAssembler\n为当前模型请求裁剪、摘要、拼接上下文]
-    Context --> Model[ModelProvider\n本次模型输入]
+    Context --> Model[ChatModel\n本次模型输入]
 
     Loop[AgentLoop\n当前执行到哪一步] --> State[StateStore\n任务进度与恢复信息]
     State --> Resume[进程中断后继续]
@@ -300,7 +302,7 @@ ContextAssembler
   └─ 校验工具调用和工具结果仍然成组
         │
         ▼
-ContextWindow → ModelRequest → ModelProvider
+ContextWindow → ChatRequest → ChatModel
 ```
 
 `ContextWindow` 只是本次请求的临时输入，不是另一份会话历史。具体的块顺序、额度、Reducer 和摘要规则见[上下文窗口](context-windows.md)。

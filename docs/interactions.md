@@ -9,15 +9,15 @@
 配置模型后，加入 SQLite 存储和问答工具：
 
 ```rust
-use agent_framework::*;
-use agent_storage_sqlite::SqliteStoragePlugin;
-use agent_tools_human::HumanInteractionPlugin;
-use agent_agui::AgUiPlugin;
+use eliteforge_agent_framework::*;
+use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
+use eliteforge_agent_official_plugin_tools_human::HumanInteractionPlugin;
+use eliteforge_agent_official_plugin_agui::AgUiPlugin;
 
 let agui = AgUiPlugin::default();
 let agent = AgentBuilder::new()
     .plugin(SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(models)) // 已配置的模型连接和目录
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, models)) // 已配置的模型连接和目录
     .plugin(HumanInteractionPlugin)
     .plugin(agui.clone())
     .build()
@@ -182,5 +182,5 @@ HTTP、身份验证、卡片 UI 和业务状态仍由应用实现。
 ReAct 的 ConversationStore 同样在检查点提交后按前缀追加，恢复可补齐尚未同步的历史。
 这些步骤不假设不同存储抽象之间共享数据库事务。
 
-回归测试：[三种执行器的问答与 ReAct 审批](../crates/agent-storage-sqlite/tests/interactions.rs)、
-[SQLite 存储重开与答案竞争](../crates/agent-storage-sqlite/tests/stores.rs)。
+回归测试：[三种执行器的问答与 ReAct 审批](../crates/eliteforge-agent-official-plugin-storage-sqlite/tests/interactions.rs)、
+[SQLite 存储重开与答案竞争](../crates/eliteforge-agent-official-plugin-storage-sqlite/tests/stores.rs)。

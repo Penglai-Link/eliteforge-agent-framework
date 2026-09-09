@@ -1,0 +1,53 @@
+//! Offline AG-UI SSE example. Redirect stdout to inspect/replay the wire frames.
+use async_trait::async_trait;
+use eliteforge_agent_framework::*;
+use eliteforge_agent_official_plugin_agui::AgUiPlugin;
+
+struct DemoModel;
+#[async_trait]
+impl ChatModel for DemoModel {
+    async fn generate(
+        &self,
+        _model_id: &str,
+        _: ChatRequest,
+        stream: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        stream.reasoning_delta("生成一个简短回复。").await;
+        stream.text_delta("你好，").await;
+        stream.text_delta("这是 AG-UI 事件流。").await;
+        Ok(ChatResponse::text("你好，这是 AG-UI 事件流。"))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let agui = AgUiPlugin::default();
+    let agent = AgentBuilder::new()
+        .plugin(
+            eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new(
+                "agent.sqlite",
+            ),
+        )
+        .plugin(ChatModelPlugin::new(DemoModel))
+        .plugin(agui.clone())
+        .build()
+        .await?;
+    let (handle, mut events) = agui.start(&agent, RunRequest::new("chat-1", "你好"))?;
+    let control = handle.control();
+    let consume = async {
+        while let Some(frame) = events.recv_sse().await? {
+            // An HTTP handler writes each frame to its text/event-stream body.
+            print!("{frame}");
+        }
+        Ok::<(), eliteforge_agent_official_plugin_agui::ag_ui::Error>(())
+    };
+    let (result, delivered) = tokio::join!(handle.wait(), consume);
+    let shutdown = agent.close().await;
+    delivered?;
+    result?;
+    eprintln!("run {} finished", control.run_id());
+    if !shutdown.is_success() {
+        return Err(format!("shutdown failed: {shutdown:?}").into());
+    }
+    Ok(())
+}

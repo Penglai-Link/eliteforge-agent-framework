@@ -1,0 +1,14 @@
+[package]
+name = "eliteforge-agent-official-plugin-tools-human"
+version.workspace = true
+edition.workspace = true
+description = "Structured user questions and default human interaction tools"
+
+[dependencies]
+eliteforge-agent-core = { path = "../eliteforge-agent-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+eliteforge-agent-framework = { path = "../eliteforge-agent-framework", default-features = false }

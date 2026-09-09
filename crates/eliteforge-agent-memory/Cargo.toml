@@ -1,0 +1,24 @@
+[package]
+name = "eliteforge-agent-memory"
+version.workspace = true
+edition.workspace = true
+description = "Persistent conversation storage and explicit long-term memory components"
+
+[dependencies]
+eliteforge-agent-sqlite-extensions = { path = "../eliteforge-agent-sqlite-extensions" }
+eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-rusqlite = { version = "0.7.0", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+eliteforge-agent-framework = { path = "../eliteforge-agent-framework", default-features = false }
+eliteforge-agent-state-sqlite = { path = "../eliteforge-agent-state-sqlite" }
+eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }
+eliteforge-agent-official-plugin-model-genai = { path = "../eliteforge-agent-official-plugin-model-genai" }
+eliteforge-agent-context = { path = "../eliteforge-agent-context" }
+tempfile = "3"

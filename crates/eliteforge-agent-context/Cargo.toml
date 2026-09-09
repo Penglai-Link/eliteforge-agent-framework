@@ -1,0 +1,25 @@
+[package]
+name = "eliteforge-agent-context"
+version.workspace = true
+edition.workspace = true
+description = "Model-backed context reduction and bounded artifact offload for eliteforge-agent-framework"
+[dependencies]
+eliteforge-agent-sqlite-extensions = { path = "../eliteforge-agent-sqlite-extensions" }
+eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }
+cap-std = "3"
+cap-fs-ext = "3"
+base64 = "0.22"
+sha2 = "0.10"
+tokio-rusqlite = { version = "0.7.0", features = ["bundled"] }
+[dev-dependencies]
+eliteforge-agent-framework = { path = "../eliteforge-agent-framework", default-features = false }
+eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }
+tempfile = "3"
+eliteforge-agent-state-sqlite = { path = "../eliteforge-agent-state-sqlite" }

@@ -23,206 +23,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-agui"
-version = "0.1.0"
-dependencies = [
- "ag-ui",
- "agent-context",
- "agent-framework",
- "agent-state-sqlite",
- "agent-storage-sqlite",
- "agent-test-support",
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "agent-context"
-version = "0.1.0"
-dependencies = [
- "agent-framework",
- "agent-state-sqlite",
- "agent-test-support",
- "async-trait",
- "base64 0.22.1",
- "cap-fs-ext",
- "cap-std",
- "serde",
- "serde_json",
- "sha2",
- "sqlite-extensions",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-rusqlite",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "agent-framework"
-version = "0.1.0"
-dependencies = [
- "agent-plugin-kernel",
- "agent-storage-sqlite",
- "agent-test-support",
- "async-trait",
- "futures",
- "jsonschema",
- "petgraph",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "agent-memory"
-version = "0.1.0"
-dependencies = [
- "agent-context",
- "agent-framework",
- "agent-model-genai",
- "agent-state-sqlite",
- "agent-test-support",
- "async-trait",
- "serde",
- "serde_json",
- "sqlite-extensions",
- "tempfile",
- "tokio",
- "tokio-rusqlite",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "agent-model-genai"
-version = "0.1.0"
-dependencies = [
- "agent-framework",
- "agent-state-sqlite",
- "agent-storage-sqlite",
- "agent-test-support",
- "async-trait",
- "futures",
- "genai",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "agent-observability"
-version = "0.1.0"
-dependencies = [
- "agent-framework",
- "agent-plugin-kernel",
- "agent-state-sqlite",
- "agent-test-support",
- "async-trait",
- "futures",
- "opentelemetry",
- "opentelemetry_sdk",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "agent-plugin-kernel"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "agent-state-sqlite"
-version = "0.1.0"
-dependencies = [
- "agent-framework",
- "agent-memory",
- "agent-test-support",
- "async-trait",
- "serde_json",
- "sqlite-extensions",
- "tempfile",
- "tokio",
- "tokio-rusqlite",
-]
-
-[[package]]
-name = "agent-storage-sqlite"
-version = "0.1.0"
-dependencies = [
- "agent-agui",
- "agent-context",
- "agent-framework",
- "agent-memory",
- "agent-state-sqlite",
- "agent-tools-human",
- "async-trait",
- "serde",
- "serde_json",
- "sqlite-extensions",
- "tempfile",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "agent-test-support"
-version = "0.1.0"
-dependencies = [
- "agent-framework",
- "agent-memory",
- "agent-state-sqlite",
- "async-trait",
- "serde_json",
- "tempfile",
- "uuid",
-]
-
-[[package]]
-name = "agent-tools-human"
-version = "0.1.0"
-dependencies = [
- "agent-framework",
- "async-trait",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "agent-tools-mcp"
-version = "0.1.0"
-dependencies = [
- "agent-framework",
- "agent-plugin-kernel",
- "async-trait",
- "axum",
- "http",
- "reqwest",
- "rmcp",
- "serde_json",
- "sha2",
- "thiserror",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -804,6 +604,243 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "eliteforge-agent-context"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "cap-fs-ext",
+ "cap-std",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-sqlite-extensions",
+ "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-test-support",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-rusqlite",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "eliteforge-agent-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-plugin-kernel",
+ "futures",
+ "jsonschema",
+ "petgraph",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "eliteforge-agent-framework"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-core",
+ "eliteforge-agent-official-plugin-model-genai",
+ "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-plugin-kernel",
+ "eliteforge-agent-test-support",
+ "futures",
+ "jsonschema",
+ "petgraph",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "eliteforge-agent-memory"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-context",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-model-genai",
+ "eliteforge-agent-sqlite-extensions",
+ "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-test-support",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rusqlite",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-agui"
+version = "0.1.0"
+dependencies = [
+ "ag-ui",
+ "async-trait",
+ "eliteforge-agent-context",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-test-support",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-model-genai"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-test-support",
+ "futures",
+ "genai",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-observability"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-test-support",
+ "futures",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-storage-sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-context",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-memory",
+ "eliteforge-agent-official-plugin-agui",
+ "eliteforge-agent-official-plugin-tools-human",
+ "eliteforge-agent-sqlite-extensions",
+ "eliteforge-agent-state-sqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-tools-human"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-tools-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "http",
+ "reqwest",
+ "rmcp",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "eliteforge-agent-plugin-kernel"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "eliteforge-agent-sqlite-extensions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rusqlite",
+ "sha2",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "eliteforge-agent-state-sqlite"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-memory",
+ "eliteforge-agent-sqlite-extensions",
+ "eliteforge-agent-test-support",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-rusqlite",
+]
+
+[[package]]
+name = "eliteforge-agent-test-support"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-memory",
+ "eliteforge-agent-state-sqlite",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
 
 [[package]]
 name = "email_address"
@@ -2809,17 +2846,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "sqlite-extensions"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "rusqlite",
- "sha2",
- "tempfile",
- "thiserror",
 ]
 
 [[package]]

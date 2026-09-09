@@ -1,0 +1,22 @@
+[package]
+name = "eliteforge-agent-state-sqlite"
+description = "Transactional SQLite execution checkpoints with session fencing"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+eliteforge-agent-sqlite-extensions = { path = "../eliteforge-agent-sqlite-extensions" }
+eliteforge-agent-core = { path = "../eliteforge-agent-core" }
+async-trait.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-rusqlite = { version = "0.7.0", features = ["bundled"] }
+
+[dev-dependencies]
+eliteforge-agent-framework = { path = "../eliteforge-agent-framework", default-features = false }
+eliteforge-agent-memory = { path = "../eliteforge-agent-memory" }
+eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }
+tempfile = "3"
+[[test]]
+name = "crash_recovery"
+harness = false

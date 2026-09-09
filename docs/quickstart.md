@@ -18,74 +18,57 @@
 | 接入 OpenTelemetry | [开启 OTel](#开启-otel) |
 
 整体分层和运行语义见[Framework 架构](architecture.md)；扩展点和默认行为见[Plugin 与扩展点](plugins.md)。
-下面的独立代码片段默认沿用第一个示例中的 `provider`、`agent` 和 `?` 所在的异步函数上下文；需要完整程序时，直接参考对应仓库示例源码。
+下面的代码片段中，`agent` 是已构建的实例，`provider` 是按高级用法配置的 `Arc<GenaiChatAdapter>`，`?` 位于异步函数中；需要完整程序时，直接参考对应仓库示例源码。
 
 ## 创建第一个 Agent
 
 这个场景使用一个 Genai 模型连接和 SQLite 存储。Framework 自动提供默认 ReAct、单模型选择、空工具集和基础上下文。
 
 ```rust
-use agent_framework::{AgentBuilder, ModelDescriptor, RunRequest};
-use agent_model_genai::{AdapterKind, AuthData, GenaiProvider};
-use agent_storage_sqlite::SqliteStoragePlugin;
-use std::sync::Arc;
+use eliteforge_agent_framework::{AgentBuilder, RunRequest};
+use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let provider = Arc::new(GenaiProvider::new(
-        "default",
-        AdapterKind::OpenAI,
-        std::env::var("MODEL_ENDPOINT")?,
-        AuthData::from_env("MODEL_API_KEY"),
-    )?);
-
     let agent = AgentBuilder::new()
         .plugin(SqliteStoragePlugin::new("agent.sqlite"))
-        .plugin(provider.plugin(vec![
-            ModelDescriptor::new(std::env::var("MODEL")?),
-        ]))
-        .build()
-        .await?;
-
-    let result = agent
-        .run(RunRequest::new("chat-1", "你好，请介绍一下自己"))
-        .await;
+        .build().await?;
+    let result = agent.run(RunRequest::new("chat-1", "你好，请介绍一下自己")).await;
     let shutdown = agent.close().await;
     println!("{}", result?.output);
-    if !shutdown.is_success() {
-        return Err(format!("shutdown failed: {shutdown:?}").into());
-    }
+    if !shutdown.is_success() { return Err(format!("shutdown failed: {shutdown:?}").into()); }
     Ok(())
 }
 ```
 
-设置环境变量后运行仓库中的同等示例：
+Framework 默认启用 Genai，只需配置模型名和凭据：
 
 ```sh
-export MODEL_ENDPOINT="https://your-model-endpoint/v1"
-export MODEL_API_KEY="your-api-key"
 export MODEL="your-model"
-cargo run -p agent-model-genai --example minimal
+export OPENAI_API_KEY="your-api-key"
+cargo run -p eliteforge-agent-framework --example default_model
 ```
 
-对应源码：[minimal.rs](../crates/agent-model-genai/examples/minimal.rs)。`SqliteStoragePlugin` 会注册会话、执行状态、交互、长期记忆、摘要和附件存储；服务端通常复用同一个 Agent，进程退出时再调用 `agent.close()`。
+代理服务可额外配置 `MODEL_ENDPOINT` 和 `MODEL_API_KEY`。其他协议通过 `MODEL_ADAPTER` 选择。需要在代码中指定时，直接 `.plugin(GenaiPlugin::new(model))`；详细配置见 [plugins.md](plugins.md)。
+
+对应源码：[default_model.rs](../crates/eliteforge-agent-framework/examples/default_model.rs)。`SqliteStoragePlugin` 会注册会话、执行状态、交互、长期记忆、摘要和附件存储；服务端通常复用同一个 Agent，进程退出时再调用 `agent.close()`。
 
 ## 运行离线示例
 
-`standalone` 使用确定性的 `DemoModel`，完整演示“模型发起工具调用 → 工具返回观察 → 模型生成最终答案”，不访问网络。这个示例故意使用 `ModelPlugin`，因为 `DemoModel` 只是一个没有模型目录的单模型测试实现；接入真实供应商时，推荐使用上一节的 `ModelConnectionPlugin`：
+`standalone` 使用确定性的 `DemoModel`，完整演示“模型发起工具调用 → 工具返回观察 → 模型生成最终答案”，不访问网络。这个示例用 `ChatModelPlugin` 注册自定义 ChatModel，连接与模型名默认 `default/default`：
 
 ```sh
-cargo run -p agent-framework --example standalone -- 19 23
+cargo run -p eliteforge-agent-framework --example standalone -- 19 23
 ```
 
-输出包含最终结果、模型步骤数和工具调用数。对应源码：[standalone.rs](../crates/agent-framework/examples/standalone.rs)。把 `DemoModel` 替换为自己的 HTTP/SDK 适配器，即可沿用相同的工具调用链。
+输出包含最终结果、模型步骤数和工具调用数。对应源码：[standalone.rs](../crates/eliteforge-agent-framework/examples/standalone.rs)。把 `DemoModel` 替换为自己的 HTTP/SDK 适配器，即可沿用相同的工具调用链。
 
 ## 流式输出
 
 `run(request).await` 等价于 `start(request)?.wait().await`。需要把中间事件推送给 UI 或 SSE 时，先启动运行，再取得事件接收器：
 
 ```rust
-use agent_framework::{AgentEvent, RunRequest};
+use eliteforge_agent_framework::{AgentEvent, RunRequest};
 use tokio::sync::broadcast::error::RecvError;
 
 let mut handle = agent.start(RunRequest::new("chat-1", "你好"))?;
@@ -154,7 +137,7 @@ println!("{}\n{}", first.output, second.output);
 DAG 适合固定步骤、并行节点、条件分支和汇合。下面的两个 ReAct 节点按顺序执行，后一个节点接收前一个节点的输出：
 
 ```rust
-use agent_framework::{
+use eliteforge_agent_framework::{
     AgentBuilder, AgentLoopPlugin, DagEdge, DagNode, DagWorkflowDefinition,
     DagWorkflowLoop, Message, ModelDescriptor, RunRequest, WorkflowStage,
 };
@@ -173,8 +156,8 @@ let definition = DagWorkflowDefinition {
 };
 
 let agent = AgentBuilder::new()
-    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
+    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
     .plugin(AgentLoopPlugin::new(DagWorkflowLoop::new(definition)?))
     .build()
     .await?;
@@ -186,21 +169,21 @@ println!("{}", result.output);
 agent.close().await;
 ```
 
-完整的 SQLite DAG 示例见 [dag.rs](../crates/agent-state-sqlite/examples/dag.rs)。复杂 DAG 的节点类型、并行限制和恢复语义见[DAG 工作流](dag-workflows.md)。
+完整的 SQLite DAG 示例见 [dag.rs](../crates/eliteforge-agent-state-sqlite/examples/dag.rs)。复杂 DAG 的节点类型、并行限制和恢复语义见[DAG 工作流](dag-workflows.md)。
 
 ## 按阶段选择模型
 
 一个连接可以注册多个模型；宿主只配置一次地址和认证，再用选择策略把不同阶段映射到模型：
 
 ```rust
-use agent_framework::{FixedModelStrategy, ModelDescriptor, ModelRef, ModelStrategyPlugin};
+use eliteforge_agent_framework::{FixedModelStrategy, ModelDescriptor, ModelRef, ModelStrategyPlugin};
 use std::sync::Arc;
 
 let planner = std::env::var("PLANNER_MODEL")?;
 let writer = std::env::var("WRITER_MODEL")?;
 let agent = AgentBuilder::new()
-    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(vec![
+    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, vec![
         ModelDescriptor::new(planner),
         ModelDescriptor::new(writer.clone()),
     ]))
@@ -211,18 +194,18 @@ let agent = AgentBuilder::new()
     .await?;
 ```
 
-上例固定使用 `writer`。阶段映射和故障回退见 [shared_connection.rs](../crates/agent-model-genai/examples/shared_connection.rs)，其中 `StageModelStrategy` 为 `plan` 和 `execute` 选择不同模型。
+上例固定使用 `writer`。阶段映射和故障回退见 [shared_connection.rs](../crates/eliteforge-agent-official-plugin-model-genai/examples/shared_connection.rs)，其中 `StageModelStrategy` 为 `plan` 和 `execute` 选择不同模型。
 
 ## 增加上下文
 
 只想给默认 Agent 增加一条系统指令时，注册 `ContextPlugin`：
 
 ```rust
-use agent_framework::{ContextPlugin, FixedContext};
+use eliteforge_agent_framework::{ContextPlugin, FixedContext};
 
 let agent = AgentBuilder::new()
-    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
+    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
     .plugin(ContextPlugin::new(
         "prompt",
         FixedContext::new("用简短的中文回答。"),
@@ -254,19 +237,19 @@ let result = agent.run(request).await?;
 已完成的运行直接返回保存的结果。等待审批的运行还要附带交互回答，不能只传 `run_id`。可跨进程运行确定性审批示例：
 
 ```sh
-cargo run -p agent-state-sqlite --example durable_approval -- start /tmp/approval.db 17
+cargo run -p eliteforge-agent-state-sqlite --example durable_approval -- start /tmp/approval.db 17
 # 使用上一步返回的 run_id 和 interaction.id
-cargo run -p agent-state-sqlite --example durable_approval -- answer /tmp/approval.db <run-id> <interaction-id> true
+cargo run -p eliteforge-agent-state-sqlite --example durable_approval -- answer /tmp/approval.db <run-id> <interaction-id> true
 ```
 
-对应源码：[durable_approval.rs](../crates/agent-state-sqlite/examples/durable_approval.rs)。真实应用需要由宿主负责鉴权、审批 UI 和回答提交。
+对应源码：[durable_approval.rs](../crates/eliteforge-agent-state-sqlite/examples/durable_approval.rs)。真实应用需要由宿主负责鉴权、审批 UI 和回答提交。
 
 ## 开启 OTel
 
 创建 `TelemetryPlugin` 并在 Agent 中注册。下面使用内存 exporter 验证 span 名称：
 
 ```rust
-use agent_observability::{TelemetryConfig, TelemetryPlugin};
+use eliteforge_agent_official_plugin_observability::{TelemetryConfig, TelemetryPlugin};
 use opentelemetry_sdk::{
     metrics::SdkMeterProvider,
     trace::{InMemorySpanExporter, SdkTracerProvider},
@@ -285,9 +268,9 @@ let telemetry = TelemetryPlugin::new(
 )?;
 
 let agent = AgentBuilder::new()
-    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
     .plugin(telemetry)
-    .plugin(provider.plugin(vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
     .build()
     .await?;
 

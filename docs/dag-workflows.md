@@ -42,7 +42,7 @@ let definition = DagWorkflowDefinition {
     max_parallel_nodes: 2,
 };
 let agent = AgentBuilder::new()
-    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
     .plugin(model_connection_plugin)
     .plugin(model_strategy_plugin)
     .plugin(AgentLoopPlugin::new(DagWorkflowLoop::new(definition)?))
@@ -153,12 +153,12 @@ ReAct 的不确定工具仍使用原有 `Record` / `Retry`，按 invocation ID �
 ## 可运行示例
 
 ```sh
-cargo run -p agent-state-sqlite --example dag -- /tmp/dag-demo.db -7
-cargo run -p agent-state-sqlite --example dag -- /tmp/dag-demo.db 7
+cargo run -p eliteforge-agent-state-sqlite --example dag -- /tmp/dag-demo.db -7
+cargo run -p eliteforge-agent-state-sqlite --example dag -- /tmp/dag-demo.db 7
 ```
 
 示例完全离线，分别输出 7 和 14，并打印未选分支的 `Skipped` 状态。
-正式回归测试位于 `agent-state-sqlite/tests/dag.rs` 和 `tests/crash_recovery.rs`。
+正式回归测试位于 `eliteforge-agent-state-sqlite/tests/dag.rs` 和 `tests/crash_recovery.rs`。
 
 ## 节点中间件与可观测
 

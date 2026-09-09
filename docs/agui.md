@@ -1,6 +1,6 @@
 # AG-UI 事件
 
-`agent-agui` 将 Framework 的运行输出转换为 AG-UI 事件，并提供 SSE 编码。
+`eliteforge-agent-official-plugin-agui` 将 Framework 的运行输出转换为 AG-UI 事件，并提供 SSE 编码。
 ReAct、串行 Workflow 和 DAG 使用同一个插件。
 
 ```text
@@ -16,7 +16,7 @@ ModelInvoker / Loop / 自定义节点
      应用 HTTP 接口 → 前端
 ```
 
-Framework 提供通用输出事件及其顺序；`agent-agui` 负责协议类型、消息配对和 SSE 编码。
+Framework 提供通用输出事件及其顺序；`eliteforge-agent-official-plugin-agui` 负责协议类型、消息配对和 SSE 编码。
 HTTP 路由、认证、权限、浏览器连接和持久化回放由应用负责。
 
 实现参考了 Tron 的 `agui_translate.rs` 和 `agui_stream.rs`，协议格式以
@@ -29,7 +29,7 @@ HTTP 路由、认证、权限、浏览器连接和持久化回放由应用负责
 
 ```toml
 [dependencies]
-agent-agui = { path = "../agent-framework/crates/agent-agui" }
+eliteforge-agent-official-plugin-agui = { path = "../eliteforge-agent-framework/crates/eliteforge-agent-official-plugin-agui" }
 ```
 
 在已配置模型和 SQLite 存储的 AgentBuilder 上注册插件，完整配置见[用户问答与工具审批](interactions.md)：
@@ -38,8 +38,8 @@ agent-agui = { path = "../agent-framework/crates/agent-agui" }
 未安装或使用了另一个实例时直接拒绝，不启动模型或工具。
 
 ```rust
-use agent_agui::AgUiPlugin;
-use agent_framework::RunRequest;
+use eliteforge_agent_official_plugin_agui::AgUiPlugin;
+use eliteforge_agent_framework::RunRequest;
 
 let agui = AgUiPlugin::default();
 let agent = builder.plugin(agui.clone()).build().await?;
@@ -54,7 +54,7 @@ let consume = async {
         // HTTP handler 将 frame 写入 text/event-stream 响应体。
         print!("{frame}");
     }
-    Ok::<(), agent_agui::ag_ui::Error>(())
+    Ok::<(), eliteforge_agent_official_plugin_agui::ag_ui::Error>(())
 };
 let (result, delivered) = tokio::join!(handle.wait(), consume);
 delivered?;
@@ -77,10 +77,10 @@ data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"...","delta":"你好"}
 可直接运行不需要模型账号的完整示例：
 
 ```sh
-cargo run -p agent-agui --example sse
+cargo run -p eliteforge-agent-official-plugin-agui --example sse
 ```
 
-源码：[sse.rs](../crates/agent-agui/examples/sse.rs)。服务端复用 Agent，退出时调用 `agent.close()`。
+源码：[sse.rs](../crates/eliteforge-agent-official-plugin-agui/examples/sse.rs)。服务端复用 Agent，退出时调用 `agent.close()`。
 
 ## 事件映射
 
@@ -139,7 +139,7 @@ RunResult 的最终回复与最近一条完整文本相同时不重复发送；�
 自定义 Loop 或 WorkflowNode 可以使用通用输出事件，无须依赖 AG-UI 类型：
 
 ```rust
-use agent_framework::OutputEvent;
+use eliteforge_agent_framework::OutputEvent;
 use serde_json::json;
 
 context.emit_output(OutputEvent::StateSnapshot(json!({"progress": 0})));
@@ -182,7 +182,7 @@ AG-UI 事件；现有 Workflow journal 不包含完整 token 流，不能据此�
 
 ## 验证
 
-[protocol.rs](../crates/agent-agui/tests/protocol.rs) 使用真实 SDK 客户端消费输出，验证
+[protocol.rs](../crates/eliteforge-agent-official-plugin-agui/tests/protocol.rs) 使用真实 SDK 客户端消费输出，验证
 文本与推理配对、工具参数/结果顺序、并发模型和节点隔离、附件引用、审批通过与拒绝、
 执行器重建后的恢复、旧检查点兼容、最终回复、中间说明、转义会话 ID、状态与活动、
 取消、重试、超限、错误文本和慢观测 sink。所有模型均为本地测试实现，不需要模型账号。

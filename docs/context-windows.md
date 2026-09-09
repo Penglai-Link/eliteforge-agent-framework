@@ -24,17 +24,17 @@ revision 是最后一条消息的序号；消息 ID 由会话、分支、generat
 普通 ReAct 也保存执行检查点，并按前缀将完整消息同步到 ConversationStore；
 崩溃恢复时先补齐未同步的历史，再继续执行。
 
-需要跨进程保留普通会话时，可使用 `agent-memory` 的 `SqliteConversationStore`：
+需要跨进程保留普通会话时，可使用 `eliteforge-agent-memory` 的 `SqliteConversationStore`：
 
 ```rust
 let conversations = Arc::new(SqliteConversationStore::open(
     "conversations.db", SqliteConversationOptions::default(),
 ).await?);
-let execution = Arc::new(agent_state_sqlite::SqliteStateStore::open(
-    "execution.db", agent_state_sqlite::SqliteOptions::default(),
+let execution = Arc::new(eliteforge_agent_state_sqlite::SqliteStateStore::open(
+    "execution.db", eliteforge_agent_state_sqlite::SqliteOptions::default(),
 ).await?);
 let agent = AgentBuilder::new()
-    .plugin(provider.plugin(vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
     .plugin(ConversationStorePlugin::from_arc(conversations.clone()))
     .plugin(execution.clone().plugin())
     .build().await?;
@@ -78,8 +78,8 @@ let layout = ContextLayout(vec![
 ]);
 
 let agent = AgentBuilder::new()
-    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
+    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, vec![ModelDescriptor::new(std::env::var("MODEL")?)]))
     .plugin(ContextPlugin::new("prompt", FixedContext::new("用中文回答。")))
     .plugin(ContextContributorPlugin::new("task-data", FixedContextContributor(
         ContextBlock::data("task", "当前任务：设计视频剪辑 Agent。"),
@@ -89,7 +89,7 @@ let agent = AgentBuilder::new()
     .await?;
 ```
 
-完整示例见 [context_blocks.rs](../crates/agent-model-genai/examples/context_blocks.rs)。
+完整示例见 [context_blocks.rs](../crates/eliteforge-agent-official-plugin-model-genai/examples/context_blocks.rs)。
 它使用现成实现，只有手工运行时才调用真实模型。
 
 ```text
@@ -120,10 +120,10 @@ Reducer 无法通过修改最新工具交互、丢失调用配对或把历史数
 
 `SummaryStore` 保存派生摘要。框架提供 `SqliteSummaryStore`，
 默认不保存；通过 `ModelCompressor::with_store` 开启。
-下面沿用前面的 GenaiProvider，模型名称需替换为该连接中实际可用的名称。
+下面沿用前面的 GenaiChatAdapter，模型名称需替换为该连接中实际可用的名称。
 
 ```rust
-use agent_context::{CompressionOptions, ModelCompressor, SqliteSummaryStore, SummaryStoreOptions};
+use eliteforge_agent_context::{CompressionOptions, ModelCompressor, SqliteSummaryStore, SummaryStoreOptions};
 use std::sync::Arc;
 
 let summaries = Arc::new(SqliteSummaryStore::open(
@@ -136,8 +136,8 @@ let compressor = ModelCompressor::new(
 
 // 使用简单默认布局时：
 let agent = AgentBuilder::new()
-    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
-    .plugin(provider.plugin(vec![
+    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(provider, vec![
         ModelDescriptor::new("chat-model"),
         ModelDescriptor::new("summary-model"),
     ]))
@@ -276,10 +276,10 @@ let builder = builder
 ```
 
 示例还配置了工具大结果转存和附件读取：
-[memory_context.rs](../crates/agent-memory/examples/memory_context.rs)。
+[memory_context.rs](../crates/eliteforge-agent-memory/examples/memory_context.rs)。
 
 ```sh
-cargo run -p agent-memory --example memory_context -- Rust
+cargo run -p eliteforge-agent-memory --example memory_context -- Rust
 ```
 
 设置 MODEL_ENDPOINT、MODEL_API_KEY、MODEL 后运行会调用真实模型。MEMORY_DIR 指定本地数据目录；

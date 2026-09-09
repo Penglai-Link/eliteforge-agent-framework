@@ -1,6 +1,6 @@
 # 节点观测与恢复身份
 
-Framework 定义执行中间件、身份和结构化错误契约；`agent-observability` 将这些契约转换为
+Framework 定义执行中间件、身份和结构化错误契约；`eliteforge-agent-official-plugin-observability` 将这些契约转换为
 OpenTelemetry span、事件和指标。宿主配置 tracer/meter provider、exporter、采样、存储和查询界面。
 Framework 本身不依赖 OpenTelemetry 或 SQLite。
 
@@ -13,7 +13,7 @@ let telemetry = TelemetryPlugin::new(
     "telemetry", &tracer_provider, &meter_provider, TelemetryConfig::default(),
 )?;
 let agent = AgentBuilder::new()
-    .plugin(agent_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
     .plugin(telemetry)
     // StateStore、模型、工具、节点插件……
     .plugin(AgentLoopPlugin::new(DagWorkflowLoop::new(definition)?))
@@ -131,7 +131,7 @@ impl WorkflowNodeMiddleware for MyNodeMiddleware {
 
 ## 验证
 
-`agent-observability/tests/export.rs` 使用实际 SDK in-memory exporter 验证：
+`eliteforge-agent-official-plugin-observability/tests/export.rs` 使用实际 SDK in-memory exporter 验证：
 并行 DAG 层级、相同 call ID 不串链、关闭重建后的继续执行与显式重试、取消、失败终止兄弟
 工具、节点中间件顺序与拒绝、panic、非法路由、主错误与清理错误的脱敏和截断。
 这些测试离线运行，不需要供应商接口。
