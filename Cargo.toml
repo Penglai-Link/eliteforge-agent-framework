@@ -8,7 +8,7 @@ members = [
     "crates/eliteforge-agent-official-plugin-tools-mcp",
     "crates/eliteforge-agent-context",
     "crates/eliteforge-agent-memory",
-    "crates/eliteforge-agent-official-plugin-observability",
+    "crates/eliteforge-agent-official-plugin-otel",
     "crates/eliteforge-agent-official-plugin-agui",
     "crates/eliteforge-agent-official-plugin-tools-human",
     "crates/eliteforge-agent-official-plugin-storage-sqlite",

@@ -12,7 +12,7 @@
 | 4. 工具大结果 | content 和 structured 联合判断并完整转存；保留状态及显式引用；分页读取、缺失响应与宿主保留/清理流程 | `eliteforge-agent-context/tests/artifacts.rs` |
 | 5. Loop 与恢复 | 三类执行器共用组装入口；节点历史隔离；自定义节点可原子保存状态和消息；恢复沿用历史身份 | `eliteforge-agent-state-sqlite/tests/context_windows.rs`、现有工作流/DAG 恢复测试 |
 | 6. 长期记忆 | 通用读写接口、内存及 SQLite 后端、关键词检索块、默认只读的记忆工具、版本冲突及过期处理 | `eliteforge-agent-memory/tests/stores.rs`、`components.rs` |
-| 7. 观测与文档 | 组装及失败报告、最终发送统计、节点与模型 span 关联、摘要调用标识、完整组合示例 | `eliteforge-agent-official-plugin-observability/tests/export.rs`、`eliteforge-agent-memory/examples/memory_context.rs` |
+| 7. 观测与文档 | 组装及失败报告、最终发送统计、节点与模型 span 关联、摘要调用标识、完整组合示例 | `eliteforge-agent-official-plugin-otel/tests/export.rs`、`eliteforge-agent-memory/examples/memory_context.rs` |
 
 当前验证：工作区 197 项标准测试、4 项崩溃恢复场景、3 项 MCP 场景通过。
 Clippy、格式检查、文档测试和文档构建均通过。未调用真实供应商接口。

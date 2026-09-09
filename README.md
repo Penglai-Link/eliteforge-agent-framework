@@ -1,23 +1,22 @@
 # eliteforge-agent-framework
 
-EliteForge Agent Framework 是独立于宿主业务的 Rust Agent 框架。Framework 定义执行抽象，插件实现协议与基础设施；Tron 和其他宿主通过适配层接入。
+EliteForge Agent Framework 是可扩展的 Rust Agent 框架。Framework 定义执行抽象，Plugin实现基础能力，上层应用通过适配层接入。
 
 ```mermaid
 flowchart TD
-    Host[宿主：身份、权限、套餐、凭据、产品流程] --> Build[AgentBuilder：不可变服务装配]
-    Build --> Agent[Agent：运行控制、身份、取消、资源关闭]
+    Host[上层应用：身份、权限、套餐、凭据、业务流程] --> Build[AgentBuilder：智能体装配]
+    Build --> Agent[Agent：loop、事件、流式消息、工具调用]
     Agent --> Loop[ReAct / WorkflowLoop / DagWorkflowLoop / 自定义循环]
-    Loop --> Nodes[WorkflowNode 插件：ReAct、路由、转换等]
-    Loop --> Models[ModelInvoker：选择、上下文、中间件、预算、验证]
-    Loop --> Tools[ToolInvoker：参数验证、中间件、撤销、执行]
-    Models --> ModelPlugins[ModelConnectionPlugin / 自定义 ChatModel]
-    Tools --> ToolPlugins[MCP / 宿主工具 / 子 Agent]
+    Loop --> Nodes[WorkflowNode 节点插件：ReAct、路由、转换等]
+    Loop --> Models[ModelInvoker：选择、上下文、中间件、预算、模型调用]
+    Loop --> Tools[ToolInvoker：参数验证、审批、撤销、执行]
+    Tools --> ToolPlugins[MCP / 应用提供的工具 / 其他来源的工具包 / 子 Agent]
     Loop --> State[ConversationStore / StateStore / ContextReducer]
     State --> Implementations[SQLite / 模型摘要 / 附件存储]
     Agent --> Telemetry[事件与 OpenTelemetry]
 ```
 
-## 架构导航与默认装配
+## 架构导航
 
 - [快速上手](docs/quickstart.md)：按场景运行 Agent，并查看 Rust 代码。
 - [架构总览](docs/architecture.md)：分层、装配、执行链、状态和生命周期。
@@ -28,38 +27,34 @@ flowchart TD
 - [AG-UI 事件与 SSE](docs/agui.md)：注册、事件映射、运行控制与容量处理。
 - [执行约束](docs/execution-contracts.md) / [验证证据](docs/implementation-status.md)：行为保证与验证范围。
 
-| 自动装配 | 已提供，需要显式选择 |
-|---|---|
-| ReAct | WorkflowLoop、DagWorkflowLoop、自定义执行器 |
-| 空工具集、空固定上下文、NoopEvents | 静态工具、MCP、自定义上下文与事件 sink |
-| 单模型时自动固定选择、连接默认保守 token 估算 | 阶段/回退模型策略、自定义估算器 |
-| Middleware 和 Run Hook 列表为空 | TelemetryPlugin、ToolOutputOffloader、自定义拦截器与 Hook |
-| 需要 Chat 且无自定义连接时安装 GenaiPlugin | 自定义模型插件；SQLite、模型摘要、附件存储仍显式安装 |
-
-默认 ReAct 需要配置模型及存储；`SqliteStoragePlugin::new("agent.sqlite")` 提供全部 SQLite 存储。DAG 是框架已提供的执行实现，通过插件显式选择；
-SQLite 和 OTel 都不属于 Framework 的强制依赖。
 
 ## 分层与插件
+
+### 框架包
 
 | Crate | 职责 |
 | --- | --- |
 | `eliteforge-agent-plugin-kernel` | 类型服务、依赖排序、装配回滚、异步关闭及 Drop 兜底 |
 | `eliteforge-agent-core` | 公共数据格式、能力接口、插件注册契约及可复用运行支撑 |
 | `eliteforge-agent-framework` | 插件装配、Agent / 工作流调度、模型执行、取消与资源关闭 |
-| `eliteforge-agent-official-plugin-model-genai` | 固定使用 genai `0.7.0-beta.21` 的协议桥接，共享认证与多模型目录 |
 | `eliteforge-agent-sqlite-extensions` | 平台识别、sqlite-simple / sqlite-vec 原生扩展及连接初始化；独立于 Framework |
-| `eliteforge-agent-official-plugin-storage-sqlite` | 默认 SQLite 存储组合插件，统一文件与连接关闭 |
-| `eliteforge-agent-official-plugin-tools-human` | 默认 ask_user 工具，结构化提问与答案校验 |
 | `eliteforge-agent-state-sqlite` | SQLite 事务、checkpoint、session head、CAS 与租约 fencing |
-| `eliteforge-agent-official-plugin-tools-mcp` | 官方 rmcp `3.2.0` 的 stdio / Streamable HTTP 工具客户端 |
 | `eliteforge-agent-memory` | SQLite 会话、长期记忆存储、检索块和显式记忆工具 |
 | `eliteforge-agent-context` | 模型摘要及持久化复用、不可变附件、工具结果转存和分页读取 |
-| `eliteforge-agent-official-plugin-observability` | 注入式 OpenTelemetry `0.32.0` tracing / metrics |
+
+### 官方插件包
+
+| Crate | 职责 |
+| --- | --- |
+| `eliteforge-agent-official-plugin-model-genai` | 固定使用 genai `0.7.0-beta.21` 的协议桥接，共享认证与多模型目录 |
+| `eliteforge-agent-official-plugin-storage-sqlite` | 默认 SQLite 存储组合插件，统一文件与连接关闭 |
+| `eliteforge-agent-official-plugin-tools-human` | 默认 ask_user 工具，结构化提问与答案校验 |
+| `eliteforge-agent-official-plugin-tools-mcp` | 官方 rmcp `3.2.0` 的 stdio / Streamable HTTP 工具客户端 |
+| `eliteforge-agent-official-plugin-otel` | 注入式 OpenTelemetry `0.32.0` tracing / metrics |
 | `eliteforge-agent-official-plugin-agui` | AG-UI 事件转换、独立有界通道、SSE 编码 |
 
-Kernel 和 Framework 不定义 Space、Platform、`ScopeKind`、配置继承或套餐归属。宿主解析业务配置后装配运行实例。模型协议、存储驱动、遥测 exporter 可以独立替换。
-
-`provide(T)` 注册唯一服务角色，`contribute(T)` 注册同一角色的多个贡献。多个供应商通过 `ModelConnectionService` 贡献注册；唯一的 `ModelStrategyService` 负责从整个目录选择模型。唯一角色也可以由一个组合实现协调多个内部组件。
+`provide(T)` 注册唯一服务角色，`contribute(T)` 注册同一角色的多个贡献。多个供应商通过 `ModelConnectionService` 贡献注册；\
+唯一的 `ModelStrategyService` 负责从整个目录选择模型。唯一角色也可以由一个组合实现协调多个内部组件。
 
 ## 模型接入与选择
 
@@ -172,14 +167,6 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo run -p eliteforge-agent-framework --example standalone -- 19 23
 ```
 
-离线算术示例是明确的协议 fixture，读取传入的数字并经过实际工具执行，不代表语言模型推理。可跨进程运行审批示例：
-
-```sh
-cargo run -p eliteforge-agent-state-sqlite --example durable_approval -- start /tmp/approval.db 17
-# 使用上一步返回的 run_id 和 interaction.id：
-cargo run -p eliteforge-agent-state-sqlite --example durable_approval -- answer /tmp/approval.db <run-id> <interaction-id> true
-```
-
 以下示例只有手工运行时访问真实服务：
 
 ```sh
@@ -194,13 +181,6 @@ cargo run -p eliteforge-agent-official-plugin-tools-mcp --example discover
 ```
 
 验收证据和限制见 [implementation-status](docs/implementation-status.md) 与 [执行约束](docs/execution-contracts.md)。本地测试包含真实 HTTP/SSE、MCP stdio/HTTP、SDK exporter、SQLite 竞争和强制终止执行器进程。
-
-## 适配边界
-
-- genai 固定在 `=0.7.0-beta.21`。已通过本地 signed-thinking 工具历史、媒体输入、生成选项及流式协议测试；尚无真实 Anthropic 账户验证，正式版升级仍需重新校验。
-- genai 的 Developer 映射到 System；当前上游工具结果接口只接受文本，媒体工具结果明确报错。普通 resource 引用需要显式解析，工具结果中的资源引用则作为结构化文本保留。
-- MCP 插件提供工具发现和调用，不承诺覆盖所有 MCP 能力。分页、解码后结果、SSE event 和并发受配置限制；stdio/普通 HTTP JSON 的解码峰值内存仍受 SDK 实现影响。远端失败保留 `is_error`，不确定响应不自动重试。
-- 账号级限流、套餐账单、跨实例额度、凭据轮换、业务权限、RAG 数据源和分布式子任务协调由宿主或专门插件实现，不能用单次 Run 的 token 限额替代。
 
 ## Hook 与 Middleware
 

@@ -1,5 +1,5 @@
 [package]
-name = "eliteforge-agent-official-plugin-observability"
+name = "eliteforge-agent-official-plugin-otel"
 description = "Privacy-preserving OpenTelemetry middleware for eliteforge-agent-framework"
 version.workspace = true
 edition.workspace = true

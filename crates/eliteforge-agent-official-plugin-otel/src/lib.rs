@@ -40,7 +40,7 @@ use std::{
     time::Instant,
 };
 
-const SCOPE: &str = "eliteforge-agent-official-plugin-observability";
+const SCOPE: &str = "eliteforge-agent-official-plugin-otel";
 type StartSpan = dyn Fn(SpanBuilder, &Context) -> Context + Send + Sync;
 
 /// An explicitly propagated host span. Insert in `RunRequest.extensions` before

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_official_plugin_observability::*;
+use eliteforge_agent_official_plugin_otel::*;
 use eliteforge_agent_test_support::*;
 use opentelemetry::{
     Context,

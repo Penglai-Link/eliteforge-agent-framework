@@ -727,7 +727,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "eliteforge-agent-official-plugin-observability"
+name = "eliteforge-agent-official-plugin-otel"
 version = "0.1.0"
 dependencies = [
  "async-trait",

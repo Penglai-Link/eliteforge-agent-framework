@@ -249,7 +249,7 @@ cargo run -p eliteforge-agent-state-sqlite --example durable_approval -- answer 
 创建 `TelemetryPlugin` 并在 Agent 中注册。下面使用内存 exporter 验证 span 名称：
 
 ```rust
-use eliteforge_agent_official_plugin_observability::{TelemetryConfig, TelemetryPlugin};
+use eliteforge_agent_official_plugin_otel::{TelemetryConfig, TelemetryPlugin};
 use opentelemetry_sdk::{
     metrics::SdkMeterProvider,
     trace::{InMemorySpanExporter, SdkTracerProvider},
