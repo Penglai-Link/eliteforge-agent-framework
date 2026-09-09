@@ -668,6 +668,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "eliteforge-agent-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-storage-sqlite",
+ "tokio",
+]
+
+[[package]]
 name = "eliteforge-agent-memory"
 version = "0.1.0"
 dependencies = [

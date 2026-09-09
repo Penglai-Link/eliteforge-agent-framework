@@ -1,0 +1,24 @@
+[package]
+name = "eliteforge-agent-integration-tests"
+description = "Live-service integration smoke programs for EliteForge Agent Framework"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[features]
+default = []
+live-model = [
+    "dep:eliteforge-agent-framework",
+    "dep:eliteforge-agent-official-plugin-storage-sqlite",
+    "dep:tokio",
+]
+
+[dependencies]
+eliteforge-agent-framework = { path = "../crates/eliteforge-agent-framework", optional = true }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../crates/eliteforge-agent-official-plugin-storage-sqlite", optional = true }
+tokio = { workspace = true, optional = true }
+
+[[bin]]
+name = "default_model"
+path = "src/bin/default_model.rs"
+required-features = ["live-model"]

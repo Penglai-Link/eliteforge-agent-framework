@@ -40,17 +40,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Framework 默认启用 Genai，只需配置模型名和凭据：
+Framework 默认启用 Genai。真实模型冒烟程序位于独立的 [integration-tests](../integration-tests/README.md) 项目，配置模型名和凭据后显式启用 `live-model` 运行：
 
 ```sh
 export MODEL="your-model"
 export OPENAI_API_KEY="your-api-key"
-cargo run -p eliteforge-agent-framework --example default_model
+cargo run -p eliteforge-agent-integration-tests --features live-model --bin default_model
 ```
 
 代理服务可额外配置 `MODEL_ENDPOINT` 和 `MODEL_API_KEY`。其他协议通过 `MODEL_ADAPTER` 选择。需要在代码中指定时，直接 `.plugin(GenaiPlugin::new(model))`；详细配置见 [plugins.md](plugins.md)。
 
-对应源码：[default_model.rs](../crates/eliteforge-agent-framework/examples/default_model.rs)。`SqliteStoragePlugin` 会注册会话、执行状态、交互、长期记忆、摘要和附件存储；服务端通常复用同一个 Agent，进程退出时再调用 `agent.close()`。
+对应源码：[default_model.rs](../integration-tests/src/bin/default_model.rs)。`SqliteStoragePlugin` 会注册会话、执行状态、交互、长期记忆、摘要和附件存储；服务端通常复用同一个 Agent，进程退出时再调用 `agent.close()`。
 
 ## 流式输出
 

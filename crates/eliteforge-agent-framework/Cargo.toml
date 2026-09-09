@@ -26,7 +26,3 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [dev-dependencies]
 eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-official-plugin-storage-sqlite" }
 eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }
-
-[[example]]
-name = "default_model"
-required-features = ["genai"]

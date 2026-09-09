@@ -1,3 +1,4 @@
+//! Live-model smoke program; run explicitly with the live-model feature.
 //! MODEL selects the default chat model; credentials use the provider's environment variable.
 use eliteforge_agent_framework::{AgentBuilder, RunRequest};
 use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;

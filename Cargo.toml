@@ -14,6 +14,7 @@ members = [
     "crates/eliteforge-agent-official-plugin-storage-sqlite",
     "crates/eliteforge-agent-sqlite-extensions",
     "crates/eliteforge-agent-test-support",
+    "integration-tests",
 ]
 resolver = "2"
 

@@ -26,12 +26,12 @@ make install
 
 ### 2. 连接真实模型
 
-Framework 默认启用 Genai。配置模型名和凭据后运行示例：
+Framework 默认启用 Genai。真实模型验证放在与 `crates/` 平级的 [integration-tests](integration-tests/README.md) 项目中，配置模型名和凭据后显式运行：
 
 ```sh
 export MODEL="your-model"
 export OPENAI_API_KEY="your-api-key"
-cargo run -p eliteforge-agent-framework --example default_model
+cargo run -p eliteforge-agent-integration-tests --features live-model --bin default_model
 ```
 
 代理服务可额外设置 `MODEL_ENDPOINT` 和 `MODEL_API_KEY`。完整代码和其他模型协议见[快速上手](docs/quickstart.md)。
