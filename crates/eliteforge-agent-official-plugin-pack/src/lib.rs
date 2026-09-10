@@ -1,7 +1,7 @@
 //! Official plugin configuration in one AgentBuilder::plugin_pack call.
 //!
 //! The pack includes every official plugin: Genai, SQLite, human interaction,
-//! AG-UI, MCP and telemetry. Resource acquisition happens during Agent build;
+//! Skills, AG-UI, MCP and telemetry. Resource acquisition happens during Agent build;
 //! all runtime operations and plugin shutdown remain owned by the Agent.
 
 use eliteforge_agent_core::{Plugin, PluginPack};
@@ -10,6 +10,7 @@ use std::{path::PathBuf, sync::Arc};
 pub use eliteforge_agent_official_plugin_agui as agui;
 pub use eliteforge_agent_official_plugin_model_genai as model;
 pub use eliteforge_agent_official_plugin_otel as telemetry;
+pub use eliteforge_agent_official_plugin_skills as skills;
 pub use eliteforge_agent_official_plugin_storage_sqlite as storage;
 pub use eliteforge_agent_official_plugin_tools_human as human;
 pub use eliteforge_agent_official_plugin_tools_mcp as mcp;
@@ -22,6 +23,7 @@ pub struct EliteForgeOfficialPluginPack {
     model: Option<Arc<dyn Plugin>>,
     storage: storage::SqliteStoragePlugin,
     human_interaction: bool,
+    skills: Option<skills::SkillsPlugin>,
     agui: Option<agui::AgUiPlugin>,
     mcp: Vec<mcp::McpToolsPlugin>,
     telemetry: Vec<telemetry::TelemetryPlugin>,
@@ -35,6 +37,7 @@ impl EliteForgeOfficialPluginPack {
             model: Some(Arc::new(model::GenaiPlugin::default())),
             storage: storage::SqliteStoragePlugin::new(database),
             human_interaction: true,
+            skills: Some(skills::SkillsPlugin::default()),
             agui: Some(agui::AgUiPlugin::default()),
             mcp: Vec::new(),
             telemetry: Vec::new(),
@@ -62,6 +65,18 @@ impl EliteForgeOfficialPluginPack {
 
     pub fn human_interaction(mut self, enabled: bool) -> Self {
         self.human_interaction = enabled;
+        self
+    }
+
+    /// Replace the default filesystem skills provider or configure a custom one.
+    pub fn skills(mut self, plugin: skills::SkillsPlugin) -> Self {
+        self.skills = Some(plugin);
+        self
+    }
+
+    /// Omit Skills context and tools for an Agent that does not use them.
+    pub fn without_skills(mut self) -> Self {
+        self.skills = None;
         self
     }
 
@@ -115,6 +130,9 @@ impl PluginPack for EliteForgeOfficialPluginPack {
         }
         if self.human_interaction {
             plugins.push(Arc::new(human::HumanInteractionPlugin));
+        }
+        if let Some(skills) = self.skills {
+            plugins.push(Arc::new(skills));
         }
         if let Some(agui) = self.agui {
             plugins.push(Arc::new(agui));

@@ -92,7 +92,7 @@ let shop = CapabilityPackBuilder::new("shop", shop_config)
 
 ## 使用官方插件包
 
-安装 `eliteforge-agent-official-plugin-pack` 后，一个包默认装配全部官方插件：模型、SQLite、用户问答、AGUI、MCP 和 OTel。
+安装 `eliteforge-agent-official-plugin-pack` 后，一个包默认装配全部官方插件：模型、SQLite、用户问答、Skills、AGUI、MCP 和 OTel。Skills 默认按 Agent Skills 渐进式发现系统级目录与当前目录的本地技能。
 
 ```rust
 use eliteforge_agent_framework::AgentBuilder;

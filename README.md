@@ -17,7 +17,7 @@ let agent = AgentBuilder::new()
     .build().await?;
 ```
 
-官方包默认包含项目里的全部 6 个官方插件：Genai、SQLite、用户问答、AGUI、MCP 和 OTel。
+官方包默认包含项目里的全部 7 个官方插件：Genai、SQLite、用户问答、Skills、AGUI、MCP 和 OTel。
 MCP 未配置服务器时工具集为空；OTel 在构建时读取上层应用的全局 provider。
 `PluginPack` 继续用于官方和兼容的插件组合。
 
@@ -36,7 +36,7 @@ let agent = AgentBuilder::new()
 
 ```mermaid
 flowchart LR
-    Host[上层应用] --> Builder[AgentBuilder]
+    Application[上层应用] --> Builder[AgentBuilder]
     Builder --> Agent[Agent]
     Agent --> Loop[ReAct / Workflow / DAG]
     Loop --> Model[模型]
@@ -77,7 +77,7 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 | 模型 | 多供应商、多连接与模型选择 | ✅ 已支持 | 多连接选择；Chat Completions、Responses、原生 Gemini 与 Embedding |
 | 内容 | 多模态输入与结构化输出 | ✅ 已支持 | 文本、图片等内容块、结构化回复和大型结果引用 |
 | 工具 | 工具调用、Schema 校验与并发 | ✅ 已支持 | 调用前参数校验、显式安全的并发、撤销、取消和结果持久化 |
-| 工具 | 工作区文件、文本补丁、目录和代码搜索 | ✅ 已支持 | 可选工作区能力包提供 `fs_*` 与 `search_*` 工具；所有路径限制在上层应用配置的根目录内 |
+| 工具 | 目录范围文件、文本补丁、目录和代码搜索 | ✅ 已支持 | 可选文件系统能力包提供 `fs_*` 与 `search_*` 工具；所有路径限制在上层应用配置的根目录内 |
 | 工具 | 系统命令执行（Linux、macOS、Windows） | ✅ 已支持 | 可选通用能力包提供 `system_exec`；能力包显式安装后可直接执行程序，也可按上层应用配置限制程序名；不隐式调用 Shell |
 | 工具 | 编辑器工具 | 🧩 可扩展 | 由上层应用的 `ToolProvider` 或 MCP Server 提供 |
 | 工具 | Web 搜索、抓取与浏览器自动化 | 🧩 可扩展 | 由上层应用工具或 MCP Server 接入 |
@@ -94,13 +94,13 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 | 集成 | AG-UI 事件协议 | ✅ 已支持 | SSE、文本、推理、工具、状态、活动和交互恢复事件 |
 | 扩展 | Plugin、PluginPack 与能力包 | ✅ 已支持 | 依赖排序、回滚、异步关闭、官方插件组合和 `#[capability]` 自动装配 |
 | 扩展 | Middleware、Hook 与自定义执行器 | ✅ 已支持 | Run、模型、工具、节点中间件；生命周期 Hook；自定义 `AgentLoop` |
-| 扩展 | Skills 系统 | — 未提供 | 可用 Plugin、CapabilityPack 或上层应用配置实现，尚无 Skills 发现与加载规范 |
+| 扩展 | Skills 系统 | ✅ 已支持 | 官方文件系统插件兼容 Agent Skills：默认发现 `~/.agents/skills` 与当前目录 `.agents/skills`，元数据进入上下文，模型按需读取 `SKILL.md` 和资源 |
 | 扩展 | 插件市场与在线安装 | — 未提供 | 当前提供 crate 与插件组合 API，未提供市场或安装器 |
 | 多 Agent | 子 Agent / 专家 Agent | 🧩 可扩展 | 具备父子执行和预算基础；Agent 定义、路由和注册表由上层应用实现 |
 | 多 Agent | 后台执行、队列与 Worktree 隔离 | 🏠 上层应用负责 | 需要部署队列、进程管理和 Git 工作树管理 |
 | 多 Agent | Agent Team 协作 | 🧩 可扩展 | 可用 DAG、子执行和事件接口编排；未提供内置团队协议 |
 | 产品接口 | 终端 UI、REPL、Slash Commands、Headless HTTP | 🏠 上层应用负责 | Framework 提供运行时和事件；UI、CLI、HTTP 与命令路由由上层应用构建 |
-| 产品接口 | 文件历史、Diff 与 Rewind | 🏠 上层应用负责 | 可作为工具或存储能力接入；框架不管理 Git 或工作区文件 |
+| 产品接口 | 文件历史、Diff 与 Rewind | 🏠 上层应用负责 | 可作为工具或存储能力接入；框架不管理 Git 或目录文件 |
 | 配置 | 项目级 / 用户级配置 Profile | 🏠 上层应用负责 | AgentBuilder 接收已解析配置；读取、合并和安全存储由上层应用负责 |
 | 可观测 | OpenTelemetry、事件与指标 | ✅ 已支持 | 运行、节点、模型和工具 span；指标、错误事件和可注入 exporter |
 
@@ -117,6 +117,7 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 | `eliteforge-agent-framework` | Agent 装配、循环调度、模型和工具执行 |
 | `eliteforge-agent-core` | 公共类型、能力接口、CapabilityPack API 和 Plugin 契约 |
 | `eliteforge-agent-capability-tools` | 可选文件系统读写、搜索、文本修改，以及独立的通用跨平台系统命令能力包 |
+| `eliteforge-agent-official-plugin-skills` | Agent Skills 标准文件系统发现、渐进式加载和可替换 Provider |
 | `eliteforge-agent-plugin-kernel` | 服务注册、依赖排序和资源关闭 |
 | `eliteforge-agent-official-plugin-pack` | 官方插件组合，一次配置到 Agent |
 | `eliteforge-agent-official-plugin-*` | Genai、SQLite、MCP、AG-UI、OTel 等官方实现 |
@@ -127,6 +128,7 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 - [架构总览](docs/architecture.md)：分层、装配、执行链和生命周期。
 - [插件与扩展开发指南](docs/plugins.md)：引入依赖、实现 Provider、按业务场景选择扩展点。
 - [能力包与自动装配](docs/capability-packs.md)：声明能力、显式选包、配置工厂和依赖规则。
+- [Skills](docs/skills.md)：目录约定、渐进式加载、技能选择和自定义 Provider。
 - [扩展点参考](docs/plugin-extension-reference.md)：接口、注册类型、调用时机与多实例规则。
 - [模型插件](docs/model-plugins.md)：Genai 配置、协议、模型选择与多模态扩展。
 - [DAG 工作流](docs/dag-workflows.md)：节点、并行、分支和恢复。

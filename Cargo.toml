@@ -12,6 +12,7 @@ members = [
     "crates/eliteforge-agent-context",
     "crates/eliteforge-agent-memory",
     "crates/eliteforge-agent-official-plugin-otel",
+    "crates/eliteforge-agent-official-plugin-skills",
     "crates/eliteforge-agent-official-plugin-agui",
     "crates/eliteforge-agent-official-plugin-tools-human",
     "crates/eliteforge-agent-official-plugin-storage-sqlite",

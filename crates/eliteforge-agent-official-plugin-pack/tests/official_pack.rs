@@ -56,8 +56,11 @@ async fn collect(agent: &Agent, request: RunRequest) -> (RunResult, Vec<Value>) 
 async fn official_pack_supports_agent_output_questions_and_persistent_resume() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("agent.sqlite");
-    let pack =
-        || EliteForgeOfficialPluginPack::new(&path).model(ChatModelPlugin::new(AskThenReply));
+    let pack = || {
+        EliteForgeOfficialPluginPack::new(&path)
+            .without_skills()
+            .model(ChatModelPlugin::new(AskThenReply))
+    };
     let builder = AgentBuilder::new()
         .default_models(false)
         .plugin_pack(pack());
@@ -156,6 +159,33 @@ async fn pack_installs_explicit_genai_even_when_framework_auto_models_are_disabl
     assert!(agent.close().await.is_success());
 }
 
+#[test]
+fn official_pack_registers_skills_by_default_and_can_disable_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let plugin_ids = |pack: EliteForgeOfficialPluginPack| {
+        pack.into_plugins()
+            .into_iter()
+            .map(|plugin| plugin.id().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    assert!(
+        plugin_ids(EliteForgeOfficialPluginPack::new(
+            directory.path().join("default.sqlite"),
+        ))
+        .iter()
+        .any(|id| id == "skills.default")
+    );
+    assert!(
+        !plugin_ids(
+            EliteForgeOfficialPluginPack::new(directory.path().join("disabled.sqlite"))
+                .without_skills(),
+        )
+        .iter()
+        .any(|id| id == "skills.default")
+    );
+}
+
 struct PlainReply;
 #[async_trait]
 impl ChatModel for PlainReply {
@@ -182,6 +212,7 @@ async fn defaults_can_be_explicitly_replaced_or_disabled() {
                 .without_model()
                 .without_agui()
                 .human_interaction(false)
+                .without_skills()
                 .storage(SqliteStoragePlugin::new(&replacement)),
         )
         .plugin(ChatModelPlugin::new(PlainReply))

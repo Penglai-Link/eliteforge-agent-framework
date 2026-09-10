@@ -17,7 +17,8 @@
 | 知道业务需求，不知道该实现哪个接口 | [按场景选择扩展点](#按场景选择扩展点) |
 | 想理解插件怎样注册、生效和关闭 | [基本概念](#基本概念) → [依赖与生命周期](#依赖与生命周期) |
 | 想一次配置业务能力、官方插件或已有组合 | [能力包](#能力包) → [插件包](#插件包) |
-| 想启用框架提供的文件、搜索、补丁或系统命令工具 | [能力包](#能力包) → [工作区工具能力包](capability-packs.md#框架提供的工作区工具能力包) |
+| 想启用框架提供的文件、搜索、补丁或系统命令工具 | [能力包](#能力包) → [文件系统与系统工具能力包](capability-packs.md#框架提供的文件系统与系统工具能力包) |
+| 想启用或替换默认 Skills | [Skills](skills.md) |
 | 想知道多个 Provider 怎样进入 Agent | [构建时如何收集能力](#构建时如何收集能力) |
 | 想判断多个插件能不能共存 | [多个插件与配置替换](#多个插件与配置替换) |
 | 已选好接口，需要核对注册类型和调用时机 | [扩展点参考](plugin-extension-reference.md) |
@@ -744,18 +745,19 @@ impl PluginPack for ShopContextPack {
 
 ### 官方插件包
 
-`EliteForgeOfficialPluginPack` 默认安装当前全部 6 个官方插件：
+`EliteForgeOfficialPluginPack` 默认安装当前全部 7 个官方插件：
 
 | 插件 | 默认行为 | 修改配置 |
 |---|---|---|
 | Genai | 安装时读取 `MODEL` 等模型环境配置 | `.model(plugin)`；支持自定义模型插件 |
 | SQLite | 显式路径下保存会话、状态、交互、记忆、摘要、附件 | `.storage(SqliteStoragePlugin)` |
 | 用户问答 | 注册 `ask_user` 工具 | `.human_interaction(false)` 可关闭 |
+| Skills | 发现系统级与当前目录的 Agent Skills；元数据进入上下文，模型按需加载详情与资源 | `.skills(SkillsPlugin)` 替换配置；`.without_skills()` 可关闭 |
 | AGUI | 每次运行准备 AGUI 输出 | `.agui(plugin)` 修改配置；`.without_agui()` 可关闭 |
 | MCP | 注册 ID 为 `tools.mcp` 的空工具源 | `.mcp(plugin)` 配置服务器；未配置时查询返回空列表 |
 | OTel | 构建时读取上层应用全局 tracer/meter provider | `.telemetry(plugin)` 替换默认 provider；没有 exporter 时不导出 |
 
-`model`、`storage`、`human`、`agui`、`mcp`、`telemetry` 模块从官方包重新导出相应插件类型。
+`model`、`storage`、`human`、`skills`、`agui`、`mcp`、`telemetry` 模块从官方包重新导出相应插件类型。
 具体配置例子见[快速上手](quickstart.md#使用官方插件包)；模型环境变量见[模型插件](model-plugins.md#默认装配)。
 `.without_model()` 只移除包内模型；Framework 的自动补充开关仍由 `.default_models(false)` 控制。
 

@@ -96,6 +96,7 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 | 接口与主要方法 | 注册适配器 → 服务类型 | 调用时机 | 多个实现及注意事项 |
 |---|---|---|---|
 | `ContextProvider::context` | `ContextPlugin` → `contribute(ContextService)` | 内置执行器准备一轮模型指令时 | 多个结果合并；只返回 System/Developer 指令 |
+| `SkillProvider::catalog / load / read_resource / release` | `SkillsPlugin` 同时贡献上下文、工具和运行中间件 | 每个逻辑运行先发现轻量元数据；模型再按需读取技能正文和资源；结束或取消时释放运行级快照 | 一个 SkillsPlugin 对应一个 Provider；上层应用用 SkillsPlugin::new 替换文件系统来源 |
 | `ContextContributor::block_id / contribute` | `ContextContributorPlugin` → `contribute(ContextContributorService)` | 默认组装器准备自定义上下文块时 | 多个来源；块 ID 唯一，必须配套显式布局和配额 |
 | `ContextLayout` 配置 | `ContextLayoutPlugin` → `provide(ContextLayoutService)` | 构建时校验，组装时决定顺序与配额 | 一个布局，包含指令、历史和每个自定义来源 |
 | `ContextBudgetPolicy::allocate` | `ContextBudgetPolicyPlugin` → `provide(ContextBudgetPolicyService)` | 组装器为各块分配预算时 | 一个全局策略 |

@@ -1,6 +1,6 @@
 # Framework execution contracts
 
-This framework is independent of any host application. Hosts resolve identity,
+This framework is independent of any upper application. Upper applications resolve identity,
 permissions, subscription ownership and business configuration before assembling
 an agent. Tron is one consumer, not a compatibility target.
 
@@ -8,7 +8,7 @@ an agent. Tron is one consumer, not a compatibility target.
 
 ```mermaid
 flowchart TD
-    Host[Host: identity, policy, billing, UI] --> Framework
+    Application[Upper application: identity, policy, billing, UI] --> Framework
     Framework[Framework: execution and interoperability contracts]
     Kernel[Kernel: services, dependencies, lifecycle] --> Plugins
     Plugins[Providers: model, MCP, state, compression, telemetry] --> Framework
@@ -17,7 +17,7 @@ flowchart TD
 The core defines messages, model/tool invocations, context composition, run state,
 interactions and events. Plugins implement these contracts. Execution strategies
 compose the same invokers; they must not bypass validation, cancellation, budgets
-or tool policy. There are no host workspace or scope types in the core.
+or tool policy. There are no upper-application workspace or scope types in the core.
 
 ## Invariants
 
@@ -68,5 +68,5 @@ must link actual tests for every item before the work is considered complete.
 | Observability | Structured tracing and export integration without recording sensitive prompts by default; collected telemetry and lifecycle tests |
 
 Unit and local protocol tests cannot establish live provider compatibility. Live
-Anthropic testing is unavailable until the host supplies an account. That limit
+Anthropic testing is unavailable until the upper application supplies an account. That limit
 must remain explicit and must not be disguised as a passing live integration.

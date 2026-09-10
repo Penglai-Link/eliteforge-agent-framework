@@ -9,6 +9,7 @@ eliteforge-agent-core = { path = "../eliteforge-agent-core" }
 eliteforge-agent-official-plugin-model-genai = { path = "../eliteforge-agent-official-plugin-model-genai" }
 eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-official-plugin-storage-sqlite" }
 eliteforge-agent-official-plugin-tools-human = { path = "../eliteforge-agent-official-plugin-tools-human" }
+eliteforge-agent-official-plugin-skills = { path = "../eliteforge-agent-official-plugin-skills" }
 eliteforge-agent-official-plugin-agui = { path = "../eliteforge-agent-official-plugin-agui" }
 eliteforge-agent-official-plugin-tools-mcp = { path = "../eliteforge-agent-official-plugin-tools-mcp" }
 eliteforge-agent-official-plugin-otel = { path = "../eliteforge-agent-official-plugin-otel" }

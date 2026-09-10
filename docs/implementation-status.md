@@ -6,9 +6,9 @@ no Tron compatibility rules were added to the execution contracts.
 
 ## Workspace
 
-- Worktree: `/Users/clouds3n/Coding/open-source/ai/agent-framework`
-- Branch: `feature/clouds3n/plugin-capability-refactor`
-- Base commit: `a669c71`; changes are in the working tree and have not been committed.
+- Repository: `eliteforge-agent-framework`
+- Branch: `main`
+- Base commit: `3e56230`; the current Skills delivery is in the working tree.
 - No Tron files, Git branches, commits or remote state were changed.
 - Validation environment: macOS arm64, Rust/Cargo 1.95.0.
 
@@ -27,6 +27,7 @@ no Tron compatibility rules were added to the execution contracts.
 | Resource lifecycle | Async reverse-order shutdown, sync Drop fallback, bounded workflow lease release, installation rollback; execution and cleanup errors retained together; cancelled close waiter cannot abandon cleanup | `eliteforge-agent-plugin-kernel/tests/async_shutdown.rs`; `eliteforge-agent-plugin-kernel/tests/container.rs`; `eliteforge-agent-framework/tests/async_lifecycle.rs`; release-fault tests in `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Tools and run control | Schema before effects; bounded opt-in ReAct parallelism; cloneable RunControl independent of result waiting, owner-drop cancellation, tool revocation at dispatch; post-effect middleware failure remains indeterminate | `eliteforge-agent-framework/tests/runtime_control.rs`; `eliteforge-agent-framework/tests/model_and_tool_controls.rs`; `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Filesystem and system-command capability packs | Explicit directory-confined read/search and write/patch packs; an independent cross-platform system-command pack; absolute paths, `..`, and symlink traversal are rejected only for filesystem tools | `eliteforge-agent-capability-tools/tests/capability_packs.rs` |
+| Agent Skills | Core declares storage-neutral `SkillProvider`; the official filesystem plugin discovers system-level and current-directory Agent Skills, applies upper-application selection, injects metadata-only context, and exposes progressive `skill_load` / `skill_read_resource` tools; Unicode names and approved resource reads remain valid across durable resume | `eliteforge-agent-official-plugin-skills/tests/skills.rs` |
 | Independent execution scenarios | Simple chat, tools, configurable stages, input, approval, nested child Agents through real invokers | `eliteforge-agent-framework/tests/host_contract.rs`; `eliteforge-agent-framework/tests/delegation.rs`; `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Child execution | Root/parent identity, inherited limits, upfront allowance; rejected/interrupted admission refunds local budget/count; confirmed reservations corrected after rejected dispatch; unknown writes remain conservative | `eliteforge-agent-framework/tests/delegation.rs`; admission journal fault tests in `eliteforge-agent-framework/src/tests.rs`; durable child budget/count test in `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Persistence | Atomic checkpoint/transcript/journal; session-head predecessor checks, CAS revisions; stable fencing identity across renewals with authoritative store expiry; bounded worker admission, WAL and FULL synchronous mode | `eliteforge-agent-state-sqlite/tests/store.rs`; `eliteforge-agent-state-sqlite/src/lib.rs` cancellation test |
@@ -40,31 +41,33 @@ no Tron compatibility rules were added to the execution contracts.
 | Event semantics | Distinct live execution-attempt and durable-journal scopes; serialized publication; workflow steering messages and events committed together before live publication, including final replies; bounded normal-event drain followed by a separately bounded terminal attempt per sink | `eliteforge-agent-framework/tests/execution_contracts.rs`; steering/replay/failure and acquired-checkpoint/event-scope tests in `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Agent plugin operations | Plugins configure services and per-run output factories; Agent owns execution, controls, model operations, storage requests and shutdown admission; typed custom operations and output ownership checks | `eliteforge-agent-framework/tests/agent_operations.rs`; storage bundle and MCP transport tests |
 | Capability packs | Core exports `CapabilityPack` / builder and `#[capability]`; selected packs and explicit children resolve static descriptors, preflight IDs/dependencies/cycles, create sync configured instances in stable order, share declared instances, and enter the existing Plugin lifecycle | `eliteforge-agent-framework/tests/capability_packs.rs`; cross-crate declarations in `eliteforge-agent-capability-test-fixture/src/lib.rs`; resolver unit coverage in `eliteforge-agent-core/src/capability_packs.rs` |
-| Plugin packs | AgentBuilder::plugin_pack expands custom, nested and official packs into one dependency graph; official defaults register all six plugins: Genai, SQLite, human tools, AG-UI, empty MCP and telemetry using host global providers | `eliteforge-agent-framework/tests/plugin_packs.rs`; `eliteforge-agent-official-plugin-pack/tests/official_pack.rs`; `tests/global_telemetry.rs`; offline `examples/official_pack.rs` |
+| Plugin packs | AgentBuilder::plugin_pack expands custom, nested and official packs into one dependency graph; official defaults register seven plugins: Genai, SQLite, human tools, Skills, AG-UI, empty MCP and telemetry using upper-application global providers | `eliteforge-agent-framework/tests/plugin_packs.rs`; `eliteforge-agent-official-plugin-pack/tests/official_pack.rs`; `eliteforge-agent-official-plugin-skills/tests/skills.rs`; `tests/global_telemetry.rs`; offline `examples/official_pack.rs` |
 | AG-UI output | Community ag-ui 0.3.0 event types and SSE; ordered bounded handoff independent of ordinary observer backlog; text/reasoning/tool/step/state/activity/custom events; distinct model/tool invocation identities, offloaded result references, tool-bound approval/denial across executor restart, final-response deduplication and serialized admission checks; explicit overflow/size/order errors | 22 SDK-client and lifecycle cases in `eliteforge-agent-official-plugin-agui/tests/protocol.rs`; offline `eliteforge-agent-official-plugin-agui/examples/sse.rs` |
 | genai | Exact `=0.7.0-beta.21`, real local HTTP/SSE, shared auth, model discovery, tools, signed-thinking continuation, media input and generation options | `eliteforge-agent-official-plugin-model-genai/tests/protocol.rs` |
 | MCP | Official rmcp 3.2.0 stdio and Streamable HTTP, bounded discovery/cursor detection, typed errors/results, protocol cancellation on cancel/drop, owned/shared close | `eliteforge-agent-official-plugin-tools-mcp/tests/transport.rs` launches actual SDK services over HTTP and in a child process |
 | Conversation storage and windows | SQLite conversations, branch/generation identity, versioned atomic batches; independent context quotas and explicit layout; no source-history trimming | `eliteforge-agent-framework/tests/context_windows.rs`; `eliteforge-agent-memory/tests/stores.rs` |
-| Long-term memory | Versioned/expiring records, explicit writes, bounded keyword search, fresh context retrieval, host-bound tool namespace | `eliteforge-agent-memory/tests/stores.rs`; `eliteforge-agent-memory/tests/components.rs` |
+| Long-term memory | Versioned/expiring records, explicit writes, bounded keyword search, fresh context retrieval, upper-application-scoped tool namespace | `eliteforge-agent-memory/tests/stores.rs`; `eliteforge-agent-memory/tests/components.rs` |
 | Summary persistence | Model-aware packing, SQLite CAS store, range fingerprints, incremental reuse after reopen, branch/policy isolation | `eliteforge-agent-context/tests/compression.rs`; `summary_store.rs`; `eliteforge-agent-memory/tests/components.rs` |
 | Node conversation records | Atomic node-state and interaction-batch recording, stable history across resume, explicit layout across all three loops | `eliteforge-agent-state-sqlite/tests/context_windows.rs` |
 | Compression | Model-backed auxiliary calls use the same middleware/budget journal, silent summary deltas, preserved latest signed/tool turn, explicit failure on unusable summaries; raw history unchanged | `eliteforge-agent-context/tests/compression.rs` covers both ReAct and SQLite Workflow projections |
 | Artifacts | Directory capability, canonical random IDs, atomic immutable publication, fsync, bounded byte ranges, cancellation, symlink rejection, combined content/structured offload, explicit result reference, post-publication/history-failure reconciliation | `eliteforge-agent-context/src/artifact.rs`; `eliteforge-agent-context/tests/artifacts.rs` |
-| OpenTelemetry | Injected providers; run/node/model/tool spans, node-scoped model/tool links, persisted attempt identities across restore/retry, bounded redacted error events, duration/usage/error/cancellation metrics; inline assembly/failure/dispatch diagnostics while spans are alive; no payloads by default; providers remain host-owned | `eliteforge-agent-official-plugin-otel/tests/export.rs` uses actual SDK in-memory exporters |
+| OpenTelemetry | Injected providers; run/node/model/tool spans, node-scoped model/tool links, persisted attempt identities across restore/retry, bounded redacted error events, duration/usage/error/cancellation metrics; inline assembly/failure/dispatch diagnostics while spans are alive; no payloads by default; providers remain owned by the upper application | `eliteforge-agent-official-plugin-otel/tests/export.rs` uses actual SDK in-memory exporters |
 
-## Current capability-pack verification
+## Current verification
 
 - `cargo test --offline --locked -p eliteforge-agent-capability-macros`: 8 passed, 1 ignored.
 - `cargo test --offline --locked -p eliteforge-agent-core`: 6 passed.
 - `cargo test --offline --locked -p eliteforge-agent-framework --test capability_packs`: 15 passed.
 - `cargo test --offline -p eliteforge-agent-capability-tools`: 6 passed.
+- `cargo test --offline --locked -p eliteforge-agent-official-plugin-skills`: 22 passed, covering standard frontmatter (including Unicode names), system/local precedence, malformed diagnostics, metadata-only discovery, context-wrapper escaping, progressive loading, selection, listed-resource enforcement, resource limits and path rejection, symlink handling, cache/change detection, custom providers, ReAct, ToolPolicy, cancellation, concurrent execution snapshots, and approved resource reads across in-process and rebuilt-Agent resume without bypassing `skill_load`.
+- `cargo test --offline --locked -p eliteforge-agent-official-plugin-pack`: 5 passed, including default Skills registration and explicit disabling.
 - `make test`: passed, including workspace all-target tests, documentation tests and the Framework
   no-default-features suite.
 - `make lint`: passed, including format check, Clippy with `-D warnings`, compilation and Rustdoc.
 - `git diff --check`: passed.
 - `make test ALL_FEATURES=true`: blocked by an existing SHA-256 manifest mismatch for
-  `sqlite-simple/hmm_model.utf8`. That resource was not changed by the capability-pack work;
-  this is an environment/baseline limitation, not a capability-pack test failure.
+  `sqlite-simple/v0.7.1/dict/hmm_model.utf8`. That resource is outside the Skills delivery and
+  was not modified; this is an environment/baseline limitation, not a Skills test failure.
 
 The cross-crate suite covers selected and unselected packs, explicit children, stable dependency order,
 shared multi-interface instances, per-Agent isolation, pre-factory rejection of ID/dependency/cycle
@@ -80,6 +83,11 @@ Core passed the version-requirement check but could not find the macro package i
 `panamax-sparse` replacement index while offline. No package was uploaded. End-to-end Core
 packaging still requires these dependency versions to be available in the target registry.
 
+The same registry condition currently blocks `cargo package --offline --allow-dirty --no-verify`
+for `eliteforge-agent-official-plugin-skills`: Cargo cannot resolve the published
+`eliteforge-agent-core` package from `panamax-sparse`. The normal locked workspace build uses the
+local path dependency and passes; no Skills archive was uploaded.
+
 ## Historical baseline verification
 
 The following evidence belongs to the earlier baseline delivery and predates the current
@@ -93,7 +101,8 @@ section above for this change's current validation result.
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: passed.
 - `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps`: passed.
 - `cargo test --workspace --doc --all-features`: passed; there are currently no Rust doctest cases.
-- External dependency versions and checksums in Cargo.lock are unchanged.
+- This delivery adds the Skills crate plus `serde_norway` and `unsafe-libyaml-norway` to
+  Cargo.lock; no existing package version or checksum was rewritten.
 - Cargo checks run from `/tmp` with a temporary `CARGO_HOME` that reuses the local cache. This avoids the unavailable configured mirror without changing repository or global Cargo configuration.
 - `git diff --check` and an additional source/document whitespace scan cover tracked and new files. Local Markdown file links are checked after moving the public contracts into Core.
 
@@ -102,7 +111,7 @@ section above for this change's current validation result.
 - SQLite implementations live in component and plugin crates; the independent eliteforge-agent-sqlite-extensions package handles optional native extensions. Core owns the storage and context contracts.
 - Native extension execution was verified on macOS arm64 only. Other resources were checksum-verified; OS/CPU/ABI mapping tests do not establish runtime compatibility on those systems. Default storage does not require either extension.
 - Long-term memory defaults to keyword matching, with no automatic fact extraction, vector search or retrieval-content cache.
-- Artifact retention defaults to indefinite storage. The host collects authoritative references and schedules deletion only after quiescing writes and reconciling unknown results; no background GC is implied.
+- Artifact retention defaults to indefinite storage. The upper application collects authoritative references and schedules deletion only after quiescing writes and reconciling unknown results; no background GC is implied.
 - The `memory_context` example compiles; it requires a real configured API to run and was not sent to a live provider.
 - No live Anthropic account was used. Local signed-thinking fixtures demonstrate
   adapter serialization and parsing, not live-provider certification.
@@ -114,15 +123,15 @@ section above for this change's current validation result.
   It has no cyclic edges or distributed worker queue. Custom node implementations
   are trusted cooperative code and must enforce the advertised invocation contracts.
 - A Started external call is not automatically repeated. Exactly-once effects
-  require external idempotency or explicit host reconciliation.
+require external idempotency or explicit upper-application reconciliation.
 - `run_child` creates a new execution and rejects implicit reparenting/resume of
   existing durable child executions. Cross-process child orchestration remains
-  an explicit host responsibility, not a hidden in-process guarantee.
+an explicit upper-application responsibility, not a hidden in-process guarantee.
 - The reference compressor uses conservative estimates; tokenizer-specific
   custom reducers can implement ContextReducer. A summary can lose semantic
   detail, so raw history remains available and is never replaced by the summary.
 - Artifact offload persists the complete content and structured result, retaining status,
-  interaction effects and an explicit result reference inline. The host owns artifact authorization and retention.
+interaction effects and an explicit result reference inline. The upper application owns artifact authorization and retention.
 - MCP supports tool discovery/calls, not the entire MCP feature set. Decoded
   results and SSE event sizes are bounded; stdio/plain HTTP JSON decoding peak
   memory depends on the SDK. No handwritten MCP protocol engine was introduced.
@@ -135,7 +144,7 @@ section above for this change's current validation result.
   HTTP endpoints, request authentication, persistent replay, client-side tools,
   history import and merged SUBAGENT streams are outside this adapter. Existing
   workflow journals cannot reconstruct a complete token stream.
-- Explicitly shared SQLite, MCP and telemetry infrastructure is host-owned. The SQLite bundle
+- Explicitly shared SQLite, MCP and telemetry infrastructure is owned by the upper application. The SQLite bundle
   owns and closes the connections it creates. This work does
   not claim account-level subscription billing, cross-node quota coordination,
   arbitrary plugin sandboxing, lowest-Rust-version certification or load certification.
@@ -147,5 +156,5 @@ section above for this change's current validation result.
 The execution invariants and acceptance scope are retained in [execution-contracts.md](execution-contracts.md). Current layers and defaults are described in [architecture.md](architecture.md), with the extension inventory in [plugins.md](plugins.md).
 
 - Genai registers Chat and text Embedding only. The other typed model operations have tested runtime dispatch and extension contracts; applications supply the corresponding provider plugins.
-- EmbeddingSpace validates configured identity, not the remote weights behind mutable provider aliases. The host pins the model revision and applies the declared preprocessing.
+- EmbeddingSpace validates configured identity, not the remote weights behind mutable provider aliases. The upper application pins the model revision and applies the declared preprocessing.
 - Independent operation timeout/cancellation drops local invocation futures. Remote jobs may continue; video cancellation is explicit and requires provider support. Image/video/speech billing is not represented as Chat token usage.

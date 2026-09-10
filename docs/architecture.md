@@ -1,7 +1,7 @@
 # Framework 架构
 
 `eliteforge-agent-core` 定义公共数据、能力契约和可复用运行支撑；`eliteforge-agent-framework` 负责装配、Agent 与工作流执行、模型调度和资源关闭。
-`eliteforge-agent-plugin-kernel` 负责插件装配与资源生命周期。模型协议、存储、MCP、用户交互和遥测由配套插件提供。
+`eliteforge-agent-plugin-kernel` 负责插件装配与资源生命周期。模型协议、存储、MCP、用户交互、Skills 和遥测由配套插件提供。
 
 本文只说明整体架构和运行语义。扩展点、默认行为以及现有实现见[Plugin 与扩展点](plugins.md)；可运行的场景和代码见[快速上手](quickstart.md)。
 
@@ -23,8 +23,9 @@ flowchart TD
     Loop --> ToolInvoker[ToolInvoker\n参数校验、撤销、执行]
     Loop --> State[状态与会话\n完整聊天记录 / 任务进度 / 交互]
     ContextPipeline --> ChatModel[ChatModel\n协议适配]
+    ContextPipeline --> Skills[SkillsPlugin\n元数据与按需读取]
     ModelSelection -.选择 connection/model.-> ChatModel
-    ToolInvoker --> ToolProvider[ToolProvider\n上层应用工具 / 工作区能力包 / MCP]
+    ToolInvoker --> ToolProvider[ToolProvider\n上层应用工具 / 文件系统能力包 / MCP]
     State --> Storage[存储插件\nSQLite 或自定义实现]
     Agent --> Events[EventSink\n实时事件与遥测]
     Builder --> CapabilityResolver[能力包解析\n筛选、预校验、factory]
@@ -44,9 +45,9 @@ flowchart TD
 | `eliteforge-agent-core` | 模型/工具接口、请求/响应、上下文、状态、交互、能力包描述与宏导出 | 不依赖具体插件或 Framework |
 | `eliteforge-agent-framework` | Agent、执行循环、能力包解析、服务装配、模型调度和运行控制 | 不包含供应商协议实现 |
 | `eliteforge-agent-capability-tools` | 可选的文件系统读写、搜索、文本修改，以及独立的通用跨平台系统命令工具 | 不提供进程或文件系统沙箱，不定义上层应用的授权策略 |
-| 配套插件 | 实现模型协议、存储、工具、上下文、摘要、附件、AG-UI 和遥测 | 不替上层应用管理业务权限和订阅 |
+| 配套插件 | 实现模型协议、存储、工具、Skills、上下文、摘要、附件、AG-UI 和遥测 | 不替上层应用管理业务权限和订阅 |
 
-Framework 的默认 `genai` feature 依赖 `eliteforge-agent-official-plugin-model-genai`；该插件仅依赖 Core。关闭默认 feature 可移除 Genai。SQLite、MCP 和 OpenTelemetry 仍由应用显式安装；工作区工具也需要应用显式选择对应能力包。DAG 使用 `petgraph` 校验拓扑，使用 Tokio 执行节点。
+Framework 的默认 `genai` feature 依赖 `eliteforge-agent-official-plugin-model-genai`；该插件仅依赖 Core。关闭默认 feature 可移除 Genai。SQLite、MCP 和 OpenTelemetry 仍由应用显式安装；文件系统工具也需要应用显式选择对应能力包。DAG 使用 `petgraph` 校验拓扑，使用 Tokio 执行节点。
 上层应用通过适配层接入 Framework，上层应用自己的业务类型留在上层应用内。
 
 ## 服务装配

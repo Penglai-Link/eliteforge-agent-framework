@@ -125,7 +125,7 @@ payment.tool 的 factory 不运行。
 | 典型用途 | Shop、订单、审计等业务能力 | `EliteForgeOfficialPluginPack` 和兼容的业务组合 |
 
 `PluginPack` 保持兼容，现有 `.plugin_pack(...)` 代码不需要迁移。首版也不会把
-`EliteForgeOfficialPluginPack` 迁为能力包；它仍是官方模型、存储、交互、AG-UI、MCP 和
+`EliteForgeOfficialPluginPack` 迁为能力包；它仍是官方模型、存储、交互、Skills、AG-UI、MCP 和
 遥测插件的组合入口。
 
 ## 框架提供的文件系统与系统工具能力包
