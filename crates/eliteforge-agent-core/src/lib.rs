@@ -1,4 +1,6 @@
 //! Shared Agent contracts and portable registration/context primitives.
+extern crate self as eliteforge_agent_core;
+
 pub mod budget;
 pub mod capability_packs;
 pub mod content;
@@ -26,7 +28,8 @@ pub use context::*;
 pub use conversation::*;
 pub use dag::*;
 pub use eliteforge_agent_plugin_kernel::{
-    Plugin, PluginContext, PluginError, PluginPack, PluginPackBuilder,
+    ExtensionMultiplicity, ExtensionPlugin, ExtensionPoint, Plugin, PluginContext, PluginError,
+    PluginPack, PluginPackBuilder, PluginReadyContext,
 };
 pub use errors::*;
 pub use hooks::*;
@@ -50,7 +53,9 @@ pub mod __private {
     pub use inventory;
 }
 
-pub use eliteforge_agent_capability_macros::capability;
+pub use eliteforge_agent_capability_macros::{
+    capability, capability_factory, capability_skills, capability_skills_build, extension_point,
+};
 
 mod capabilities;
 pub use capabilities::*;

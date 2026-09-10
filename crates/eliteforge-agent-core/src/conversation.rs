@@ -81,6 +81,7 @@ pub enum ConversationOutcome {
     Failed,
 }
 
+#[crate::extension_point(single, adapter = crate::ConversationStorePlugin)]
 #[async_trait]
 pub trait ConversationStore: Send + Sync {
     async fn open(

@@ -57,9 +57,13 @@ impl MemoryContextPlugin {
         let close = state.clone();
         context.on_shutdown(move || async move { close.close().await.map_err(|e| e.to_string()) });
         state.plugin().install(context).await?;
+        let summary_store: Arc<dyn SummaryStore> = summaries.clone();
         context.provide(
-            eliteforge_agent_official_plugin_storage_sqlite::SummaryStoreService(summaries.clone()),
+            eliteforge_agent_official_plugin_storage_sqlite::SummaryStoreService(
+                summary_store.clone(),
+            ),
         )?;
+        context.contribute_extension(summary_store)?;
         let compressor = ModelCompressor::new(
             ModelRef::new("default", &self.model),
             CompressionOptions {
@@ -88,11 +92,13 @@ impl MemoryContextPlugin {
             )
             .reduce_with(compressor),
         ]);
+        let artifact_store: Arc<dyn ArtifactStore> = artifacts.clone();
         context.provide(
             eliteforge_agent_official_plugin_storage_sqlite::ArtifactStoreService(
-                artifacts.clone(),
+                artifact_store.clone(),
             ),
         )?;
+        context.contribute_extension(artifact_store)?;
         ConversationStorePlugin::from_arc(conversations.clone())
             .install(context)
             .await?;

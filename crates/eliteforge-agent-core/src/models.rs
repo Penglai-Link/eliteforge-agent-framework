@@ -108,6 +108,7 @@ impl ModelDescriptor {
 }
 
 /// A configured protocol adapter. One instance serves many model IDs.
+#[crate::extension_point(adapter = crate::ChatModelPlugin)]
 #[async_trait]
 pub trait ChatModel: Send + Sync {
     async fn generate(
@@ -119,6 +120,7 @@ pub trait ChatModel: Send + Sync {
 }
 
 /// Optional discovery capability. Hosts filter results before registration.
+#[crate::extension_point]
 #[async_trait]
 pub trait ModelDiscovery: Send + Sync {
     async fn discover(&self) -> Result<Vec<ModelDescriptor>, ModelError>;
@@ -286,6 +288,7 @@ pub struct ModelSelectionContext<'a> {
     pub run: &'a RunContext,
 }
 
+#[crate::extension_point(single, adapter = crate::ModelStrategyPlugin)]
 #[async_trait]
 pub trait ModelSelectionStrategy: Send + Sync {
     fn validate(&self, _catalog: &ModelCatalog) -> Result<(), AgentError> {
@@ -462,18 +465,29 @@ impl Plugin for ModelConnectionPlugin {
         &self.id
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.contribute(ModelConnectionService(self.connection.clone()))
+        context.contribute(ModelConnectionService(self.connection.clone()))?;
+        context.contribute_extension(self.connection.adapter.clone())
     }
 }
 
 pub struct ModelStrategyPlugin(pub Arc<dyn ModelSelectionStrategy>);
+impl ModelStrategyPlugin {
+    pub fn new(strategy: impl ModelSelectionStrategy + 'static) -> Self {
+        Self(Arc::new(strategy))
+    }
+
+    pub fn from_arc(strategy: Arc<dyn ModelSelectionStrategy>) -> Self {
+        Self(strategy)
+    }
+}
 #[async_trait]
 impl Plugin for ModelStrategyPlugin {
     fn id(&self) -> &str {
         "model.strategy"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.provide(ModelStrategyService(self.0.clone()))
+        context.provide(ModelStrategyService(self.0.clone()))?;
+        context.contribute_extension(self.0.clone())
     }
 }
 

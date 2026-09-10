@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::{Arc, Mutex, atomic::AtomicU64},
 };
 
@@ -13,6 +14,7 @@ use crate::*;
 pub struct AgentBuilder {
     plugins: Vec<Arc<dyn Plugin>>,
     capability_packs: Vec<Arc<dyn CapabilityPack>>,
+    capability_skills_root: Option<PathBuf>,
     default_models: bool,
 }
 impl Default for AgentBuilder {
@@ -20,6 +22,7 @@ impl Default for AgentBuilder {
         Self {
             plugins: Vec::new(),
             capability_packs: Vec::new(),
+            capability_skills_root: None,
             default_models: true,
         }
     }
@@ -48,6 +51,13 @@ impl AgentBuilder {
         self
     }
 
+    /// Set the application-managed root used to prepare embedded `skills/`
+    /// resources from selected capability packages.
+    pub fn capability_skills_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.capability_skills_root = Some(root.into());
+        self
+    }
+
     /// Add a group of configured plugins to this Agent's dependency graph.
     /// Duplicate IDs and dependency errors are reported by `build`, before installation.
     pub fn plugin_pack(mut self, pack: impl PluginPack) -> Self {
@@ -56,6 +66,32 @@ impl AgentBuilder {
     }
 
     pub async fn build(mut self) -> Result<Agent, AgentError> {
+        let skill_sources = selected_capability_skill_sources(&self.capability_packs)?;
+        let capability_skill_provider =
+            selected_capability_requires_skills_runtime(&self.capability_packs)?;
+        let capability_skills_runtime =
+            selected_capability_provides_skills_runtime(&self.capability_packs)?;
+        if !skill_sources.is_empty() || capability_skill_provider {
+            let has_skills_runtime = self
+                .plugins
+                .iter()
+                .any(|plugin| plugin.id() == "skills.default");
+            for (index, source) in skill_sources.into_iter().enumerate() {
+                self.plugins.push(Arc::new(
+                    eliteforge_agent_official_plugin_skills::CapabilitySkillsSourcePlugin::new(
+                        format!("builtin.capability-skills.{}.{}", source.pack_id, index),
+                        source.pack_id,
+                        source.source,
+                        self.capability_skills_root.clone(),
+                    ),
+                ));
+            }
+            if !has_skills_runtime && !capability_skills_runtime {
+                self.plugins.push(Arc::new(
+                    eliteforge_agent_official_plugin_skills::SkillsPlugin::sources_only(),
+                ));
+            }
+        }
         let mut occupied_plugin_ids = HashSet::with_capacity(self.plugins.len() + 1);
         for (index, plugin) in self.plugins.iter().enumerate() {
             let id = plugin.id().to_owned();

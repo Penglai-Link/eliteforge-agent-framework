@@ -1,6 +1,8 @@
 //! Versioned, derived conversation summaries. Source transcripts remain authoritative.
 use async_trait::async_trait;
-use eliteforge_agent_core::{ContextError, ConversationKey};
+use eliteforge_agent_core::{
+    ContextError, ConversationKey, Plugin, PluginContext, PluginError, extension_point,
+};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, sync::Arc};
 use tokio::sync::Semaphore;
@@ -38,6 +40,7 @@ pub struct VersionedSummary {
     pub value: ConversationSummary,
 }
 
+#[extension_point(single, adapter = crate::SummaryStorePlugin)]
 #[async_trait]
 pub trait SummaryStore: Send + Sync {
     async fn load(&self, key: &SummaryKey) -> Result<Option<VersionedSummary>, ContextError>;
@@ -50,6 +53,34 @@ pub trait SummaryStore: Send + Sync {
         value: &ConversationSummary,
     ) -> Result<bool, ContextError>;
     async fn delete(&self, key: &SummaryKey, expected: &str) -> Result<bool, ContextError>;
+}
+
+/// The unique summary-store service belongs with the storage contract, not a
+/// particular database implementation.
+pub struct SummaryStoreService(pub Arc<dyn SummaryStore>);
+
+pub struct SummaryStorePlugin(pub Arc<dyn SummaryStore>);
+
+impl SummaryStorePlugin {
+    pub fn new(store: impl SummaryStore + 'static) -> Self {
+        Self(Arc::new(store))
+    }
+
+    pub fn from_arc(store: Arc<dyn SummaryStore>) -> Self {
+        Self(store)
+    }
+}
+
+#[async_trait]
+impl Plugin for SummaryStorePlugin {
+    fn id(&self) -> &str {
+        "context.summary-store"
+    }
+
+    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        context.provide(SummaryStoreService(self.0.clone()))?;
+        context.contribute_extension(self.0.clone())
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -666,9 +666,10 @@ impl Plugin for McpToolsPlugin {
                 id: self.id.clone(),
                 client: None,
             })?;
-            return context.contribute(ToolProviderService(Arc::new(
-                eliteforge_agent_core::StaticToolProvider::default(),
-            )));
+            let provider: Arc<dyn ToolProvider> =
+                Arc::new(eliteforge_agent_core::StaticToolProvider::default());
+            context.contribute(ToolProviderService(provider.clone()))?;
+            return context.contribute_extension(provider);
         };
         let client = McpClient::connect(config.clone())
             .await
@@ -682,6 +683,8 @@ impl Plugin for McpToolsPlugin {
             id: self.id.clone(),
             client: Some(client.clone()),
         })?;
-        context.contribute(ToolProviderService(Arc::new(client)))
+        let provider: Arc<dyn ToolProvider> = Arc::new(client);
+        context.contribute(ToolProviderService(provider.clone()))?;
+        context.contribute_extension(provider)
     }
 }

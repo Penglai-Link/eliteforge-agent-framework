@@ -181,11 +181,21 @@ impl Plugin for TelemetryPlugin {
         // Register rollback before contributions, including partial installation.
         let cleanup = observation.clone();
         context.on_cleanup(move || cleanup.drain());
-        context.contribute(RunMiddlewareService(observation.clone()))?;
-        context.contribute(ModelMiddlewareService(observation.clone()))?;
-        context.contribute(WorkflowNodeMiddlewareService(observation.clone()))?;
-        context.contribute(ToolMiddlewareService(observation.clone()))?;
-        context.contribute(EventService(observation))
+        let run_middleware: Arc<dyn RunMiddleware> = observation.clone();
+        let model_middleware: Arc<dyn ModelMiddleware> = observation.clone();
+        let node_middleware: Arc<dyn WorkflowNodeMiddleware> = observation.clone();
+        let tool_middleware: Arc<dyn ToolMiddleware> = observation.clone();
+        let event_sink: Arc<dyn EventSink> = observation;
+        context.contribute(RunMiddlewareService(run_middleware.clone()))?;
+        context.contribute_extension(run_middleware)?;
+        context.contribute(ModelMiddlewareService(model_middleware.clone()))?;
+        context.contribute_extension(model_middleware)?;
+        context.contribute(WorkflowNodeMiddlewareService(node_middleware.clone()))?;
+        context.contribute_extension(node_middleware)?;
+        context.contribute(ToolMiddlewareService(tool_middleware.clone()))?;
+        context.contribute_extension(tool_middleware)?;
+        context.contribute(EventService(event_sink.clone()))?;
+        context.contribute_extension(event_sink)
     }
 }
 

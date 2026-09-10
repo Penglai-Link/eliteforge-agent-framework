@@ -87,6 +87,7 @@ pub struct SkillResource {
 /// The same run context is passed to every method. `RunContext::run_id` remains
 /// stable across a durable resume, so providers should scope one stable catalog
 /// to that ID and release it after the logical run finishes or is cancelled.
+#[crate::extension_point]
 #[async_trait]
 pub trait SkillProvider: Send + Sync {
     /// Discover lightweight metadata without loading every `SKILL.md` body or

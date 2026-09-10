@@ -27,8 +27,30 @@ pub enum PluginError {
         existing_plugin: String,
         plugin: String,
     },
+    #[error(
+        "single extension `{extension}` contributed by `{existing_plugin}` cannot be registered again by `{plugin}`"
+    )]
+    DuplicateExtension {
+        extension: &'static str,
+        existing_plugin: String,
+        plugin: String,
+    },
+    #[error(
+        "extension `{extension}` has incompatible registration modes (`{existing_plugin}`, `{plugin}`)"
+    )]
+    ExtensionKindConflict {
+        extension: &'static str,
+        existing_plugin: String,
+        plugin: String,
+    },
     #[error("plugin `{plugin}` failed to install: {source}")]
     InstallationFailed {
+        plugin: String,
+        #[source]
+        source: Box<PluginError>,
+    },
+    #[error("plugin `{plugin}` failed while becoming ready: {source}")]
+    ReadyFailed {
         plugin: String,
         #[source]
         source: Box<PluginError>,

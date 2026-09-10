@@ -62,8 +62,9 @@ Framework 的默认 `genai` feature 依赖 `eliteforge-agent-official-plugin-mod
 `eliteforge-agent-official-plugin-pack` 的 `PluginPack` 提供，Framework 和 Core 不依赖它。
 
 上下文内容由 `ContextProvider` 实现提供，能力包适配器或 `ContextPlugin` 都会将其注册为
-`ContextService`。安装完成后，Builder 通过 `all::<ContextService>()` 汇总所有上下文实现；
-其他多贡献接口也按各自服务类型收集。能力声明、配置和首版边界见
+`ContextService` 和通用扩展点。安装完成后，Builder 通过 `all::<ContextService>()` 汇总运行时
+服务；插件在 `ready` 中也可通过 `extensions::<dyn ContextProvider>()` 查询完整集合。其他多贡献
+接口同样保留兼容服务类型并进入通用扩展注册表。能力声明、配置、Skills 成员和生命周期见
 [能力包与自动装配](capability-packs.md)。
 
 ```text
@@ -77,7 +78,8 @@ CapabilityPack（仅 capability_pack）
         │
         ▼
 PluginContainer.build
-  ├─ 按依赖顺序安装插件
+  ├─ 按依赖顺序安装全部插件
+  ├─ 按安装顺序执行全部 ready
   ├─ 注册唯一服务和多个贡献
   ├─ 安装失败时回滚已安装资源
   └─ 注册关闭与清理回调

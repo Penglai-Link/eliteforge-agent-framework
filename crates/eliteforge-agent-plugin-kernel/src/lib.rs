@@ -9,13 +9,18 @@
 
 mod container;
 mod error;
+mod extensions;
 mod pack;
 mod resources;
 mod services;
 
 pub use async_trait::async_trait;
-pub use container::{Plugin, PluginContainer, PluginContext, plugin_dependency_order};
+pub use container::{
+    ExtensionPlugin, Plugin, PluginContainer, PluginContext, PluginReadyContext,
+    plugin_dependency_order,
+};
 pub use error::PluginError;
+pub use extensions::{ExtensionMultiplicity, ExtensionPoint};
 pub use pack::{PluginPack, PluginPackBuilder};
 pub use resources::{ResourceScope, ShutdownReport};
 pub use services::ServiceRegistry;

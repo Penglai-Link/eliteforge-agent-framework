@@ -232,7 +232,9 @@ impl Plugin for GenaiPlugin {
                     .bind(model, override_adapter.clone(), override_adapter.protocol())
                     .map_err(|e| PluginError::message(e.to_string()))?;
             }
+            let chat_model = connection.adapter.clone();
             context.contribute(ModelConnectionService(connection))?;
+            context.contribute_extension(chat_model)?;
         }
         if !embeddings.is_empty() {
             let embed = Arc::new(
@@ -240,13 +242,14 @@ impl Plugin for GenaiPlugin {
                     .map_err(|e| PluginError::message(e.to_string()))?,
             );
             for model in embeddings {
-                context.contribute(
-                    EmbeddingModelService::new(
-                        ModelRef::new(&self.connection, model),
-                        embed.clone(),
-                    )
-                    .protocol(embed.protocol()),
-                )?;
+                let registration = EmbeddingModelService::new(
+                    ModelRef::new(&self.connection, model),
+                    embed.clone(),
+                )
+                .protocol(embed.protocol());
+                let embedding_model = registration.implementation.clone();
+                context.contribute(registration)?;
+                context.contribute_extension(embedding_model)?;
             }
         }
         Ok(())

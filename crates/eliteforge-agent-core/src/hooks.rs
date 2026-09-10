@@ -17,6 +17,7 @@ pub struct RunLifecycleContext<'a> {
 /// deadline expiry; finish callbacks are still attempted with a bounded wait.
 /// These are notifications, not resource finalizers or authorization checks.
 /// Hook failures are isolated and reported as events without changing the run.
+#[crate::extension_point(adapter = crate::RunLifecycleHookPlugin, contribute)]
 #[async_trait]
 pub trait RunLifecycleHook: Send + Sync {
     async fn on_started(&self, _context: &RunLifecycleContext<'_>) {}

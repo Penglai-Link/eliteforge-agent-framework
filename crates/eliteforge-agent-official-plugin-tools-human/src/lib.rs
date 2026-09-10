@@ -154,8 +154,9 @@ impl Plugin for HumanInteractionPlugin {
         "tools.human"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.contribute(ToolProviderService(Arc::new(StaticToolProvider::new(
-            vec![AskUserTool::binding()],
-        ))))
+        let provider: Arc<dyn ToolProvider> =
+            Arc::new(StaticToolProvider::new(vec![AskUserTool::binding()]));
+        context.contribute(ToolProviderService(provider.clone()))?;
+        context.contribute_extension(provider)
     }
 }

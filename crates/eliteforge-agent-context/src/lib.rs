@@ -1,4 +1,6 @@
 //! Opt-in context reduction and artifact offload, independent of host business state.
+extern crate self as eliteforge_agent_context;
+
 mod artifact;
 mod compression;
 mod summary;

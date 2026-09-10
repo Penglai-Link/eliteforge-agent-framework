@@ -22,8 +22,10 @@ eliteforge-agent-official-plugin-model-genai = "0.1.0"
 `0.1.0` 是依赖声明示例，使用实际源中已发布的版本；业务 workspace 和私有源配置见[引入依赖](plugins.md#引入依赖)。
 
 实现新协议时，实现 `ChatModel::generate`，再用 `ChatModelPlugin::new(adapter)` 或
-`ModelConnectionPlugin::new(connection)` 注册。实现 Embedding 等其他操作时，使用下文对应的服务类型。
-返回给框架的是公共 `ChatResponse`、`EmbeddingResponse` 等类型，协议转换放在适配器内部。
+`ModelConnectionPlugin::new(connection)` 注册。能力包中，简单单模型可直接
+`#[capability(pack = "...")] impl ChatModel`；Embedding 等其他操作需要显式模型引用、连接、协议和
+能力描述，使用 `#[capability_factory]` 返回下文对应的 `*ModelPlugin`。返回给框架的是公共
+`ChatResponse`、`EmbeddingResponse` 等类型，协议转换放在适配器内部。
 
 ## 默认装配
 
@@ -81,20 +83,50 @@ let builder = AgentBuilder::new().plugin(plugin);
 
 | 操作 | Core 扩展点 | 注册类型 | 应用调用 |
 |---|---|---|---|
-| 对话与工具调用 | `ChatModel` | `ModelConnectionService` | `Agent::run(RunRequest)` |
-| 向量化 | `EmbeddingModel` | `EmbeddingModelService` | `agent.embed(...)` |
-| 重排序 | `RerankModel` | `RerankModelService` | `.rerank(...)` |
-| 生成图片 | `ImageGenerationModel` | `ImageGenerationModelService` | `.generate_image(...)` |
-| 生成视频 | `VideoGenerationModel` | `VideoGenerationModelService` | `.submit_video(...)` / `.query_video(...)` / `.cancel_video(...)` |
-| 语音识别 | `SpeechRecognitionModel` | `SpeechRecognitionModelService` | `.transcribe(...)` |
-| 语音合成 | `SpeechSynthesisModel` | `SpeechSynthesisModelService` | `.synthesize(...)` |
-| 实时会话 | `RealtimeModel` / `RealtimeSession` | `RealtimeModelService` | `.connect_realtime(...)` |
+| 对话与工具调用 | `ChatModel` | `ChatModelPlugin` 或 `ModelConnectionPlugin` | `Agent::run(RunRequest)` |
+| 向量化 | `EmbeddingModel` | `EmbeddingModelPlugin` | `agent.embed(...)` |
+| 重排序 | `RerankModel` | `RerankModelPlugin` | `.rerank(...)` |
+| 生成图片 | `ImageGenerationModel` | `ImageGenerationModelPlugin` | `.generate_image(...)` |
+| 生成视频 | `VideoGenerationModel` | `VideoGenerationModelPlugin` | `.submit_video(...)` / `.query_video(...)` / `.cancel_video(...)` |
+| 语音识别 | `SpeechRecognitionModel` | `SpeechRecognitionModelPlugin` | `.transcribe(...)` |
+| 语音合成 | `SpeechSynthesisModel` | `SpeechSynthesisModelPlugin` | `.synthesize(...)` |
+| 实时会话 | `RealtimeModel` / `RealtimeSession` | `RealtimeModelPlugin` | `.connect_realtime(...)` |
 
 所有注册类型都是多贡献角色，可以注册多个实现。唯一键为 `(connection, model, operation)`；重复绑定在 build 时失败。同名模型可以分别提供 Chat 和 Embedding，不会混用请求格式。Chat 连接还可以为单个模型设置独立的 Adapter 和协议。
 
 上述操作有各自的数据结构和实际调度路径。随仓库提供的 Genai 插件实现 Chat，以及 OpenAI、Gemini、Cohere 的文本 Embedding。Rerank、图片生成、视频生成、语音和实时会话由自定义能力插件提供；Framework 的运行时和测试覆盖这些扩展点，Genai 不会宣称或注册 SDK 没有提供的能力。
 
 `ChatRequest` / `ChatResponse` 是 Framework 与模型适配器之间的协议无关格式。`RunRequest` / `RunResult` 是上层应用与 Agent 的交互格式。Embedding 等独立操作使用自己的 Request / Response，不通过 Chat 模拟。
+
+## 能力包中的显式模型绑定
+
+模型发现不会猜测或自动启用候选。能力包工厂应把模型身份和操作能力写清楚：
+
+```rust
+use std::sync::Arc;
+use eliteforge_agent_core::*;
+
+struct EmbeddingConfig {
+    connection: String,
+    model: String,
+}
+
+#[capability_factory(pack = "shop", config = EmbeddingConfig)]
+fn embeddings(config: &EmbeddingConfig) -> EmbeddingModelPlugin {
+    let adapter: Arc<dyn EmbeddingModel> = Arc::new(ShopEmbeddingAdapter::new());
+    EmbeddingModelPlugin::with_id(
+        "shop.embeddings",
+        EmbeddingModelService::new(
+            ModelRef::new(&config.connection, &config.model),
+            adapter,
+        )
+        .protocol("shop-v1"),
+    )
+}
+```
+
+其他操作使用相同模式替换注册服务与插件类型。`ModelDiscovery` 可用于让应用查询候选模型，
+但应用必须筛选候选并创建这类显式绑定；仅实现 `ModelDiscovery` 不会改变 Agent 可用模型。
 
 ## 选择模型
 

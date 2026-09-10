@@ -75,6 +75,7 @@ impl RunOutputs {
 
 /// Installed by presentation plugins. Agent calls prepare before publishing any
 /// event. It must be synchronous, perform no I/O and start no business work.
+#[crate::extension_point(adapter = crate::RunOutputPlugin, contribute)]
 pub trait RunOutputFactory: Send + Sync {
     fn output_type(&self) -> TypeId;
     fn prepare(

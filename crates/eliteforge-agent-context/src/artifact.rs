@@ -15,8 +15,9 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::fs::{Dir, OpenOptions};
 use eliteforge_agent_core::{
-    Content, ContentBlock, ResourceReference, RunContext, Tool, ToolBinding, ToolDescriptor,
-    ToolError, ToolInvocationContext, ToolMiddleware, ToolNext, ToolOutput,
+    Content, ContentBlock, Plugin, PluginContext, PluginError, ResourceReference, RunContext, Tool,
+    ToolBinding, ToolDescriptor, ToolError, ToolInvocationContext, ToolMiddleware, ToolNext,
+    ToolOutput, extension_point,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -155,6 +156,7 @@ impl ArtifactChunk {
     }
 }
 
+#[extension_point(single, adapter = crate::ArtifactStorePlugin)]
 #[async_trait]
 pub trait ArtifactStore: Send + Sync {
     fn max_artifact_bytes(&self) -> usize;
@@ -179,6 +181,34 @@ pub trait ArtifactStore: Send + Sync {
         id: &ArtifactId,
         cancellation: CancellationToken,
     ) -> Result<(), ArtifactError>;
+}
+
+/// The unique artifact-store service belongs with the storage contract, not a
+/// particular database implementation.
+pub struct ArtifactStoreService(pub Arc<dyn ArtifactStore>);
+
+pub struct ArtifactStorePlugin(pub Arc<dyn ArtifactStore>);
+
+impl ArtifactStorePlugin {
+    pub fn new(store: impl ArtifactStore + 'static) -> Self {
+        Self(Arc::new(store))
+    }
+
+    pub fn from_arc(store: Arc<dyn ArtifactStore>) -> Self {
+        Self(store)
+    }
+}
+
+#[async_trait]
+impl Plugin for ArtifactStorePlugin {
+    fn id(&self) -> &str {
+        "context.artifact-store"
+    }
+
+    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        context.provide(ArtifactStoreService(self.0.clone()))?;
+        context.contribute_extension(self.0.clone())
+    }
 }
 
 /// Uses a directory capability for all artifact operations. Publication uses

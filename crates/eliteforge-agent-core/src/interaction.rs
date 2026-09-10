@@ -30,6 +30,7 @@ impl InteractionRecord {
     }
 }
 
+#[crate::extension_point(single, adapter = crate::InteractionStorePlugin)]
 #[async_trait]
 pub trait InteractionStore: Send + Sync {
     /// Idempotent publication. Reusing an ID with different ownership or payload must fail.
@@ -47,13 +48,23 @@ pub trait InteractionStore: Send + Sync {
 
 pub struct InteractionStoreService(pub Arc<dyn InteractionStore>);
 pub struct InteractionStorePlugin(pub Arc<dyn InteractionStore>);
+impl InteractionStorePlugin {
+    pub fn new(store: impl InteractionStore + 'static) -> Self {
+        Self(Arc::new(store))
+    }
+
+    pub fn from_arc(store: Arc<dyn InteractionStore>) -> Self {
+        Self(store)
+    }
+}
 #[async_trait]
 impl Plugin for InteractionStorePlugin {
     fn id(&self) -> &str {
         "framework.interactions"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.provide(InteractionStoreService(self.0.clone()))
+        context.provide(InteractionStoreService(self.0.clone()))?;
+        context.contribute_extension(self.0.clone())
     }
 }
 

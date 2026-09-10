@@ -741,7 +741,10 @@ impl WorkflowNode for LimitedNode {
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         let _guard = ActiveCount(self.active.clone());
         self.peak.fetch_max(active, Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(70)).await;
+        // Keep work active across several renewal intervals. A 90ms lease is
+        // too close to scheduler jitter when the workspace test suite runs in
+        // parallel, which can turn this fencing test into a timing test.
+        tokio::time::sleep(Duration::from_millis(600)).await;
         Ok(WorkflowNodeResult::completed(json!(active)))
     }
 }
@@ -770,7 +773,7 @@ async fn concurrency_limit_and_repeated_lease_renewals_preserve_fencing() {
         .plugin(AgentLoopPlugin::new(
             DagWorkflowLoop::new(graph)
                 .unwrap()
-                .with_lease_duration(Duration::from_millis(90))
+                .with_lease_duration(Duration::from_millis(400))
                 .unwrap(),
         ))
         .build()

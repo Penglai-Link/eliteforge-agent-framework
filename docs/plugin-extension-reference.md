@@ -3,15 +3,36 @@
 这是一份查阅表。第一次开发插件，请先完成[插件开发指南](plugins.md)中的依赖配置和入门示例。
 每个表都回答：实现什么接口、怎么注册、什么时候调用，以及能否配置多个。
 
-业务能力由接口实现提供。`ContextPlugin`、`ToolProviderPlugin` 等是现成的注册封装，
-用于把实现接入当前安装流程；它们不会额外提供上下文或工具业务逻辑。
-能力包自动装配已经可用：用 Core 导出的 `#[capability(...)]` 标记支持的 trait `impl`，
-应用选择 `CapabilityPack` 后由框架创建并适配实例。手工注册封装和 `PluginPack` 仍完全兼容。
+业务能力由接口实现提供。`ContextPlugin`、`ToolProviderPlugin` 等仍是可用的手工注册封装，
+但能力包不再要求业务方了解它们。用 Core 导出的 `#[extension_point]` 声明接口，再用
+`#[capability(...)]` 标记实现；应用选择 `CapabilityPack` 后，框架创建、注册并管理生命周期。
+手工注册封装和 `PluginPack` 仍完全兼容。
 
 ## 能力包自动装配
 
-业务 crate 使用 `eliteforge_agent_core::{capability, CapabilityPackBuilder}`。属性标在 trait
-`impl` 上；与 `async_trait` 共用时，`#[capability]` 放在外层。
+业务 crate 使用 `eliteforge_agent_core::{capability, extension_point, CapabilityPackBuilder}`。
+属性标在 trait `impl` 上；与 `async_trait` 共用时，`#[capability]` 放在外层。
+
+第三方扩展接口的最小声明如下：
+
+~~~rust
+#[extension_point]
+pub trait PaymentRule: Send + Sync {
+    fn allow(&self) -> bool;
+}
+
+#[derive(Default)]
+struct ShopPaymentRule;
+
+#[capability(pack = "shop")]
+impl PaymentRule for ShopPaymentRule {
+    fn allow(&self) -> bool { true }
+}
+~~~
+
+默认是有序多实现，消费者在 `Plugin::ready` 里调用
+`context.extensions::<dyn PaymentRule>()`。写成 `#[extension_point(single)]` 时，调用
+`context.extension::<dyn PaymentRule>()`；重复实现会报错。
 
 ~~~rust
 #[capability(
@@ -45,13 +66,14 @@ let agent = AgentBuilder::new()
 解析器在 factory 前检查包/能力 ID、依赖、环和共享实例声明，按稳定拓扑顺序创建对象。
 预检包含应用传入的普通插件依赖边。未选包不运行 factory；同一 `instance` 的多接口声明共享对象，
 省略时按包和实际类型身份共享，支持跨模块和类型别名。不同 Agent 的对象与生命周期隔离。
-首版不支持异步或依赖服务 factory、成员开关和官方包迁移。详情见
+factory 仍是同步且只读取包配置；异步初始化放在返回插件的 `install`。对于工具描述、模型连接、
+模型操作绑定、布局和路由等配置值，使用 `#[capability_factory]` 返回具体插件。详情见
 [能力包与自动装配](capability-packs.md)。
 
-首版支持的标记目标是：`ContextProvider`、`ToolProvider`、`EventSink`、
-`ContextContributor`、`ModelMiddleware`、`ToolMiddleware`、`RunMiddleware`、
-`ToolPolicy`、`RunLifecycleHook`、`WorkflowNode`、`WorkflowNodeMiddleware`、
-`RunOutputFactory` 和 `Plugin`。其他 trait 继续用对应注册封装或自定义 Plugin。
+直接声明覆盖上下文、工具来源、Skills Provider、会话、执行状态、交互、长期记忆、`AgentLoop`、
+Chat 模型、选择策略、各类中间件、事件、输出和第三方扩展点。Embedding、Rerank、图像、视频、
+语音和 Realtime 模型应使用 factory 返回相应的 `*ModelPlugin`，以显式提供连接、模型 ID、协议和
+能力描述。
 
 ## 怎样使用下面的注册类型
 
@@ -78,12 +100,15 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 |---|---|---|---|
 | `#[capability(...)]` | 支持的 Core trait `impl`，以及可选 ID/实例/依赖和可选成对 config/factory | 业务 crate 链接时登记描述；仅选中包在 build 时实例化 | 描述静态；factory 同步；同实例的声明必须兼容 |
 | `CapabilityPackBuilder::new(id, config)` | 当前 Agent 的包 ID 和配置；用 `.include(child)` 选择子包 | `.capability_pack(pack)` 时保存选择 | 子包必须显式加入；重复包/包含环报错 |
+| `CapabilityPackBuilder::skills(source)` | 内嵌 `capability_skills!()`、目录或其他 `CapabilitySkillSource` | 仅已选包在构建时加入 Skills 聚合 | 内嵌来源需 `AgentBuilder::capability_skills_root`；目录直接读取 |
 | `CapabilityPack` | 自定义包 ID、配置和显式子包闭包 | Agent build 前解析 | 每个选中 Agent 独立创建业务对象 |
-| `Plugin` | `id()`、`install(&mut PluginContext)`；需要前置插件时实现 `dependencies()` | `AgentBuilder::build` 时安装 | ID 在一个 Agent 内唯一 |
+| `Plugin` | `id()`、`install(&mut PluginContext)`；可选 `ready(&mut PluginReadyContext)`；需要前置插件时实现 `dependencies()` | 先全部 install，再全部 ready | ID 在一个 Agent 内唯一；ready 不能注册服务 |
 | `PluginPack` | `into_plugins(self)` 返回已有 Plugin 安装配置；可全部是 Provider 的注册封装 | `.plugin_pack(pack)` 时展开 | 兼容 API；可以多个、可以嵌套；官方包继续使用 |
 | `PluginContext::provide<T>` | 唯一角色的服务对象 | 安装期间写入容器 | 同类型一个 |
 | `PluginContext::contribute<T>` | 某类能力的一个贡献 | 安装期间写入容器 | 同类型多个，保留注册顺序 |
+| `PluginContext::contribute_extension<T>` | `#[extension_point]` trait 的实现 | 安装期间写入扩展注册表 | 多实现或 `single` 由 trait 声明决定 |
 | `PluginContext::services` | 用 `get<T>` 或 `all<T>` 解析已有服务 | 其他插件的 `install` 中 | `dependencies` 负责保证安装顺序 |
+| `PluginReadyContext::extensions<T>` / `extension<T>` | 读取完整扩展集合或唯一扩展 | `ready` 中 | 不可再注册服务；可登记关闭回调 |
 | `on_shutdown` / `on_cleanup` | 异步关闭 / 同步兜底回调 | Agent 关闭或安装失败、取消、Drop | 按资源回调注册的逆序处理 |
 
 来源：[Plugin 与容器](../crates/eliteforge-agent-plugin-kernel/src/container.rs)、
@@ -96,7 +121,7 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 | 接口与主要方法 | 注册适配器 → 服务类型 | 调用时机 | 多个实现及注意事项 |
 |---|---|---|---|
 | `ContextProvider::context` | `ContextPlugin` → `contribute(ContextService)` | 内置执行器准备一轮模型指令时 | 多个结果合并；只返回 System/Developer 指令 |
-| `SkillProvider::catalog / load / read_resource / release` | `SkillsPlugin` 同时贡献上下文、工具和运行中间件 | 每个逻辑运行先发现轻量元数据；模型再按需读取技能正文和资源；结束或取消时释放运行级快照 | 一个 SkillsPlugin 对应一个 Provider；上层应用用 SkillsPlugin::new 替换文件系统来源 |
+| `SkillProvider::catalog / load / read_resource / release` | `SkillsPlugin` 在 ready 聚合所有已注册 Provider，同时贡献上下文、工具和运行中间件 | 每个逻辑运行先发现轻量元数据；模型再按需读取技能正文和资源；结束或取消时释放运行级快照 | 多个来源合并；同名技能报错；`only_skills` 作用于合并清单 |
 | `ContextContributor::block_id / contribute` | `ContextContributorPlugin` → `contribute(ContextContributorService)` | 默认组装器准备自定义上下文块时 | 多个来源；块 ID 唯一，必须配套显式布局和配额 |
 | `ContextLayout` 配置 | `ContextLayoutPlugin` → `provide(ContextLayoutService)` | 构建时校验，组装时决定顺序与配额 | 一个布局，包含指令、历史和每个自定义来源 |
 | `ContextBudgetPolicy::allocate` | `ContextBudgetPolicyPlugin` → `provide(ContextBudgetPolicyService)` | 组装器为各块分配预算时 | 一个全局策略 |
@@ -112,7 +137,7 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 
 | 接口与主要方法 | 注册方法 | 调用时机 | 多个实现及注意事项 |
 |---|---|---|---|
-| `Tool::call(arguments, context)` | 与 `ToolDescriptor` 组成 `ToolBinding`，放进工具来源 | 模型请求调用，并通过框架校验后 | 多个工具；内部 `id` 和模型 `call_name` 都要避免冲突 |
+| `Tool::call(arguments, context)` | 与 `ToolDescriptor` 组成 `ToolBinding`；能力工厂可返回 `ToolBindingPlugin` | 模型请求调用，并通过框架校验后 | 多个工具；内部 `id` 和模型 `call_name` 都要避免冲突 |
 | `ToolProvider::lease(context)` | `ToolProviderPlugin` → `contribute(ToolProviderService)` | 内置执行器为本次运行取得工具时 | 多个来源合并；动态可见性在这里决定 |
 | `ToolPolicy::evaluate(invocation)` | `ToolPolicyPlugin` → `contribute(ToolPolicyService)` | 工具调用授权和审批决策时 | 多个策略参与校验；自定义循环必须支持并执行策略 |
 | `InteractionRequest` + `ToolOutput::request_input` | 由工具返回，配合 `InteractionStore` | 需要用户回答或批准时 | 运行进入等待输入状态；恢复由 `agent.answer` 后再次运行 |
@@ -151,13 +176,13 @@ Hook 和事件用于通知；资源关闭使用容器回调、`ToolLease` 或会
 | 接口与主要方法 | 注册方法 | 由谁触发 |
 |---|---|---|
 | `ChatModel::generate` | `ChatModelPlugin` / `ModelConnectionPlugin` → `contribute(ModelConnectionService)` | Agent 循环的 Chat 执行器 |
-| `EmbeddingModel::embed` | `contribute(EmbeddingModelService::new(model_ref, adapter))` | `agent.embed / embed_query` 或节点中的模型执行服务 |
-| `RerankModel::rerank` | `contribute(RerankModelService::new(...))` | `agent.rerank` |
-| `ImageGenerationModel::generate` | `contribute(ImageGenerationModelService::new(...))` | `agent.generate_image` |
-| `VideoGenerationModel::submit / query / cancel` | `contribute(VideoGenerationModelService::new(...))` | `agent.submit_video / query_video / cancel_video` |
-| `SpeechRecognitionModel::transcribe` | `contribute(SpeechRecognitionModelService::new(...))` | `agent.transcribe` |
-| `SpeechSynthesisModel::synthesize` | `contribute(SpeechSynthesisModelService::new(...))` | `agent.synthesize` |
-| `RealtimeModel::connect` + `RealtimeSession` | `contribute(RealtimeModelService::new(...))` | Agent 的实时连接、发送、接收和关闭接口 |
+| `EmbeddingModel::embed` | `EmbeddingModelPlugin`；factory 内显式构造 `EmbeddingModelService::new(model_ref, adapter)` | `agent.embed / embed_query` 或节点中的模型执行服务 |
+| `RerankModel::rerank` | `RerankModelPlugin` | `agent.rerank` |
+| `ImageGenerationModel::generate` | `ImageGenerationModelPlugin` | `agent.generate_image` |
+| `VideoGenerationModel::submit / query / cancel` | `VideoGenerationModelPlugin` | `agent.submit_video / query_video / cancel_video` |
+| `SpeechRecognitionModel::transcribe` | `SpeechRecognitionModelPlugin` | `agent.transcribe` |
+| `SpeechSynthesisModel::synthesize` | `SpeechSynthesisModelPlugin` | `agent.synthesize` |
+| `RealtimeModel::connect` + `RealtimeSession` | `RealtimeModelPlugin` | Agent 的实时连接、发送、接收和关闭接口 |
 | `ModelSelectionStrategy::select` | `ModelStrategyPlugin` → `provide(ModelStrategyService)` | 未被请求显式模型指定覆盖的 Chat 选择过程 |
 | `ModelRouting` 配置 | `ModelRoutingPlugin` → `provide(ModelRouting)` | 默认模型和阶段模型选择 |
 | `TokenEstimator` | `ModelConnection::with_token_estimator` | 对应连接的上下文预算估算 |
@@ -187,9 +212,10 @@ Chat 连接名必须唯一，多个 Chat 模型放进连接的模型列表。
 | `ArtifactStore`：附件大小限制、原子写入、分块读取、删除 | 自定义插件 → `provide(ArtifactStoreService)` | 附件组件与 `agent.execute(PutArtifact / ReadArtifact / RemoveArtifact)` |
 
 前四类存储接口来自 Core。`SummaryStore`、`ArtifactStore` 来自 `eliteforge-agent-context`；
-目前它们的 `SummaryStoreService`、`ArtifactStoreService` 和 Agent 操作请求类型由
-`eliteforge-agent-official-plugin-storage-sqlite` 导出，使用这些现成入口要声明该 crate 的依赖。
-服务内部可以装自定义实现；也可定义自己的服务类型和 `AgentOperation`。
+它们的 `SummaryStoreService`、`ArtifactStoreService`、`SummaryStorePlugin` 和
+`ArtifactStorePlugin` 也属于 Context crate。`eliteforge-agent-official-plugin-storage-sqlite`
+继续重新导出这些类型以兼容已有代码，并提供 SQLite 实现及其操作入口。服务内部可以装自定义实现；
+也可定义自己的服务类型和 `AgentOperation`。
 
 SQLite 官方存储插件一次注册这些唯一角色。官方包的 `.storage(...)` 当前只接收 SQLite 插件配置；
 替换为其他数据库时，按所需角色单独装配或使用自己的包。

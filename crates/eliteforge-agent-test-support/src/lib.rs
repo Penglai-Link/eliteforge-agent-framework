@@ -48,7 +48,9 @@ impl Plugin for TestStoragePlugin {
                     .await
                     .map_err(|e| PluginError::message(e.to_string()))?,
             );
-            context.provide(StateStoreService(state))?;
+            let state_store: Arc<dyn StateStore> = state;
+            context.provide(StateStoreService(state_store.clone()))?;
+            context.contribute_extension(state_store)?;
         }
         if context
             .services()
@@ -60,7 +62,9 @@ impl Plugin for TestStoragePlugin {
                     .await
                     .map_err(|e| PluginError::message(e.to_string()))?,
             );
-            context.provide(InteractionStoreService(state))?;
+            let interaction_store: Arc<dyn InteractionStore> = state;
+            context.provide(InteractionStoreService(interaction_store.clone()))?;
+            context.contribute_extension(interaction_store)?;
         }
         if context
             .services()
@@ -72,7 +76,9 @@ impl Plugin for TestStoragePlugin {
                     .await
                     .map_err(|e| PluginError::message(e.to_string()))?,
             );
-            context.provide(ConversationStoreService(conversations))?;
+            let conversation_store: Arc<dyn ConversationStore> = conversations;
+            context.provide(ConversationStoreService(conversation_store.clone()))?;
+            context.contribute_extension(conversation_store)?;
         }
         Ok(())
     }

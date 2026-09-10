@@ -3,7 +3,8 @@
 EliteForge Agent Framework 是一个可扩展的 Rust Agent 框架：Framework 负责装配、执行和生命周期管理，Plugin 提供模型、工具、存储和可观测能力，上层应用保留身份、权限和业务流程。
 
 所有插件只配置到 `AgentBuilder`，应用通过构建后的 `agent` 实例操作：启动、控制、获取输出、调用模型、处理问答和关闭资源。
-业务能力可以用 `#[capability(...)]` 声明，再由应用显式选择能力包自动装配；复杂资源安装仍使用普通 Plugin。
+业务能力可以用 `#[extension_point]` 和 `#[capability(...)]` 声明，再由应用显式选择能力包自动装配。
+能力包也可携带 Skills、工具、模型绑定和普通 Plugin；复杂资源初始化仍放在 Plugin 生命周期中。
 依赖配置、完整入门示例和场景选择见[插件开发指南](docs/plugins.md)。
 
 多个插件可以打成包，一次配置到 Agent：
@@ -92,9 +93,9 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 | 运行控制 | 追加指令、取消与子执行额度 | ✅ 已支持 | Steering、取消、父子执行身份和预算隔离 |
 | 集成 | MCP 工具与资源 | ✅ 已支持 | 官方 SDK transport、发现、分页、资源和取消传播 |
 | 集成 | AG-UI 事件协议 | ✅ 已支持 | SSE、文本、推理、工具、状态、活动和交互恢复事件 |
-| 扩展 | Plugin、PluginPack 与能力包 | ✅ 已支持 | 依赖排序、回滚、异步关闭、官方插件组合和 `#[capability]` 自动装配 |
+| 扩展 | Plugin、PluginPack 与能力包 | ✅ 已支持 | 声明式扩展点、全部 install 后 ready、回滚、异步关闭、Skills 聚合和 `#[capability]` / `#[capability_factory]` 自动装配 |
 | 扩展 | Middleware、Hook 与自定义执行器 | ✅ 已支持 | Run、模型、工具、节点中间件；生命周期 Hook；自定义 `AgentLoop` |
-| 扩展 | Skills 系统 | ✅ 已支持 | 官方文件系统插件兼容 Agent Skills：默认发现 `~/.agents/skills` 与当前目录 `.agents/skills`，元数据进入上下文，模型按需读取 `SKILL.md` 和资源 |
+| 扩展 | Skills 系统 | ✅ 已支持 | 官方文件系统插件兼容 Agent Skills；能力包可内嵌 `skills/`、引用目录或声明 Provider，统一聚合后按需读取资源 |
 | 扩展 | 插件市场与在线安装 | — 未提供 | 当前提供 crate 与插件组合 API，未提供市场或安装器 |
 | 多 Agent | 子 Agent / 专家 Agent | 🧩 可扩展 | 具备父子执行和预算基础；Agent 定义、路由和注册表由上层应用实现 |
 | 多 Agent | 后台执行、队列与 Worktree 隔离 | 🏠 上层应用负责 | 需要部署队列、进程管理和 Git 工作树管理 |
@@ -127,7 +128,7 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 - [快速上手](docs/quickstart.md)：按场景运行 Agent，并查看完整 Rust 代码。
 - [架构总览](docs/architecture.md)：分层、装配、执行链和生命周期。
 - [插件与扩展开发指南](docs/plugins.md)：引入依赖、实现 Provider、按业务场景选择扩展点。
-- [能力包与自动装配](docs/capability-packs.md)：声明能力、显式选包、配置工厂和依赖规则。
+- [能力包与自动装配](docs/capability-packs.md)：声明扩展点、显式选包、配置工厂、Skills 成员和生命周期。
 - [Skills](docs/skills.md)：目录约定、渐进式加载、技能选择和自定义 Provider。
 - [扩展点参考](docs/plugin-extension-reference.md)：接口、注册类型、调用时机与多实例规则。
 - [模型插件](docs/model-plugins.md)：Genai 配置、协议、模型选择与多模态扩展。

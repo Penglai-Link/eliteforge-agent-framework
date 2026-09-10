@@ -44,6 +44,7 @@ pub struct ContextInput<'a> {
     pub estimator: &'a dyn TokenEstimator,
     pub run: &'a RunContext,
 }
+#[crate::extension_point(adapter = crate::ContextContributorPlugin, contribute)]
 #[async_trait]
 pub trait ContextContributor: Send + Sync {
     fn block_id(&self) -> &str;
@@ -118,6 +119,7 @@ impl ContextBlockConfig {
 /// Configuration order is prompt order. It is never a retention priority.
 #[derive(Clone, Default)]
 pub struct ContextLayout(pub Vec<ContextBlockConfig>);
+#[crate::extension_point(single, adapter = crate::ContextBudgetPolicyPlugin)]
 pub trait ContextBudgetPolicy: Send + Sync {
     fn allocate(
         &self,
@@ -184,6 +186,7 @@ pub struct ContextReductionInput<'a> {
     pub limits: &'a RunLimits,
     pub overflow_recoveries: usize,
 }
+#[crate::extension_point(single, adapter = crate::ContextReducerPlugin)]
 #[async_trait]
 pub trait ContextReducer: Send + Sync {
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError>;
@@ -328,6 +331,7 @@ pub struct ContextAssemblyInput<'a> {
     pub limits: &'a RunLimits,
     pub overflow_recoveries: usize,
 }
+#[crate::extension_point(single, adapter = crate::ContextAssemblerPlugin)]
 #[async_trait]
 pub trait ContextAssembler: Send + Sync {
     async fn assemble(&self, input: &ContextAssemblyInput<'_>)

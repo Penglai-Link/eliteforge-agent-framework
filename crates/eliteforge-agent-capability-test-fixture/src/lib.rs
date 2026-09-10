@@ -17,8 +17,21 @@ use std::{
 use async_trait::async_trait;
 use eliteforge_agent_core::{
     AgentError, AgentEvent, CapabilityPackBuilder, ContextProvider, EventSink, Message, Plugin,
-    PluginContext, PluginError, RunContext, capability,
+    PluginContext, PluginError, RunContext, capability, capability_skills, extension_point,
 };
+
+/// A third-party extension contract used by the framework acceptance suite.
+#[extension_point]
+pub trait PaymentRule: Send + Sync {
+    fn id(&self) -> &str;
+}
+
+/// A third-party singleton contract used to verify duplicate rejection without
+/// giving the business package access to framework registration internals.
+#[extension_point(single)]
+pub trait CheckoutAuthority: Send + Sync {
+    fn id(&self) -> &str;
+}
 
 /// Shared observability passed through test-only capability configuration.
 #[derive(Default)]
@@ -99,6 +112,10 @@ pub fn shop_pack_with_audit(
 
 pub fn payment_pack(config: FixtureConfig) -> CapabilityPackBuilder<FixtureConfig> {
     CapabilityPackBuilder::new("payment", config)
+}
+
+pub fn packaged_skills_pack() -> CapabilityPackBuilder<()> {
+    CapabilityPackBuilder::new("packaged-skills", ()).skills(capability_skills!())
 }
 
 pub fn ordering_pack(config: FixtureConfig) -> CapabilityPackBuilder<FixtureConfig> {

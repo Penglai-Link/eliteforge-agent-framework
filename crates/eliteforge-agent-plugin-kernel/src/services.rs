@@ -4,7 +4,8 @@ use std::{
     sync::Arc,
 };
 
-use crate::PluginError;
+use crate::extensions::ExtensionRegistry;
+use crate::{ExtensionPoint, PluginError};
 
 type ErasedService = Arc<dyn Any + Send + Sync>;
 
@@ -27,6 +28,7 @@ enum ServiceEntry {
 #[derive(Default)]
 pub struct ServiceRegistry {
     entries: HashMap<TypeId, ServiceEntry>,
+    extensions: ExtensionRegistry,
 }
 
 impl ServiceRegistry {
@@ -65,6 +67,30 @@ impl ServiceRegistry {
                 .collect(),
             None => Vec::new(),
         }
+    }
+
+    /// Get the implementation of an extension point declared as `single`.
+    pub fn extension<T>(&self) -> Option<Arc<T>>
+    where
+        T: ExtensionPoint + ?Sized + 'static,
+    {
+        self.extensions.extension::<T>()
+    }
+
+    /// Get every implementation of an extension point in registration order.
+    pub fn extensions<T>(&self) -> Vec<Arc<T>>
+    where
+        T: ExtensionPoint + ?Sized + 'static,
+    {
+        self.extensions.extensions::<T>()
+    }
+
+    /// IDs of plugins that registered an extension point.
+    pub fn extension_providers<T>(&self) -> Vec<&str>
+    where
+        T: ExtensionPoint + ?Sized + 'static,
+    {
+        self.extensions.providers::<T>()
     }
 
     pub(crate) fn provide<T: Send + Sync + 'static>(
@@ -132,7 +158,19 @@ impl ServiceRegistry {
         }
     }
 
+    pub(crate) fn contribute_extension<T>(
+        &mut self,
+        plugin: &str,
+        value: Arc<T>,
+    ) -> Result<(), PluginError>
+    where
+        T: ExtensionPoint + ?Sized + 'static,
+    {
+        self.extensions.register(plugin, value)
+    }
+
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.extensions.clear();
     }
 }

@@ -611,6 +611,7 @@ version = "0.1.0"
 dependencies = [
  "proc-macro2",
  "quote",
+ "sha2",
  "syn 2.0.119",
 ]
 
@@ -686,8 +687,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-capability-test-fixture",
+ "eliteforge-agent-context",
  "eliteforge-agent-core",
  "eliteforge-agent-official-plugin-model-genai",
+ "eliteforge-agent-official-plugin-skills",
  "eliteforge-agent-official-plugin-storage-sqlite",
  "eliteforge-agent-plugin-kernel",
  "eliteforge-agent-test-support",
@@ -821,6 +824,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_norway",
+ "sha2",
  "tempfile",
  "tokio",
 ]

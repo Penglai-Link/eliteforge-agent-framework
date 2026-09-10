@@ -8,7 +8,7 @@ use std::{
 };
 
 use eliteforge_agent_plugin_kernel::{
-    Plugin, PluginContainer, PluginContext, PluginError, async_trait,
+    Plugin, PluginContainer, PluginContext, PluginError, PluginReadyContext, async_trait,
 };
 use tokio::sync::Notify;
 
@@ -423,4 +423,74 @@ async fn supports_trait_object_services_and_shareable_container() {
             .greet(),
         "hello"
     );
+}
+
+struct ReadyConsumer {
+    observed: Arc<AtomicUsize>,
+    cleaned: Arc<AtomicUsize>,
+    fail: bool,
+}
+
+#[async_trait]
+impl Plugin for ReadyConsumer {
+    fn id(&self) -> &str {
+        "ready-consumer"
+    }
+
+    async fn install(&self, _: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        Ok(())
+    }
+
+    async fn ready(&self, context: &mut PluginReadyContext<'_>) -> Result<(), PluginError> {
+        let value = context.services().get::<usize>().ok_or_else(|| {
+            PluginError::message("ready phase did not see a later installed service")
+        })?;
+        self.observed.store(*value, Ordering::SeqCst);
+        let cleaned = self.cleaned.clone();
+        context.on_cleanup(move || {
+            cleaned.fetch_add(1, Ordering::SeqCst);
+        });
+        if self.fail {
+            Err(PluginError::message("ready failed"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn ready_observes_the_complete_registry_and_failure_rolls_back() {
+    let observed = Arc::new(AtomicUsize::new(0));
+    let cleaned = Arc::new(AtomicUsize::new(0));
+    let consumer = Arc::new(ReadyConsumer {
+        observed: observed.clone(),
+        cleaned: cleaned.clone(),
+        fail: false,
+    });
+    let container = PluginContainer::build(vec![
+        consumer,
+        plugin("late-producer", &[], |context| context.provide(42_usize)),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(observed.load(Ordering::SeqCst), 42);
+    drop(container);
+    assert_eq!(cleaned.load(Ordering::SeqCst), 1);
+
+    let failed_cleaned = Arc::new(AtomicUsize::new(0));
+    let error = error_of(
+        PluginContainer::build(vec![
+            Arc::new(ReadyConsumer {
+                observed: Arc::new(AtomicUsize::new(0)),
+                cleaned: failed_cleaned.clone(),
+                fail: true,
+            }),
+            plugin("failed-ready-producer", &[], |context| {
+                context.provide(7_usize)
+            }),
+        ])
+        .await,
+    );
+    assert!(matches!(error, PluginError::ReadyFailed { plugin, .. } if plugin == "ready-consumer"));
+    assert_eq!(failed_cleaned.load(Ordering::SeqCst), 1);
 }

@@ -9,7 +9,9 @@ impl Plugin for ReactPlugin {
         "builtin.react-loop"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.provide(LoopService(Arc::new(crate::react::ReactAgentLoop)))
+        let agent_loop: Arc<dyn AgentLoop> = Arc::new(crate::react::ReactAgentLoop);
+        context.provide(LoopService(agent_loop.clone()))?;
+        context.contribute_extension(agent_loop)
     }
 }
 
@@ -27,9 +29,13 @@ impl Plugin for DefaultsPlugin {
         self.after.clone()
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.contribute(WorkflowNodeService(Arc::new(ReactWorkflowNode)))?;
+        let react_node: Arc<dyn WorkflowNode> = Arc::new(ReactWorkflowNode);
+        context.contribute(WorkflowNodeService(react_node.clone()))?;
+        context.contribute_extension(react_node)?;
         if context.services().get::<LoopService>().is_none() {
-            context.provide(LoopService(Arc::new(crate::react::ReactAgentLoop)))?;
+            let agent_loop: Arc<dyn AgentLoop> = Arc::new(crate::react::ReactAgentLoop);
+            context.provide(LoopService(agent_loop.clone()))?;
+            context.contribute_extension(agent_loop)?;
         }
         #[cfg(feature = "genai")]
         if self.default_models
@@ -49,13 +55,19 @@ impl Plugin for DefaultsPlugin {
         #[cfg(not(feature = "genai"))]
         let _ = self.default_models;
         if context.services().all::<ToolProviderService>().is_empty() {
-            context.contribute(ToolProviderService(Arc::new(StaticToolProvider::default())))?;
+            let tool_provider: Arc<dyn ToolProvider> = Arc::new(StaticToolProvider::default());
+            context.contribute(ToolProviderService(tool_provider.clone()))?;
+            context.contribute_extension(tool_provider)?;
         }
         if context.services().all::<ContextService>().is_empty() {
-            context.contribute(ContextService(Arc::new(FixedContext::default())))?;
+            let context_provider: Arc<dyn ContextProvider> = Arc::new(FixedContext::default());
+            context.contribute(ContextService(context_provider.clone()))?;
+            context.contribute_extension(context_provider)?;
         }
         if context.services().all::<EventService>().is_empty() {
-            context.contribute(EventService(Arc::new(NoopEvents)))?;
+            let event_sink: Arc<dyn EventSink> = Arc::new(NoopEvents);
+            context.contribute(EventService(event_sink.clone()))?;
+            context.contribute_extension(event_sink)?;
         }
         Ok(())
     }

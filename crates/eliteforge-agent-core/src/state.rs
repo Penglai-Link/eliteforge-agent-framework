@@ -151,6 +151,7 @@ pub enum ToolPolicyDecision {
     RequireApproval(Content),
 }
 
+#[crate::extension_point(adapter = crate::ToolPolicyPlugin, contribute)]
 #[async_trait]
 pub trait ToolPolicy: Send + Sync {
     async fn evaluate(
@@ -291,6 +292,7 @@ pub enum StateError {
     Backend(String),
 }
 
+#[crate::extension_point(single, adapter = crate::StateStorePlugin)]
 #[async_trait]
 pub trait StateStore: Send + Sync {
     /// Atomically replace the session head iff it is `previous_run` and terminal.
@@ -334,13 +336,23 @@ pub trait StateStore: Send + Sync {
 
 pub struct StateStoreService(pub Arc<dyn StateStore>);
 pub struct StateStorePlugin(pub Arc<dyn StateStore>);
+impl StateStorePlugin {
+    pub fn new(store: impl StateStore + 'static) -> Self {
+        Self(Arc::new(store))
+    }
+
+    pub fn from_arc(store: Arc<dyn StateStore>) -> Self {
+        Self(store)
+    }
+}
 #[async_trait]
 impl Plugin for StateStorePlugin {
     fn id(&self) -> &str {
         "framework.state-store"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.provide(StateStoreService(self.0.clone()))
+        context.provide(StateStoreService(self.0.clone()))?;
+        context.contribute_extension(self.0.clone())
     }
 }
 

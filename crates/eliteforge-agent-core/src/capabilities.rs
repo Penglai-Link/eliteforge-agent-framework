@@ -229,6 +229,7 @@ impl EmbeddingSpace {
         Ok(())
     }
 }
+#[crate::extension_point]
 #[async_trait]
 pub trait EmbeddingModel: Send + Sync {
     async fn embed(
@@ -255,6 +256,7 @@ pub struct RerankResponse {
     pub model: ModelRef,
     pub results: Vec<RankedDocument>,
 }
+#[crate::extension_point]
 #[async_trait]
 pub trait RerankModel: Send + Sync {
     async fn rerank(
@@ -276,6 +278,7 @@ pub struct ImageGenerationResponse {
     pub model: ModelRef,
     pub images: Vec<MediaContent>,
 }
+#[crate::extension_point]
 #[async_trait]
 pub trait ImageGenerationModel: Send + Sync {
     async fn generate(
@@ -310,6 +313,7 @@ pub struct VideoJob {
     pub output: Option<ResourceReference>,
     pub error: Option<String>,
 }
+#[crate::extension_point]
 #[async_trait]
 pub trait VideoGenerationModel: Send + Sync {
     async fn submit(
@@ -343,6 +347,7 @@ pub struct SpeechRecognitionResponse {
     pub text: String,
     pub segments: Vec<TranscriptSegment>,
 }
+#[crate::extension_point]
 #[async_trait]
 pub trait SpeechRecognitionModel: Send + Sync {
     async fn transcribe(
@@ -363,6 +368,7 @@ pub struct SpeechSynthesisResponse {
     pub model: ModelRef,
     pub audio: MediaContent,
 }
+#[crate::extension_point]
 #[async_trait]
 pub trait SpeechSynthesisModel: Send + Sync {
     async fn synthesize(
@@ -397,6 +403,7 @@ pub trait RealtimeSession: Send + Sync {
     async fn next(&self) -> Result<Option<RealtimeEvent>, ModelError>;
     async fn close(&self) -> Result<(), ModelError>;
 }
+#[crate::extension_point]
 #[async_trait]
 pub trait RealtimeModel: Send + Sync {
     /// The adapter must release its transport when cancellation fires or the session is dropped.
@@ -534,6 +541,89 @@ pub type ImageGenerationModelService = ModelRegistration<dyn ImageGenerationMode
 pub type VideoGenerationModelService = ModelRegistration<dyn VideoGenerationModel>;
 pub type SpeechRecognitionModelService = ModelRegistration<dyn SpeechRecognitionModel>;
 pub type SpeechSynthesisModelService = ModelRegistration<dyn SpeechSynthesisModel>;
+
+macro_rules! model_registration_plugin {
+    ($name:ident, $service:ty, $contract:ident, $prefix:literal) => {
+        /// Registers one explicitly named model-operation binding.
+        pub struct $name {
+            id: String,
+            registration: $service,
+        }
+
+        impl $name {
+            pub fn new(registration: $service) -> Self {
+                let id = format!(
+                    concat!($prefix, ".{}.{}"),
+                    registration.model.connection, registration.model.model
+                );
+                Self { id, registration }
+            }
+
+            pub fn with_id(id: impl Into<String>, registration: $service) -> Self {
+                Self {
+                    id: id.into(),
+                    registration,
+                }
+            }
+        }
+
+        #[async_trait]
+        impl Plugin for $name {
+            fn id(&self) -> &str {
+                &self.id
+            }
+
+            async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+                context.contribute(self.registration.clone())?;
+                context
+                    .contribute_extension::<dyn $contract>(self.registration.implementation.clone())
+            }
+        }
+    };
+}
+
+model_registration_plugin!(
+    EmbeddingModelPlugin,
+    EmbeddingModelService,
+    EmbeddingModel,
+    "model.embedding"
+);
+model_registration_plugin!(
+    RerankModelPlugin,
+    RerankModelService,
+    RerankModel,
+    "model.rerank"
+);
+model_registration_plugin!(
+    ImageGenerationModelPlugin,
+    ImageGenerationModelService,
+    ImageGenerationModel,
+    "model.image-generation"
+);
+model_registration_plugin!(
+    VideoGenerationModelPlugin,
+    VideoGenerationModelService,
+    VideoGenerationModel,
+    "model.video-generation"
+);
+model_registration_plugin!(
+    SpeechRecognitionModelPlugin,
+    SpeechRecognitionModelService,
+    SpeechRecognitionModel,
+    "model.speech-recognition"
+);
+model_registration_plugin!(
+    SpeechSynthesisModelPlugin,
+    SpeechSynthesisModelService,
+    SpeechSynthesisModel,
+    "model.speech-synthesis"
+);
+model_registration_plugin!(
+    RealtimeModelPlugin,
+    RealtimeModelService,
+    RealtimeModel,
+    "model.realtime"
+);
 
 pub struct CapabilityCatalog<T: ?Sized> {
     bindings: BTreeMap<ModelRef, ModelRegistration<T>>,

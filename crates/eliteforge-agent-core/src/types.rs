@@ -573,6 +573,7 @@ pub trait ChatStream: Send + Sync {
 /// dispatch. Callback completion is not guaranteed; use `Agent::wait` or a
 /// durable checkpoint for authoritative execution state. Callbacks must yield
 /// cooperatively so timeout/cancellation can take effect.
+#[crate::extension_point(adapter = crate::EventPlugin, contribute)]
 pub trait EventSink: Send + Sync {
     /// Ordered live publication, before the best-effort observer queue.
     /// Must be fast, nonblocking, do no IO and never emit another event inline.
@@ -588,11 +589,13 @@ pub trait EventSink: Send + Sync {
     async fn on_event(&self, context: &RunContext, event: &AgentEvent);
 }
 
+#[crate::extension_point(adapter = crate::ContextPlugin, contribute)]
 #[async_trait]
 pub trait ContextProvider: Send + Sync {
     async fn context(&self, context: &RunContext) -> Result<Vec<Message>, AgentError>;
 }
 
+#[crate::extension_point(single, adapter = crate::AgentLoopPlugin)]
 #[async_trait]
 pub trait AgentLoop: Send + Sync {
     /// Whether unaddressed live steering has defined semantics for this loop.
@@ -751,6 +754,7 @@ impl ToolLease {
     }
 }
 
+#[crate::extension_point(adapter = crate::ToolProviderPlugin, contribute)]
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
     async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError>;

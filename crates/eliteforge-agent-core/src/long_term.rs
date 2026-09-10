@@ -55,6 +55,7 @@ pub enum MemoryError {
     #[error("memory backend failed: {0}")]
     Backend(String),
 }
+#[crate::extension_point(single, adapter = crate::LongTermMemoryPlugin)]
 #[async_trait]
 pub trait LongTermMemory: Send + Sync {
     async fn get(&self, namespace: &str, id: &str) -> Result<MemoryEntry, MemoryError>;

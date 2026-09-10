@@ -195,6 +195,7 @@ impl WorkflowNodeResult {
 
 /// Node implementations are trusted in-process plugins. They must yield during
 /// async work and must not detach work from the invocation's lifetime.
+#[crate::extension_point(adapter = crate::WorkflowNodePlugin, contribute)]
 #[async_trait]
 pub trait WorkflowNode: Send + Sync {
     fn kind(&self) -> &str;

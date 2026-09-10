@@ -8,3 +8,6 @@ publish = false
 [dependencies]
 async-trait.workspace = true
 eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
+
+[build-dependencies]
+eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }

@@ -8,11 +8,14 @@
 use std::{
     any::{Any, TypeId},
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    path::PathBuf,
     sync::Arc,
 };
 
 use async_trait::async_trait;
-use eliteforge_agent_plugin_kernel::{Plugin, PluginContext, PluginError, plugin_dependency_order};
+use eliteforge_agent_plugin_kernel::{
+    ExtensionPoint, Plugin, PluginContext, PluginError, PluginReadyContext, plugin_dependency_order,
+};
 use thiserror::Error;
 
 /// Type-erased configuration held by one selected capability pack.
@@ -29,6 +32,71 @@ pub type CapabilityFactory = fn(&CapabilityConfig) -> Result<CapabilityInstance,
 
 /// Adapts a shared business object into an ordinary plugin.
 pub type CapabilityAdapter = fn(CapabilityInstance) -> Result<Arc<dyn Plugin>, CapabilityError>;
+
+/// Converts an extension-point implementation into the plugin shape consumed
+/// by the framework.
+///
+/// `#[extension_point]` supplies the generic implementation. Built-in
+/// contracts override it so aliases still register their legacy service in
+/// addition to the extension registry.
+pub trait CapabilityExtensionAdapter: ExtensionPoint {
+    #[doc(hidden)]
+    fn into_plugin(id: &str, implementation: Arc<Self>) -> Arc<dyn Plugin>;
+}
+
+/// One file embedded in a published capability package's `skills/` tree.
+#[derive(Clone, Copy)]
+pub struct CapabilitySkillFile {
+    pub path: &'static str,
+    pub contents: &'static [u8],
+}
+
+/// Compile-time skill resources carried by a capability package.
+///
+/// `content_hash` is normally calculated by the packaging macro. Resource
+/// preparation recomputes the digest from these files, validates a supplied
+/// SHA-256 value, and uses the recomputed digest in the application-managed
+/// resource cache path.
+#[derive(Clone, Copy)]
+pub struct EmbeddedCapabilitySkills {
+    pub files: &'static [CapabilitySkillFile],
+    pub content_hash: &'static str,
+}
+
+impl EmbeddedCapabilitySkills {
+    pub const fn new(files: &'static [CapabilitySkillFile], content_hash: &'static str) -> Self {
+        Self {
+            files,
+            content_hash,
+        }
+    }
+}
+
+/// A skill source selected together with a capability package.
+#[derive(Clone)]
+pub enum CapabilitySkillSource {
+    /// A directory managed by the application, useful during local development.
+    Directory(PathBuf),
+    /// Resources included in the capability crate's published artifact.
+    Embedded(EmbeddedCapabilitySkills),
+}
+
+impl CapabilitySkillSource {
+    pub fn directory(path: impl Into<PathBuf>) -> Self {
+        Self::Directory(path.into())
+    }
+
+    pub const fn embedded(bundle: EmbeddedCapabilitySkills) -> Self {
+        Self::Embedded(bundle)
+    }
+}
+
+/// One skill source paired with the selected capability package that owns it.
+#[derive(Clone)]
+pub struct SelectedCapabilitySkillSource {
+    pub pack_id: String,
+    pub source: CapabilitySkillSource,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct FactoryIdentity {
@@ -76,6 +144,8 @@ pub struct CapabilityDescriptor {
     pub adapter: CapabilityAdapter,
     type_identity: Option<fn() -> FactoryIdentity>,
     default_instance: bool,
+    requires_skills_runtime: bool,
+    provides_skills_runtime: bool,
 }
 
 impl CapabilityDescriptor {
@@ -100,6 +170,8 @@ impl CapabilityDescriptor {
             adapter,
             type_identity: None,
             default_instance: false,
+            requires_skills_runtime: false,
+            provides_skills_runtime: false,
         }
     }
 
@@ -114,6 +186,27 @@ impl CapabilityDescriptor {
     ) -> Self {
         self.type_identity = Some(factory_identity::<T, C, F>);
         self.default_instance = default_instance;
+        self
+    }
+
+    /// Mark a declaration that contributes a `SkillProvider`.
+    ///
+    /// The host can install one aggregate Skills runtime before the descriptor
+    /// plugin is materialized, without constructing the provider while it
+    /// discovers selected capability packages.
+    #[doc(hidden)]
+    pub const fn with_skills_runtime(mut self) -> Self {
+        self.requires_skills_runtime = true;
+        self
+    }
+
+    /// Mark a factory that creates the aggregate Skills runtime itself.
+    ///
+    /// This lets a configured `SkillsPlugin` own selection while capability
+    /// package resource sources still register before `ready` aggregates them.
+    #[doc(hidden)]
+    pub const fn with_provided_skills_runtime(mut self) -> Self {
+        self.provides_skills_runtime = true;
         self
     }
 
@@ -158,6 +251,11 @@ pub trait CapabilityPack: Send + Sync {
     fn included_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
         Vec::new()
     }
+
+    /// Skills contributed by this package when it is explicitly selected.
+    fn skill_sources(&self) -> Vec<CapabilitySkillSource> {
+        Vec::new()
+    }
 }
 
 /// Small, allocation-free-to-use builder for ordinary application packs.
@@ -169,6 +267,7 @@ pub struct CapabilityPackBuilder<C> {
     id: String,
     configuration: C,
     included_packs: Vec<Arc<dyn CapabilityPack>>,
+    skill_sources: Vec<CapabilitySkillSource>,
 }
 
 impl<C> CapabilityPackBuilder<C>
@@ -180,6 +279,7 @@ where
             id: id.into(),
             configuration,
             included_packs: Vec::new(),
+            skill_sources: Vec::new(),
         }
     }
 
@@ -197,6 +297,17 @@ where
     /// Alias for [`Self::include`] matching the Agent builder's terminology.
     pub fn capability_pack(self, pack: impl CapabilityPack + 'static) -> Self {
         self.include(pack)
+    }
+
+    /// Add a skill source to this capability package.
+    pub fn skills(mut self, source: CapabilitySkillSource) -> Self {
+        self.skill_sources.push(source);
+        self
+    }
+
+    /// Add an application-managed `skills/` directory to this package.
+    pub fn skills_directory(self, directory: impl Into<PathBuf>) -> Self {
+        self.skills(CapabilitySkillSource::directory(directory))
     }
 
     /// Finish this declaration.  The returned value still implements
@@ -221,6 +332,59 @@ where
     fn included_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
         self.included_packs.clone()
     }
+
+    fn skill_sources(&self) -> Vec<CapabilitySkillSource> {
+        self.skill_sources.clone()
+    }
+}
+
+/// Collect skill sources from the explicit selected-package closure.
+///
+/// Linking a crate does not make its skills visible; roots and `include(...)`
+/// are the only selection path, just as they are for code capabilities.
+pub fn selected_capability_skill_sources(
+    packs: &[Arc<dyn CapabilityPack>],
+) -> Result<Vec<SelectedCapabilitySkillSource>, CapabilityError> {
+    Ok(selected_pack_closure(packs)?
+        .into_iter()
+        .flat_map(|(pack_id, pack)| {
+            pack.skill_sources()
+                .into_iter()
+                .map(move |source| SelectedCapabilitySkillSource {
+                    pack_id: pack_id.clone(),
+                    source,
+                })
+        })
+        .collect())
+}
+
+/// Whether selected declarations contribute a storage-neutral `SkillProvider`.
+///
+/// This inspects only static descriptor metadata. It never constructs a
+/// capability instance or starts provider discovery.
+pub fn selected_capability_requires_skills_runtime(
+    packs: &[Arc<dyn CapabilityPack>],
+) -> Result<bool, CapabilityError> {
+    let selected = selected_pack_closure(packs)?;
+    Ok(inventory::iter::<CapabilityDescriptor>
+        .into_iter()
+        .any(|descriptor| {
+            descriptor.requires_skills_runtime && selected.contains_key(descriptor.pack)
+        }))
+}
+
+/// Whether selected factories already provide the aggregate Skills runtime.
+///
+/// The result is static descriptor metadata and never constructs a plugin.
+pub fn selected_capability_provides_skills_runtime(
+    packs: &[Arc<dyn CapabilityPack>],
+) -> Result<bool, CapabilityError> {
+    let selected = selected_pack_closure(packs)?;
+    Ok(inventory::iter::<CapabilityDescriptor>
+        .into_iter()
+        .any(|descriptor| {
+            descriptor.provides_skills_runtime && selected.contains_key(descriptor.pack)
+        }))
 }
 
 /// Errors that can be reported without installing a capability plugin.
@@ -612,6 +776,10 @@ impl Plugin for DescriptorPlugin {
 
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
         self.inner.install(context).await
+    }
+
+    async fn ready(&self, context: &mut PluginReadyContext<'_>) -> Result<(), PluginError> {
+        self.inner.ready(context).await
     }
 }
 

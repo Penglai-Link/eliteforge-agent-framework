@@ -8,8 +8,12 @@ impl Plugin for SqliteExecutionPlugin {
         "sqlite.execution"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.provide(StateStoreService(self.0.clone()))?;
-        context.provide(InteractionStoreService(self.0.clone()))
+        let state_store: Arc<dyn StateStore> = self.0.clone();
+        let interaction_store: Arc<dyn InteractionStore> = self.0.clone();
+        context.provide(StateStoreService(state_store.clone()))?;
+        context.contribute_extension(state_store)?;
+        context.provide(InteractionStoreService(interaction_store.clone()))?;
+        context.contribute_extension(interaction_store)
     }
 }
 

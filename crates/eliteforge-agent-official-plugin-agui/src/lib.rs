@@ -138,8 +138,12 @@ impl Plugin for AgUiPlugin {
         "agent.agui"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.contribute(RunOutputService(Arc::new(self.clone())))?;
-        context.contribute(EventService(Arc::new(self.clone())))
+        let output: Arc<dyn RunOutputFactory> = Arc::new(self.clone());
+        let events: Arc<dyn EventSink> = Arc::new(self.clone());
+        context.contribute(RunOutputService(output.clone()))?;
+        context.contribute_extension(output)?;
+        context.contribute(EventService(events.clone()))?;
+        context.contribute_extension(events)
     }
 }
 #[async_trait]

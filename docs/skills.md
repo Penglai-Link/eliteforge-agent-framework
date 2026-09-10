@@ -26,6 +26,79 @@ release-notes/
     └── publish.sh
 ~~~
 
+## 能力包来源
+
+能力包可以把 Skills 当作包成员。选中包后，框架把包资源、目录来源和声明式 Provider 汇聚到一个
+`SkillsPlugin` 运行时，因此不会重复注册上下文、`skill_load` 或 `skill_read_resource` 工具。
+
+发布能力包时，将资源放到 crate 的默认 `skills/` 目录：
+
+~~~text
+shop-capabilities/
+├── src/
+└── skills/
+    └── order-review/
+        ├── SKILL.md
+        ├── scripts/
+        ├── references/
+        └── assets/
+~~~
+
+在这个 crate 内声明包：
+
+~~~rust
+use eliteforge_agent_core::{CapabilityPackBuilder, capability_skills};
+
+pub fn shop_pack(config: ShopConfig) -> CapabilityPackBuilder<ShopConfig> {
+    CapabilityPackBuilder::new("shop", config)
+        .skills(capability_skills!())
+}
+~~~
+
+为保证新增资源也会被编入下一次构建，crate 还需要一个 `build.rs`：
+
+~~~rust
+use eliteforge_agent_core::capability_skills_build;
+
+fn main() {
+    capability_skills_build!();
+}
+~~~
+
+在 `Cargo.toml` 的 `build-dependencies` 中加入 `eliteforge-agent-core`。若资源目录写成
+`capability_skills!("package-skills")`，build script 对应使用
+`capability_skills_build!("package-skills")`。
+
+`capability_skills!()` 会将目录内每个普通文件编入产物，并为内容生成 SHA-256 摘要。应用启用这类包
+时，必须指定可共享的资源根：
+
+~~~rust
+let agent = AgentBuilder::new()
+    .capability_skills_root(app_data.join("agent-resources"))
+    .capability_pack(shop_pack(config))
+    .build()
+    .await?;
+~~~
+
+资源准备到
+`<资源根>/capability-packs/<安全包ID>/<内容摘要>/skills/`。框架使用临时目录和原子发布；同一内容
+复用，不同版本并存，关闭 Agent 不会删除共享缓存。开发期若由应用直接管理目录，可改用
+`.skills_directory("./company-skills")`，不会复制资源也不需要资源根。
+
+非文件系统来源直接实现并声明 `SkillProvider`：
+
+~~~rust
+#[capability(pack = "shop")]
+#[async_trait::async_trait]
+impl SkillProvider for ShopSkillProvider {
+    // catalog / load / read_resource / release
+}
+~~~
+
+框架会自动创建聚合 Skills 运行时。若应用已注册 `SkillsPlugin`，它会在 `ready` 阶段绑定所有来源；
+`only_skills(...)` 对合并后的目录生效。不同来源同名技能会在该逻辑运行建立清单时报告冲突，
+不会任意选一个。单个文件系统 Provider 内，仍由本地目录覆盖系统目录。
+
 ## 运行过程
 
 ~~~mermaid

@@ -7,6 +7,7 @@ use std::sync::Arc;
 /// ordered by plugin registration; the first contribution is outermost. A
 /// wrapper can deny execution or await `next.run` and observe its result.
 /// Cancellation drops the future: use RAII for cleanup, not only code after await.
+#[crate::extension_point(adapter = crate::WorkflowNodeMiddlewarePlugin, contribute)]
 #[async_trait]
 pub trait WorkflowNodeMiddleware: Send + Sync {
     async fn intercept(
@@ -97,6 +98,7 @@ pub struct ModelInvocationContext<'a> {
     pub run: &'a RunContext,
 }
 
+#[crate::extension_point(adapter = crate::ModelMiddlewarePlugin, contribute)]
 #[async_trait]
 pub trait ModelMiddleware: Send + Sync {
     async fn intercept(
@@ -378,6 +380,7 @@ pub fn validate_model_response(
 /// Wraps one run execution. Inputs are immutable; `next` preserves the admitted
 /// request, identity, limits and cancellation context. Use `finish_with_cleanup`
 /// when an interceptor has both an execution error and a cleanup error.
+#[crate::extension_point(adapter = crate::RunMiddlewarePlugin, contribute)]
 #[async_trait]
 pub trait RunMiddleware: Send + Sync {
     async fn intercept(
@@ -480,6 +483,7 @@ pub struct ToolInvocationContext<'a> {
 /// Intercepts a single immutable tool invocation. A denial returns an error
 /// without calling next. Execution failures cannot be converted to success;
 /// an interceptor error after successful dispatch is conservatively indeterminate.
+#[crate::extension_point(adapter = crate::ToolMiddlewarePlugin, contribute)]
 #[async_trait]
 pub trait ToolMiddleware: Send + Sync {
     async fn intercept(

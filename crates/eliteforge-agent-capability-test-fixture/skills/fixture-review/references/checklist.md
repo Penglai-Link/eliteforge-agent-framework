@@ -1,0 +1,2 @@
+- Verify capability registration.
+- Verify resource packaging.

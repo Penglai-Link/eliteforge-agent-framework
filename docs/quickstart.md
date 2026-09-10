@@ -87,7 +87,7 @@ let shop = CapabilityPackBuilder::new("shop", shop_config)
 ~~~
 
 这里的 `PluginPack` 只负责官方插件组合，`CapabilityPack` 负责业务声明的自动装配；
-两者可以并用。完整的宏写法、`id`、`instance`、`depends_on`、配置 factory 和首版限制见
+两者可以并用。完整的宏写法、`id`、`instance`、`depends_on`、配置 factory、Skills 成员和生命周期见
 [能力包与自动装配](capability-packs.md)。
 
 ## 使用官方插件包

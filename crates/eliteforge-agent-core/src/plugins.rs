@@ -48,7 +48,8 @@ macro_rules! unique_plugin {
                 $id
             }
             async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-                context.provide($service(self.implementation.clone()))
+                context.provide($service(self.implementation.clone()))?;
+                context.contribute_extension(self.implementation.clone())
             }
         }
     };
@@ -134,7 +135,8 @@ macro_rules! contribution_plugin {
                 &self.id
             }
             async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-                context.contribute($service(self.implementation.clone()))
+                context.contribute($service(self.implementation.clone()))?;
+                context.contribute_extension(self.implementation.clone())
             }
         }
     };
@@ -164,6 +166,37 @@ impl StaticToolProvider {
 impl ToolProvider for StaticToolProvider {
     async fn lease(&self, _context: &RunContext) -> Result<ToolLease, AgentError> {
         Ok(ToolLease::new(self.tools.clone()))
+    }
+}
+
+/// Registers one explicitly described tool through the normal tool-provider
+/// path. Use this from `#[capability_factory]` when a single `Tool` needs a
+/// descriptor, visibility, or parallelism configuration.
+pub struct ToolBindingPlugin {
+    id: String,
+    binding: ToolBinding,
+}
+
+impl ToolBindingPlugin {
+    pub fn new(id: impl Into<String>, binding: ToolBinding) -> Self {
+        Self {
+            id: id.into(),
+            binding,
+        }
+    }
+}
+
+#[async_trait]
+impl Plugin for ToolBindingPlugin {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        let provider: Arc<dyn ToolProvider> =
+            Arc::new(StaticToolProvider::new(vec![self.binding.clone()]));
+        context.contribute(ToolProviderService(provider.clone()))?;
+        context.contribute_extension(provider)
     }
 }
 
