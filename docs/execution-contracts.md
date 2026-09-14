@@ -60,7 +60,7 @@ must link actual tests for every item before the work is considered complete.
 | Extension points | Separate lifecycle hooks and run/node/model/tool interception, per-step context; order, denial, failures, cancellation and untrusted-context tests |
 | State | Separate transcript/context/checkpoints, exclusive ownership and revision checks, durable tool journal and typed interaction resume; reopen, stale-write, ambiguous-effect tests |
 | Strategies | Simple conversation, tools, configurable stages, human approval and child agents; real invoker paths with varying inputs, budgets and cancellation |
-| DAG workflows | Versioned serializable graphs, cycle validation, node plugins, selected/all joins, bounded owned tasks, shared admission, durable routing/results and node reconciliation; parallel, fault injection, reopen and real process-crash tests |
+| DAG workflows | Versioned serializable graphs, cycle validation, node plugins, selected/all joins, bounded owned tasks, shared admission, durable routing/results and checkpoint continuation; parallel, fault injection, reopen and real process-crash tests |
 | genai | Multi-model shared connection, options/content conversion, signed continuation roundtrip; local HTTP/SSE protocol fixtures |
 | MCP | Official SDK transport, discovery/pagination, structured results, cancellation and lifecycle; actual local protocol client/server tests |
 | Persistence | SQLite reference implementation, atomic writes and conflict semantics; reopen and competing-connection tests |

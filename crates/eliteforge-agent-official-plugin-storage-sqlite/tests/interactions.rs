@@ -342,7 +342,6 @@ async fn terminal_resume_repairs_transcript_without_repeating_the_model() {
     resume.resume = Some(ResumeRequest {
         run_id,
         response: None,
-        resolutions: vec![],
     });
     let result = agent.run(resume).await.unwrap();
     assert_eq!(result.output, "done");

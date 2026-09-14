@@ -155,9 +155,9 @@ flowchart TD
     Terminal -->|是| Replay[幂等返回已保存结果]
     Terminal -->|否| Lease[获取运行锁<br/>再次读取检查点]
     Lease --> Restore[恢复预算、限制、工具可见性和撤销状态]
-    Restore --> Apply[应用交互答案与工具对账结果]
+    Restore --> Apply[应用交互答案]
     Apply --> Guard{当前执行位置}
-    Guard -->|存在 Started 工具| Recovery[RecoveryRequired]
+    Guard -->|存在 Started 工具| Failed[执行失败]
     Guard -->|存在待处理交互| Await[AwaitingInput]
     Guard -->|Model| Invoke[执行模型步骤]
     Invoke -->|最终内容| Next{还有阶段或 steering?}
@@ -247,7 +247,7 @@ flowchart TD
     Invoke --> Outcome{执行结果}
     Outcome -->|结果确定| Finished[持久化完成状态]
     Outcome -->|需要用户输入| Input[持久化交互请求]
-    Outcome -->|结果无法确定| Recovery[RecoveryRequired]
+    Outcome -->|结果无法确定| Failed[执行失败]
     Finished --> Commit[原子追加模型和工具消息]
     Input --> Commit
     Commit --> Output[发布 ToolResult]
@@ -257,8 +257,7 @@ flowchart TD
 ```
 
 `Deny` 优先于 `RequireApproval`。任一调用等待审批时，整批工具都不派发。
-工具派发后发生取消、超时或代码异常退出时，执行结果可能无法确定；恢复前必须通过
-`CallResolution::Record` 或 `Retry` 对账。
+工具派发后发生取消、超时或结果丢失时，运行以取消或错误结束，不自动重放工具。
 
 #### 大结果如何转存
 
@@ -280,7 +279,7 @@ flowchart TD
     Inline --> Persist[写入执行检查点和会话]
     Preview --> Persist
     Persist --> Model[下一次模型调用只读取内联结果]
-    Store -->|保存失败| Recovery[RecoveryRequired]
+    Store -->|保存失败| Failed[执行失败]
 ```
 
 转存完成后，各位置保存的内容不同：
@@ -314,78 +313,7 @@ sequenceDiagram
     Invoker-->>Model: 作为新的工具结果进入会话
 ```
 
-如果 `ArtifactStore.put` 失败，原工具已经执行，但完整结果没有可靠保存。`ToolInvoker` 将该结果标记为
-无法确定，运行进入 `RecoveryRequired`，不会自动重放工具。
-
-#### 结果无法确定时的恢复
-
-`RecoveryRequired` 更准确的含义是“必须先对账”。工具已经开始执行，但框架没有可靠保存最终结果。
-它不能找回丢失的结果；自动重试又可能造成重复扣款、重复发消息或重复创建数据。
-
-返回该状态后，框架立即停止当前执行，不再调用模型或工具，也不会后台重试。上层应用负责完成以下闭环：
-
-```mermaid
-flowchart LR
-    Stop[返回 RecoveryRequired<br/>停止当前执行] --> Load[读取原 run_id 的检查点]
-    Load --> Find[找到状态为 Started 的工具调用<br/>取得 invocation_id]
-    Find --> Verify[核对外部系统的实际结果]
-    Verify --> Decision{核对结论}
-    Decision -->|已经完成| Record[CallResolution::Record<br/>提交实际 ToolOutput]
-    Decision -->|确认可以重试| Retry[CallResolution::Retry<br/>明确授权再次调用]
-    Decision -->|仍无法判断| Wait[保持 RecoveryRequired]
-    Record --> Resume[使用原 run_id 发起恢复]
-    Retry --> Resume
-    Resume --> Remaining{还有未核对调用?}
-    Remaining -->|是| Stop
-    Remaining -->|否| Continue[继续工具批次与模型循环]
-```
-
-调用方应保留 `RunHandle.run_id`，也可以通过 `Agent::latest_checkpoint(session_id)` 找到原运行。
-`Agent::checkpoint(run_id)` 返回检查点；ReAct 和工作流在其中记录仍为 `Started` 的工具调用及其
-`invocation_id`。调用方核对外部系统后，把对应的 `CallResolution` 放入 `ResumeRequest.resolutions`，
-再调用 `Agent::start`。恢复沿用原 `run_id`，但生成新的 `execution_id`。
-
-`Record` 直接采用上层应用提交的 `ToolOutput`，不会再次调用工具。`Retry` 把该调用恢复为待执行状态；
-只有确认上次调用未生效，或工具本身支持幂等重试时，才能选择它。未核对的调用仍存在时，框架会再次返回
-`RecoveryRequired`。DAG 自定义节点使用对应的 `RecordNode` 和 `RetryNode`。
-
-#### 示例：新增用户 API
-
-假设新增用户接口已经返回成功，但 `ArtifactStore.put` 随后失败：
-
-```mermaid
-sequenceDiagram
-    participant App as 上层应用
-    participant Agent
-    participant Runner as 执行循环
-    participant Invoker as ToolInvoker
-    participant API as 用户服务
-    participant Store as ArtifactStore
-
-    Runner->>Invoker: 调用新增用户工具，invocation_id = I
-    Invoker->>API: POST /users
-    API-->>Invoker: 201，user_id = 42
-    Invoker->>Store: 保存完整 ToolOutput
-    Store--xInvoker: 保存失败
-    Invoker-->>Runner: 结果无法确定
-    Runner-->>Agent: RunResult(RecoveryRequired)
-    Agent-->>App: 返回运行结果
-    App->>API: 按邮箱、业务请求号或幂等键查询
-    API-->>App: 用户已存在，user_id = 42
-    App->>Agent: 使用原 run_id 恢复<br/>Record(I, ToolOutput(user_id = 42))
-    Agent->>Runner: 应用对账结果
-    Note over Runner,API: 框架补写工具结果，不再调用 POST /users
-    Runner-->>Agent: 继续后续模型循环
-    Agent-->>App: 返回后续运行结果
-```
-
-如果查询确认用户已经创建，上层应用使用 `CallResolution::Record` 补写可继续执行的结果，例如
-`user_id`。框架把调用标记为完成，不再请求新增用户接口。如果确认用户不存在，并且接口支持幂等请求，
-上层应用才可以选择 `Retry`。
-
-如果外部系统不能查询结果，新增接口也不支持幂等请求，就不存在安全的自动恢复路径。运行必须保持
-`RecoveryRequired`，等待人工核对或修复外部系统。框架只提供稳定的 `invocation_id` 和对账入口；
-工具集成负责把业务请求号或幂等键传给外部 API。
+如果 `ArtifactStore.put` 失败，运行以错误结束，已执行的工具不会自动重放。
 
 ### 3.7 DAG 调度
 
@@ -399,14 +327,14 @@ flowchart TD
     Ready -->|是| Intent[先持久化 Running<br/>与节点执行身份]
     Intent --> Node[WorkflowNodeMiddleware<br/>→ WorkflowNode.execute]
     Node -->|Completed| Success[持久化 Succeeded]
-    Node -->|Awaiting / Limit / Recovery| Suspend[持久化 Suspended]
+    Node -->|AwaitingInput / Limit| Suspend[持久化 Suspended]
     Node -->|错误| Abort[中止并回收兄弟任务]
     Success --> Scan
     Suspend --> Result[汇总最高优先级暂停状态]
     Skip --> Scan
     Wait --> Result
     Result -->|全部成功/跳过| Done[Completed]
-    Result -->|存在未知执行| Recovery[RecoveryRequired]
+    Abort --> Failed[执行失败或取消]
 ```
 
 DAG 并发受 `max_parallel_nodes` 限制。内置 ReAct 节点把状态嵌入父 DAG 执行检查点，不单独获取运行锁。
@@ -419,12 +347,11 @@ DAG 并发受 `max_parallel_nodes` 限制。内置 ReAct 节点把状态嵌入�
 |---|---|---|
 | `Completed` | 任务完成 | `RUN_FINISHED(success)` |
 | `AwaitingInput` | 等待交互答案 | `RUN_FINISHED(interrupt)` |
-| `RecoveryRequired` | 工具或节点可能已经产生副作用，但最终结果没有可靠保存；等待上层应用核对 | `RUN_FINISHED(interrupt)` |
 | `StepLimit` | 模型步数达限，任务未完成 | `RUN_ERROR(AGENT_LIMIT_REACHED)` |
 | `ToolCallLimit` | 工具调用数达限，任务未完成 | `RUN_ERROR(AGENT_LIMIT_REACHED)` |
 
 `AgentError::Cancelled` 产生 `RunCancelled`；其他错误产生 `RunFailed`。`ThreadStatus` 保留上表所有状态，
-不会把限额或恢复状态压成 `Completed`。
+不会把限额或等待输入状态压成 `Completed`。
 
 ## 4. 持久化与恢复
 
@@ -467,8 +394,8 @@ sequenceDiagram
     Store-->>A: 拒绝
 ```
 
-存储写入被取消时，框架不猜测事务是否已提交。恢复执行重新读取状态，并在必要时返回
-`RecoveryRequired`。
+存储写入被取消时，框架不猜测事务是否已提交。再次执行时重新读取检查点；
+若发现已开始但未保存结果的工具，运行以错误结束。
 
 ## 5. 用户交互
 
@@ -532,17 +459,14 @@ flowchart TD
     Running --> Completed[Completed]
     Running --> Awaiting[AwaitingInput]
     Running --> Limit[StepLimit / ToolCallLimit]
-    Running --> Recovery[RecoveryRequired]
     Running --> Failed[Failed / Cancelled]
     Awaiting -->|thread_answer<br/>原 run_id| Running
     Completed -->|thread_send<br/>新 run_id| Running
     Limit -->|thread_send<br/>新 run_id| Running
-    Recovery -. 上层编排对账 / 原 run_id .-> Running
     Failed -->|thread_send<br/>新 run_id| Running
     Completed --> Close[thread_close]
     Awaiting --> Close
     Limit --> Close
-    Recovery --> Close
     Failed --> Close
     Close --> Removed[删除记录<br/>释放容量]
 ```
@@ -552,7 +476,6 @@ flowchart TD
 - `thread_create` 在 `Agent::start` 前预留容量；启动失败自动退还。
 - 同一 Thread 的发消息和回答操作串行执行；活动运行期间拒绝新操作。
 - `AwaitingInput` 只允许 `thread_answer`，不允许 `thread_send` 绕过答案结构校验。
-- `RecoveryRequired` 需要上层应用提交 `CallResolution`；默认 Thread 工具不提供隐式重试。
 - 旧运行只有在自己仍是 `latest_run_id` 时才能更新 Thread 摘要。
 - 进程内 Thread 注册表上限为 128，运行结束不自动删除记录；`thread_close` 显式释放容量。
 - Thread 注册信息仅存在当前进程。跨进程任务应替换 `AgentCollaborationRuntime`。

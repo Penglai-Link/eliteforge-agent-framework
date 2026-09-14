@@ -24,7 +24,6 @@ impl InteractionRecord {
         request.resume = Some(ResumeRequest {
             run_id: self.run_id,
             response: self.response.clone(),
-            resolutions: vec![],
         });
         request
     }

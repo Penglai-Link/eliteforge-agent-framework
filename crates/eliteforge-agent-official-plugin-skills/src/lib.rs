@@ -1076,7 +1076,6 @@ impl RunMiddleware for SkillsEndpoint {
             matches!(
                 &result.status,
                 eliteforge_agent_core::RunStatus::AwaitingInput
-                    | eliteforge_agent_core::RunStatus::RecoveryRequired
             )
         });
         if !retain_snapshot {

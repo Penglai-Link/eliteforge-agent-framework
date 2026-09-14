@@ -110,7 +110,7 @@ cargo run -p eliteforge-agent-official-plugin-agui --example sse
 | `Steered` | `CUSTOM` | 运行中追加的用户指令已写入历史，模型未必已经处理 | `name="framework.steered"`；`value.text`：追加的指令文本 |
 | `MessageFinished`（含非文本内容或结构化回复） | `CUSTOM` | 传递图片等非文本内容或结构化数据，保留原始内容类型 | `name="framework.message"`；`value` 包含 `messageId`、`content`、`structured` |
 | `RunFinished { status: Completed }` | `RUN_FINISHED` | 本次运行正常完成 | `threadId`、`runId`：会话与本次执行 ID；`outcome` 表示 `success`；已收到 `OutputEvent::RunResult` 时，`result` 携带最终 `RunResult` |
-| `RunFinished { status: AwaitingInput / RecoveryRequired }` | `RUN_FINISHED` | 本次执行暂停，等待用户回答或人工核对执行结果 | `outcome` 表示 `interrupt`；中断信息包含 ID 和原因；有持久化交互时附带提示、响应 schema，工具审批还携带 `toolCallId` |
+| `RunFinished { status: AwaitingInput }` | `RUN_FINISHED` | 本次执行暂停，等待用户回答或审批决定 | `outcome` 表示 `interrupt`；中断信息包含 ID 和原因；有持久化交互时附带提示、响应 schema，工具审批还携带 `toolCallId` |
 | `RunFinished { status: StepLimit / ToolCallLimit }` | `RUN_ERROR` | 达到最大执行步数或工具调用次数 | `code="AGENT_LIMIT_REACHED"`；`message`：执行次数超限说明 |
 | `RunCancelled` | `RUN_ERROR` | 本次运行被取消 | `code="AGENT_CANCELLED"`；`message`：取消说明 |
 | `RunFailed` | `RUN_ERROR` | 本次运行执行失败 | `code="AGENT_RUN_FAILED"`；`message`：默认通用错误说明，开启 `include_error_details` 后返回异常正文 |
@@ -137,8 +137,7 @@ RunResult 的最终回复与最近一条完整文本相同时不重复发送；�
   不重复声明工具或发送参数。应用应保留之前的会话消息，才能把结果显示在原调用下。
   执行器和插件重建后也不依赖内存中的旧映射。
 - 审批和结构化输入沿用真实 interaction_id、提示和响应 schema。应用将用户答案转换成
-  `InteractionResponse`，随新的 `ResumeRequest` 启动恢复。RecoveryRequired 仍需
-  `CallResolution`，不能仅提交输入文本。
+  `InteractionResponse`，随新的 `ResumeRequest` 启动恢复。
 - 工具审批使用标准 `reason: "tool_call"`，`toolCallId` 指向对应的 invocation_id。
   审批通过或拒绝后，结果均关联这个调用；拒绝不会执行工具。
 - 内置执行器将普通 `AwaitInput` 也保存为持久化字符串问答。应用通过

@@ -265,7 +265,7 @@ async fn selected_branch_skips_transitively_and_join_does_not_wait_for_pruned_in
 }
 
 #[tokio::test]
-async fn cancellation_drops_owned_tasks_and_requires_explicit_reconciliation() {
+async fn cancellation_drops_owned_tasks_and_is_terminal() {
     let temp = tempfile::tempdir().unwrap();
     let db = store(&temp.path().join("cancel.db")).await;
     let implementation = TestNode::default();
@@ -286,23 +286,13 @@ async fn cancellation_drops_owned_tasks_and_requires_explicit_reconciliation() {
     assert_eq!(implementation.dropped.load(Ordering::SeqCst), 1);
     assert_eq!(
         db.load(id).await.unwrap().status,
-        ExecutionStatus::RecoveryRequired
+        ExecutionStatus::Cancelled
     );
-    let pending = a.run(resume("cancel", id)).await.unwrap();
-    assert_eq!(pending.status, RunStatus::RecoveryRequired);
+    assert!(matches!(
+        a.run(resume("cancel", id)).await,
+        Err(AgentError::Cancelled)
+    ));
     assert_eq!(implementation.calls.lock().unwrap().as_slice(), &["effect"]);
-    let s = state(db.as_ref(), id).await;
-    let mut r = resume("cancel", id);
-    r.resume
-        .as_mut()
-        .unwrap()
-        .resolutions
-        .push(CallResolution::RecordNode {
-            node_id: "effect".into(),
-            invocation_id: s.nodes["effect"].invocation_id,
-            result: WorkflowNodeResult::completed(json!(42)),
-        });
-    assert_eq!(a.run(r).await.unwrap().structured, Some(json!(42)));
     a.close().await;
     db.close().await.unwrap();
 }
@@ -671,7 +661,7 @@ async fn embedded_react_approval_resumes_only_after_matching_answer() {
 }
 
 #[tokio::test]
-async fn interrupted_embedded_tool_is_not_repeated_and_accepts_tool_reconciliation() {
+async fn cancelled_embedded_tool_is_not_repeated() {
     let temp = tempfile::tempdir().unwrap();
     let db = store(&temp.path().join("unknown.db")).await;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -690,28 +680,15 @@ async fn interrupted_embedded_tool_is_not_repeated_and_accepts_tool_reconciliati
     let id = h.run_id;
     entered.notified().await;
     a.cancel(&h).unwrap();
-    assert!(a.wait(h).await.is_err());
+    assert!(matches!(a.wait(h).await, Err(AgentError::Cancelled)));
     assert_eq!(
-        a.run(resume("unknown", id)).await.unwrap().status,
-        RunStatus::RecoveryRequired
+        db.load(id).await.unwrap().status,
+        ExecutionStatus::Cancelled
     );
-    let s = state(db.as_ref(), id).await;
-    let cp: Checkpoint =
-        serde_json::from_value(s.nodes["react"].checkpoint.clone().unwrap()).unwrap();
-    let inner: WorkflowState = serde_json::from_value(cp.state).unwrap();
-    let WorkflowCursor::Tools { executions, .. } = inner.cursor else {
-        panic!("tool intent missing")
-    };
-    let mut r = resume("unknown", id);
-    r.resume
-        .as_mut()
-        .unwrap()
-        .resolutions
-        .push(CallResolution::Record {
-            invocation_id: executions[0].invocation_id,
-            output: ToolOutput::text("verified external result"),
-        });
-    assert_eq!(a.run(r).await.unwrap().output, "finished");
+    assert!(matches!(
+        a.run(resume("unknown", id)).await,
+        Err(AgentError::Cancelled)
+    ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     a.close().await;
     db.close().await.unwrap();
@@ -811,7 +788,7 @@ impl WorkflowNode for FlakyNode {
     }
 }
 #[tokio::test]
-async fn explicit_retry_changes_invocation_and_rejects_stale_identity() {
+async fn failed_node_is_not_retried_by_resume_but_a_new_run_can_start() {
     let temp = tempfile::tempdir().unwrap();
     let db = store(&temp.path().join("retry.db")).await;
     let calls = Arc::new(AtomicUsize::new(0));
@@ -826,33 +803,15 @@ async fn explicit_retry_changes_invocation_and_rejects_stale_identity() {
     let h = a.start(RunRequest::new("retry", "input")).unwrap();
     let id = h.run_id;
     assert!(a.wait(h).await.is_err());
-    let old = state(db.as_ref(), id).await.nodes["flaky"].invocation_id;
-    let mut bad = resume("retry", id);
-    bad.resume
-        .as_mut()
-        .unwrap()
-        .resolutions
-        .push(CallResolution::RetryNode {
-            node_id: "flaky".into(),
-            invocation_id: RunId::new_v4(),
-        });
-    assert!(a.run(bad).await.is_err());
+    assert_eq!(db.load(id).await.unwrap().status, ExecutionStatus::Failed);
+    assert!(matches!(
+        a.run(resume("retry", id)).await,
+        Err(AgentError::Run(_))
+    ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    let mut retry = resume("retry", id);
-    retry
-        .resume
-        .as_mut()
-        .unwrap()
-        .resolutions
-        .push(CallResolution::RetryNode {
-            node_id: "flaky".into(),
-            invocation_id: old,
-        });
-    assert_eq!(a.run(retry).await.unwrap().output, "recovered");
-    assert_ne!(
-        state(db.as_ref(), id).await.nodes["flaky"].invocation_id,
-        old
-    );
+    let next = a.start(RunRequest::new("retry", "try again")).unwrap();
+    assert_ne!(next.run_id, id);
+    assert_eq!(a.wait(next).await.unwrap().output, "recovered");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
     a.close().await;
     db.close().await.unwrap();

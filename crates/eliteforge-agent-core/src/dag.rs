@@ -1,7 +1,7 @@
 //! Versioned DAG definitions and durable, plugin-extensible execution.
 //!
 //! Graph indices are private compilation details. Checkpoints, routes and
-//! reconciliation always use the stable IDs supplied by the definition.
+//! continuation always use the stable IDs supplied by the definition.
 use crate::*;
 use async_trait::async_trait;
 use petgraph::{algo::toposort, graph::DiGraph};
@@ -156,7 +156,7 @@ impl DagWorkflowDefinition {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowNodeInput {
     pub node_id: String,
-    /// Stable for this attempt, including resume; a fresh explicit retry changes it.
+    /// Stable for this logical node invocation, including continuation.
     pub invocation_id: RunId,
     pub config: Value,
     pub request: RunRequest,
@@ -215,8 +215,8 @@ pub trait WorkflowNode: Send + Sync {
     fn supports_tool_policy(&self) -> bool {
         false
     }
-    /// True only when execute can safely reconcile its own persisted intent.
-    /// Default nodes require explicit RecordNode/RetryNode after interruption.
+    /// True only when execute can safely continue from its persisted checkpoint.
+    /// Interrupted nodes without this support fail the run.
     fn supports_resume(&self) -> bool {
         false
     }
@@ -289,7 +289,7 @@ pub struct WorkflowNodeExecution {
     pub workflow_id: String,
     pub workflow_version: u32,
     pub node_id: String,
-    /// Stable across continuation; an explicit RetryNode allocates a new ID.
+    /// Stable across continuation.
     pub invocation_id: RunId,
     /// Fresh for each dispatch, even within the same process.
     pub attempt_id: RunId,

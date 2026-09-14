@@ -109,7 +109,7 @@ let (handle, stream) = agent.start_with_output::<AgUiStream>(request)?;
 ```
 
 保存答案和启动执行是两个步骤。保存后进程退出，可以重新调用 `answer()` 提交相同答案；
-也可以使用对应 `ResumeRequest { run_id, response: None, resolutions: vec![] }` 恢复，
+也可以使用对应 `ResumeRequest { run_id, response: None }` 恢复，
 执行器会读取已保存的答案。相同答案可以重试，不同答案产生冲突；过期问题不能接受新答案。
 已按时保存的答案在到期后仍可用于恢复。
 
@@ -162,10 +162,6 @@ let result = agent.run(approved).await?;
                                                 ↓
                                            模型继续执行
 ```
-
-工具已开始、但结果因崩溃或断线无法确认时，返回 `RecoveryRequired`。
-应用核实后使用 `CallResolution::Record` 记录实际结果，或明确选择 `Retry`；
-保存过的审批不等于允许框架自动重做未知结果的外部操作。
 
 ## 执行代码与持久化
 

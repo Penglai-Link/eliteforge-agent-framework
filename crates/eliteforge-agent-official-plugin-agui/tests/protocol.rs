@@ -421,7 +421,6 @@ async fn approval_round_trip(approved: bool, legacy: bool) {
             interaction_id: result.interactions[0].id,
             value: json!(approved),
         }),
-        resolutions: vec![],
     });
     let (handle, stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
     let (result, events) = complete(agent.clone(), handle, stream).await;

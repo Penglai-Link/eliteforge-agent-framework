@@ -193,7 +193,7 @@ impl Adapter {
                             .with_outcome(ag_ui::SubagentOutcome::Success)
                             .into(),
                     ),
-                    RunStatus::AwaitingInput | RunStatus::RecoveryRequired => out.push(
+                    RunStatus::AwaitingInput => out.push(
                         ag_ui::SubagentFinishedEvent::new(id)
                             .with_outcome(ag_ui::SubagentOutcome::suspended(interrupt_ids))
                             .into(),
@@ -485,7 +485,7 @@ impl Adapter {
         }
         let outcome = match status {
             RunStatus::Completed => ag_ui::RunOutcome::Success,
-            RunStatus::AwaitingInput | RunStatus::RecoveryRequired => {
+            RunStatus::AwaitingInput => {
                 let mut interrupts = Vec::new();
                 if let Some(result) = &self.result {
                     for request in &result.interactions {
@@ -505,14 +505,9 @@ impl Adapter {
                     }
                 }
                 if interrupts.is_empty() {
-                    let reason = if status == RunStatus::RecoveryRequired {
-                        "recovery_required"
-                    } else {
-                        "input_required"
-                    };
                     interrupts.push(ag_ui::Interrupt::new(
                         format!("{}/input", self.execution_id),
-                        reason,
+                        "input_required",
                     ));
                 }
                 ag_ui::RunOutcome::interrupt(interrupts)

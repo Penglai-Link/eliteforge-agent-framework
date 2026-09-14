@@ -72,7 +72,7 @@ impl WorkflowNodeMiddleware for MyNodeMiddleware {
 包装器与节点均为可信进程内插件，不构成隔离沙箱。
 
 节点派发前先持久化身份与 `Running`，再进入中间件。意图写入失败时不会调用中间件或节点；
-跳过节点、复用已完成节点、人工 `RecordNode` 也不会伪造执行 span。
+跳过节点、复用已完成节点不会伪造执行 span。
 节点 span 包含执行和节点内部的保存，调度器在节点返回之后提交结果的耗时和错误归属 run span。
 
 取消、超时或兄弟节点失败可能直接丢弃 future，不能依靠 await 后面的语句清理资源。
@@ -86,7 +86,7 @@ impl WorkflowNodeMiddleware for MyNodeMiddleware {
 |---|---|---|
 | `agent.run.id` | 逻辑运行 | 保持不变 |
 | `agent.execution.id` | 一次 Agent 启动或恢复 | 生成新 UUID |
-| `agent.node.invocation.id` | 节点的一次逻辑调用 | 继续执行保留；显式 RetryNode 更换 |
+| `agent.node.invocation.id` | 节点的一次逻辑调用 | 继续执行保留 |
 | `agent.node.attempt.id` | 一次节点派发 | 生成新 UUID |
 | `agent.node.previous_attempt.id` | 上次持久化派发的 attempt | 从检查点恢复 |
 | `agent.previous_execution.id` | 上次节点派发所属的 execution | 从检查点恢复 |
@@ -94,7 +94,6 @@ impl WorkflowNodeMiddleware for MyNodeMiddleware {
 `WorkflowNodeState.last_execution` 与节点意图原子提交，保存上述身份及工作流 ID、版本和节点 ID。
 如果进程在意图提交后、实际进入执行器前退出，前次 attempt 仍然存在，但可能没有对应 span；
 这个身份表示已准入的尝试，不证明远端副作用已经发生。
-显式 RetryNode 清空节点本地执行状态，同时保留前次身份作为关联依据。
 旧检查点缺少 `last_execution` 时默认 None，首次升级恢复没有前次 attempt 关联。
 
 每次恢复产生新的 run span。使用 run/invocation/previous-attempt 字段跨 trace 查询，不把已经

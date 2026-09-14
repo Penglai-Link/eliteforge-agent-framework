@@ -17,7 +17,6 @@ pub enum ThreadStatus {
     AwaitingInput,
     StepLimit,
     ToolCallLimit,
-    RecoveryRequired,
     Failed,
     Cancelled,
 }
@@ -86,7 +85,6 @@ impl From<&RunStatus> for ThreadStatus {
             RunStatus::AwaitingInput => Self::AwaitingInput,
             RunStatus::StepLimit => Self::StepLimit,
             RunStatus::ToolCallLimit => Self::ToolCallLimit,
-            RunStatus::RecoveryRequired => Self::RecoveryRequired,
         }
     }
 }
@@ -208,7 +206,6 @@ mod tests {
             (RunStatus::AwaitingInput, ThreadStatus::AwaitingInput),
             (RunStatus::StepLimit, ThreadStatus::StepLimit),
             (RunStatus::ToolCallLimit, ThreadStatus::ToolCallLimit),
-            (RunStatus::RecoveryRequired, ThreadStatus::RecoveryRequired),
         ] {
             assert_eq!(ThreadStatus::from(&run), thread);
         }

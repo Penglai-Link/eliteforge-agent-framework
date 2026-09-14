@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("start") if args.len() == 4 => RunRequest::new("demo", args[3].clone()),
         Some("answer") if args.len() == 6 => {
             let mut request = RunRequest::new("demo", "");
-            request.resume = Some(ResumeRequest { run_id:args[3].parse()?, response:Some(InteractionResponse { interaction_id:args[4].parse()?, value:json!(args[5].parse::<bool>()?) }), resolutions:vec![] });
+            request.resume = Some(ResumeRequest { run_id:args[3].parse()?, response:Some(InteractionResponse { interaction_id:args[4].parse()?, value:json!(args[5].parse::<bool>()?) }) });
             request
         },
         _ => return Err("usage: durable_approval start <database> <amount> | answer <database> <run UUID> <interaction UUID> <true|false>".into()),

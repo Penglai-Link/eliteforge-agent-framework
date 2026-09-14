@@ -402,7 +402,7 @@ impl WorkflowNode for ResumeNode {
 }
 
 #[tokio::test]
-async fn explicit_retry_after_reopening_links_attempts_and_allocates_a_new_invocation() {
+async fn failed_run_replay_after_reopening_does_not_dispatch_a_node() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("resume.db");
     let exporter = InMemorySpanExporter::default();
@@ -449,18 +449,12 @@ async fn explicit_retry_after_reopening_links_attempts_and_allocates_a_new_invoc
         .build()
         .await
         .unwrap();
-    // Explicit retry creates a new invocation, retaining the predecessor attempt.
     let mut request = RunRequest::new("session", "");
     request.resume = Some(ResumeRequest {
         run_id,
-        resolutions: vec![CallResolution::RetryNode {
-            node_id: "private-node".into(),
-            invocation_id: invocation,
-        }],
         ..Default::default()
     });
-    // Retry clears local state, so this fixture intentionally fails again.
-    assert!(a.run(request).await.is_err());
+    assert!(matches!(a.run(request).await, Err(AgentError::Run(_))));
     a.close().await;
     let after: DagWorkflowState =
         serde_json::from_value(db.load(run_id).await.unwrap().state).unwrap();
@@ -470,35 +464,19 @@ async fn explicit_retry_after_reopening_links_attempts_and_allocates_a_new_invoc
         .iter()
         .filter(|s| s.name == "agent.workflow.node")
         .collect();
-    assert_eq!(nodes.len(), 2);
-    assert_eq!(
-        attr(nodes[0], "agent.run.id"),
-        attr(nodes[1], "agent.run.id")
-    );
-    assert_ne!(
-        attr(nodes[0], "agent.execution.id"),
-        attr(nodes[1], "agent.execution.id")
-    );
-    assert_ne!(
-        attr(nodes[0], "agent.node.invocation.id"),
-        attr(nodes[1], "agent.node.invocation.id")
-    );
-    assert_eq!(
-        attr(nodes[1], "agent.node.previous_attempt.id"),
-        attr(nodes[0], "agent.node.attempt.id")
-    );
-    assert_eq!(
-        attr(nodes[1], "agent.previous_execution.id"),
-        attr(nodes[0], "agent.execution.id")
-    );
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(after.nodes["private-node"].invocation_id, invocation);
     assert_eq!(
         after.nodes["private-node"]
             .last_execution
             .as_ref()
             .unwrap()
+            .attempt_id,
+        before.nodes["private-node"]
+            .last_execution
+            .as_ref()
+            .unwrap()
             .attempt_id
-            .to_string(),
-        attr(nodes[1], "agent.node.attempt.id")
     );
     assert!(!format!("{spans:?}").contains("private-error"));
 }
@@ -654,7 +632,7 @@ async fn cancelled_dag_node_ends_its_model_and_node_spans() {
 }
 
 #[tokio::test]
-async fn interrupted_node_continuation_keeps_invocation_across_agent_recreation() {
+async fn cancelled_node_stays_terminal_across_agent_recreation() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("continue.db");
     let exporter = InMemorySpanExporter::default();
@@ -711,37 +689,20 @@ async fn interrupted_node_continuation_keeps_invocation_across_agent_recreation(
         run_id,
         ..Default::default()
     });
-    assert_eq!(a.run(request).await.unwrap().status, RunStatus::Completed);
+    assert!(matches!(a.run(request).await, Err(AgentError::Cancelled)));
     a.close().await;
+    assert_eq!(
+        db.load(run_id).await.unwrap().status,
+        ExecutionStatus::Cancelled
+    );
     db.close().await.unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     let nodes: Vec<_> = spans
         .iter()
         .filter(|s| s.name == "agent.workflow.node")
         .collect();
-    assert_eq!(nodes.len(), 2);
-    assert_eq!(
-        attr(nodes[0], "agent.node.invocation.id"),
-        attr(nodes[1], "agent.node.invocation.id")
-    );
-    assert_ne!(
-        attr(nodes[0], "agent.node.attempt.id"),
-        attr(nodes[1], "agent.node.attempt.id")
-    );
-    assert_eq!(
-        attr(nodes[0], "agent.node.attempt.id"),
-        attr(nodes[1], "agent.node.previous_attempt.id")
-    );
-    assert_eq!(
-        attr(nodes[0], "agent.execution.id"),
-        attr(nodes[1], "agent.previous_execution.id")
-    );
-    assert_ne!(
-        attr(nodes[0], "agent.execution.id"),
-        attr(nodes[1], "agent.execution.id")
-    );
+    assert_eq!(nodes.len(), 1);
     assert_eq!(attr(nodes[0], "agent.operation.outcome"), "cancelled");
-    assert_eq!(attr(nodes[1], "agent.operation.outcome"), "completed");
     assert_eq!(
         spans
             .iter()
@@ -1009,7 +970,6 @@ async fn approval_resume_parents_restored_tools_and_models_to_the_new_node_span(
                     interaction_id: result.interactions[0].id,
                     value: json!(true),
                 }),
-                ..Default::default()
             });
         } else {
             assert_eq!(result.status, RunStatus::Completed);

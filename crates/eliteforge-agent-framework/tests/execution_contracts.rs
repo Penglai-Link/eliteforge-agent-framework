@@ -382,7 +382,9 @@ async fn tool_timeout_unwinds_entered_middleware() {
     let mut request = RunRequest::new("timeout", "wait");
     request.limits.max_steps = 1;
     request.limits.tool_timeout = Duration::from_millis(10);
-    agent.run(request).await.unwrap();
+    let error = agent.run(request).await.unwrap_err();
+    assert!(matches!(error, AgentError::Run(_)));
+    assert!(error.to_string().contains("tool timed out"));
     assert_eq!(exited.load(Ordering::SeqCst), 1);
 }
 

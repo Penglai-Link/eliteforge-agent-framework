@@ -1,4 +1,4 @@
-//! Kills a separate executor process, then recovers through a new connection and
+//! Kills a separate executor process, then checks persisted state through a new connection and
 //! Agent. Unlike cancelling a future, this bypasses every Rust Drop/cleanup path.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
@@ -42,7 +42,7 @@ impl ChatModel for CrashModel {
         } else if self.mode == "offline" {
             panic!("terminal replay must not invoke a model")
         } else if request.messages.iter().any(|m| m.role == Role::Tool) {
-            Ok(ChatResponse::text("reconciled"))
+            Ok(ChatResponse::text("completed"))
         } else {
             Ok(ChatResponse {
                 tool_calls: vec![ToolCall::new("call", "effect", json!({}))],
@@ -128,7 +128,6 @@ fn resume(id: RunId) -> RunRequest {
     request.resume = Some(ResumeRequest {
         run_id: id,
         response: None,
-        resolutions: vec![],
     });
     request
 }
@@ -166,26 +165,15 @@ async fn effect_survives_process_death_without_automatic_reexecution() {
         .as_array()
         .unwrap();
     assert_eq!(executions[0]["state"], "Started");
-    let invocation_id: RunId =
-        serde_json::from_value(executions[0]["invocation_id"].clone()).unwrap();
     let executor = agent(dir.path(), "effect", store.clone()).await;
-    assert_eq!(
-        executor.run(resume(saved.run_id)).await.unwrap().status,
-        RunStatus::RecoveryRequired
+    let error = executor.run(resume(saved.run_id)).await.unwrap_err();
+    assert!(
+        error.to_string().contains("tool execution was interrupted"),
+        "{error}"
     );
-    let mut reconciliation = resume(saved.run_id);
-    reconciliation
-        .resume
-        .as_mut()
-        .unwrap()
-        .resolutions
-        .push(CallResolution::Record {
-            invocation_id,
-            output: ToolOutput::text("external effect verified"),
-        });
     assert_eq!(
-        executor.run(reconciliation).await.unwrap().output,
-        "reconciled"
+        store.load(saved.run_id).await.unwrap().status,
+        ExecutionStatus::Failed
     );
     assert_eq!(
         std::fs::read(dir.path().join("external-effect")).unwrap(),
@@ -195,10 +183,10 @@ async fn effect_survives_process_death_without_automatic_reexecution() {
     store.close().await.unwrap();
     let store = open(dir.path()).await;
     let offline = agent(dir.path(), "offline", store.clone()).await;
-    assert_eq!(
-        offline.run(resume(saved.run_id)).await.unwrap().output,
-        "reconciled"
-    );
+    assert!(matches!(
+        offline.run(resume(saved.run_id)).await,
+        Err(AgentError::Run(_))
+    ));
     offline.close().await;
     store.close().await.unwrap();
 }
@@ -312,9 +300,6 @@ async fn dag_process_crash_preserves_json_tools_and_budget(mode: &str) {
         state.nodes["json"].result.as_ref().unwrap().value,
         json!({"nested":{"answer":42},"list":[1,2,3]})
     );
-    let inner: Checkpoint =
-        serde_json::from_value(state.nodes["react"].checkpoint.clone().unwrap()).unwrap();
-    let inner: WorkflowState = serde_json::from_value(inner.state).unwrap();
     let executor = dag_agent(
         dir.path(),
         if mode == "model" { "offline" } else { "effect" },
@@ -322,23 +307,19 @@ async fn dag_process_crash_preserves_json_tools_and_budget(mode: &str) {
     )
     .await;
     if mode == "effect" {
-        assert_eq!(
-            executor.run(resume(saved.run_id)).await.unwrap().status,
-            RunStatus::RecoveryRequired
+        let error = executor.run(resume(saved.run_id)).await.unwrap_err();
+        assert!(
+            error.to_string().contains("tool execution was interrupted"),
+            "{error}"
         );
-        let WorkflowCursor::Tools { executions, .. } = inner.cursor else {
-            panic!("missing tool intent")
-        };
-        let mut r = resume(saved.run_id);
-        r.resume
-            .as_mut()
-            .unwrap()
-            .resolutions
-            .push(CallResolution::Record {
-                invocation_id: executions[0].invocation_id,
-                output: ToolOutput::text("verified"),
-            });
-        assert_eq!(executor.run(r).await.unwrap().output, "reconciled");
+        assert_eq!(
+            store.load(saved.run_id).await.unwrap().status,
+            ExecutionStatus::Failed
+        );
+        assert!(matches!(
+            executor.run(resume(saved.run_id)).await,
+            Err(AgentError::Run(_))
+        ));
         assert_eq!(
             std::fs::read(dir.path().join("external-effect")).unwrap(),
             b"exactly one effect"

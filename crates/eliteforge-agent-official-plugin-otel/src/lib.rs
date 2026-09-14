@@ -571,7 +571,6 @@ impl RunMiddleware for Observation {
                 RunStatus::AwaitingInput => "awaiting_input",
                 RunStatus::StepLimit => "step_limit",
                 RunStatus::ToolCallLimit => "tool_call_limit",
-                RunStatus::RecoveryRequired => "recovery_required",
             }),
             Err(error) if matches!(error.primary(), AgentError::Cancelled) => Outcome::Cancelled,
             Err(error) => Outcome::Error(error.kind()),
@@ -824,7 +823,6 @@ impl WorkflowNodeMiddleware for Observation {
             Ok(result) => Outcome::Success(match result.status {
                 RunStatus::Completed => "completed",
                 RunStatus::AwaitingInput => "awaiting_input",
-                RunStatus::RecoveryRequired => "recovery_required",
                 RunStatus::StepLimit => "step_limit",
                 RunStatus::ToolCallLimit => "tool_call_limit",
             }),

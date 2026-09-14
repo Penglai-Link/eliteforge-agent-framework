@@ -65,7 +65,6 @@ next 按值消费，一条 continuation 最多执行一次。Run 和工具的已
 Framework 管理取消和超时。每层拦截器可以在内层中断后执行有界收尾；Run 使用
 `cleanup_timeout`，工具使用该次调用的 timeout 作为收尾上限。超出期限的 future 会被丢弃，
 不能保证 await 后的代码一定运行。同步兜底使用 RAII，资源的异步关闭交给 Framework 管理。
-持久化执行器取消后可能返回 `RecoveryRequired` 等已确认状态，保留该结果。
 
 ## 生命周期 Hook
 

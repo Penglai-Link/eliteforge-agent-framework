@@ -360,7 +360,7 @@ fn offload_agent_builder(
         ))
 }
 #[tokio::test]
-async fn workflow_offload_failure_requires_reconciliation_without_automatic_tool_replay() {
+async fn workflow_offload_failure_ends_run_without_automatic_tool_replay() {
     use eliteforge_agent_state_sqlite::*;
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(
@@ -382,18 +382,18 @@ async fn workflow_offload_failure_requires_reconciliation_without_automatic_tool
         .build()
         .await
         .unwrap();
-    let result = agent.run(RunRequest::new("s", "get rows")).await.unwrap();
-    assert_eq!(result.status, RunStatus::RecoveryRequired);
+    assert!(matches!(
+        agent.run(RunRequest::new("s", "get rows")).await,
+        Err(AgentError::Run(_))
+    ));
     let checkpoint = state.latest("s").await.unwrap().unwrap();
+    assert_eq!(checkpoint.status, ExecutionStatus::Failed);
     let mut request = RunRequest::new("s", "ignored");
     request.resume = Some(ResumeRequest {
         run_id: checkpoint.run_id,
         ..Default::default()
     });
-    assert_eq!(
-        agent.run(request).await.unwrap().status,
-        RunStatus::RecoveryRequired
-    );
+    assert!(matches!(agent.run(request).await, Err(AgentError::Run(_))));
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert!(
         !serde_json::to_string(&checkpoint.transcript)
@@ -509,8 +509,7 @@ impl ConversationSession for RejectToolSession {
     }
 }
 #[tokio::test]
-async fn history_failure_after_artifact_publish_leaves_original_for_reconciliation_without_replay()
-{
+async fn history_failure_after_artifact_publish_preserves_original_without_replay() {
     let directory = tempfile::tempdir().unwrap();
     let artifacts =
         Arc::new(FileArtifactStore::open(directory.path(), FileArtifactLimits::default()).unwrap());

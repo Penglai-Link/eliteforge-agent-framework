@@ -35,7 +35,7 @@ async fn transcript_state_and_events_survive_close_and_reopen_together() {
         state: ToolExecutionState::Started,
     };
     snapshot.state = serde_json::to_value(&invocation).unwrap();
-    snapshot.status = ExecutionStatus::RecoveryRequired;
+    snapshot.status = ExecutionStatus::Failed;
     snapshot.events.push(EventEnvelope {
         scope: EventScope::Journal,
         schema_version: 1,
@@ -55,7 +55,7 @@ async fn transcript_state_and_events_survive_close_and_reopen_together() {
     let reopened = store(&path).await;
     let loaded = reopened.load(snapshot.run_id).await.unwrap();
     assert_eq!(loaded.revision, 1);
-    assert_eq!(loaded.status, ExecutionStatus::RecoveryRequired);
+    assert_eq!(loaded.status, ExecutionStatus::Failed);
     assert_eq!(loaded.transcript, snapshot.transcript);
     assert_eq!(
         serde_json::from_value::<ToolExecution>(loaded.state).unwrap(),

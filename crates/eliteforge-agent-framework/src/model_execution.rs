@@ -159,14 +159,13 @@ impl AgentLoop for ModelExecutionLoop {
         state.request.limits.validate()?;
         if checkpoint.status.is_terminal() {
             if let Some(resume) = &request.resume
-                && (!resume.resolutions.is_empty()
-                    || resume
-                        .response
-                        .as_ref()
-                        .is_some_and(|response| !state.answers.contains(response)))
+                && resume
+                    .response
+                    .as_ref()
+                    .is_some_and(|response| !state.answers.contains(response))
             {
                 return Err(AgentError::InvalidConfiguration(
-                    "terminal run cannot accept a new answer or reconciliation".into(),
+                    "terminal run cannot accept a new answer".into(),
                 ));
             }
             if let Some(session) = &mut conversation {
@@ -295,12 +294,6 @@ impl AgentLoop for ModelExecutionLoop {
                 binding.exposed = state.visible_tools.contains(&binding.descriptor.id);
             }
             let mut incoming = request.clone();
-            if incoming.resume.as_ref().is_some_and(|r| !r.resolutions.is_empty()) {
-                let mut resolutions = incoming.clone();
-                resolutions.resume.as_mut().unwrap().response = None;
-                apply_resume(&resolutions, &mut state, &mut checkpoint, &tools)?;
-                incoming.resume.as_mut().unwrap().resolutions.clear();
-            }
             if !state.interactions.is_empty() {
                 let manager = services.interactions.as_ref().ok_or(AgentError::MissingService("InteractionStore"))?;
                 manager.publish(&state.interactions, &state.cursor, context).await?;
@@ -310,13 +303,13 @@ impl AgentLoop for ModelExecutionLoop {
                         manager.0.answer(&context.session_id, response).await?;
                         incoming.resume.as_mut().unwrap().response = None;
                 }
-                // Apply committed answers only when their tool batch is reconciled.
+                // Apply committed answers only when their tool batch is complete.
                 for interaction in state.interactions.clone() {
                     let unfinished = matches!(&state.cursor, WorkflowCursor::Tools { executions, .. } if executions.iter().any(|e| !matches!(e.state, ToolExecutionState::Finished(_))));
                     if matches!(interaction.kind, InteractionKind::Input) && unfinished { continue; }
                     if let Some(response) = manager.0.get(&context.session_id, interaction.id).await?.response {
                         let mut answered = incoming.clone();
-                        answered.resume = Some(ResumeRequest {run_id:context.run_id,response:Some(response),resolutions:vec![]});
+                        answered.resume = Some(ResumeRequest {run_id:context.run_id,response:Some(response)});
                         apply_resume(&answered, &mut state, &mut checkpoint, &tools)?;
                     }
                 }
@@ -347,9 +340,7 @@ impl AgentLoop for ModelExecutionLoop {
                         // overwrite them with a guessed terminal transition.
                         if !error.contains_state_error() {
                             runtime.checkpoint.status =
-                                if matches!(runtime.state.cursor, WorkflowCursor::Tools { .. }) {
-                                    ExecutionStatus::RecoveryRequired
-                                } else if matches!(error.primary(), AgentError::Cancelled) {
+                                if matches!(error.primary(), AgentError::Cancelled) {
                                     ExecutionStatus::Cancelled
                                 } else {
                                     ExecutionStatus::Failed
@@ -457,8 +448,7 @@ fn apply_resume(
                         for execution in executions {
                             let ToolExecutionState::Finished(output) = &execution.state else {
                                 return Err(AgentError::InvalidConfiguration(
-                                    "reconcile unfinished tools before applying an input answer"
-                                        .into(),
+                                    "input answer requires a completed tool batch".into(),
                                 ));
                             };
                             let mut output = output.clone();
@@ -513,41 +503,6 @@ fn apply_resume(
             state.interactions.remove(index);
             state.answers.push(response.clone());
         }
-    }
-    let mut resolved = HashSet::new();
-    for resolution in &resume.resolutions {
-        let id = match resolution {
-            CallResolution::RecordNode { .. } | CallResolution::RetryNode { .. } => {
-                return Err(AgentError::InvalidConfiguration(
-                    "node reconciliation requires a DAG loop".into(),
-                ));
-            }
-            CallResolution::Record { invocation_id, .. }
-            | CallResolution::Retry { invocation_id } => *invocation_id,
-        };
-        if !resolved.insert(id) {
-            return Err(AgentError::InvalidConfiguration(
-                "duplicate tool reconciliation".into(),
-            ));
-        }
-        let WorkflowCursor::Tools { executions, .. } = &mut state.cursor else {
-            return Err(AgentError::InvalidConfiguration(
-                "no tool batch to reconcile".into(),
-            ));
-        };
-        let execution = executions
-            .iter_mut()
-            .find(|e| e.invocation_id == id && matches!(e.state, ToolExecutionState::Started))
-            .ok_or_else(|| {
-                AgentError::InvalidConfiguration(
-                    "reconciliation requires an indeterminate invocation".into(),
-                )
-            })?;
-        execution.state = match resolution {
-            CallResolution::RecordNode { .. } | CallResolution::RetryNode { .. } => unreachable!(),
-            CallResolution::Record { output, .. } => ToolExecutionState::Finished(output.clone()),
-            CallResolution::Retry { .. } => ToolExecutionState::Planned,
-        };
     }
     Ok(())
 }
@@ -691,12 +646,9 @@ impl ModelExecutionRuntime<'_> {
         loop {
             self.context.check_cancelled()?;
             if self.has_started_tools() {
-                return self
-                    .stop(
-                        RunStatus::RecoveryRequired,
-                        ExecutionStatus::RecoveryRequired,
-                    )
-                    .await;
+                return Err(AgentError::Run(
+                    "tool execution was interrupted before its result was saved".into(),
+                ));
             }
             if !self.state.interactions.is_empty() {
                 return self
@@ -1016,17 +968,12 @@ impl ModelExecutionRuntime<'_> {
             };
             let mut output = match result {
                 Ok(output) => output,
-                Err(ToolError::Indeterminate(_)) => {
+                Err(error @ ToolError::Indeterminate(_)) => {
+                    self.context.check_cancelled()?;
                     if parallel_dispatch {
                         continue;
                     }
-                    return self
-                        .stop(
-                            RunStatus::RecoveryRequired,
-                            ExecutionStatus::RecoveryRequired,
-                        )
-                        .await
-                        .map(Some);
+                    return Err(AgentError::Run(error.to_string()));
                 }
                 Err(error) => ToolOutput::error(error.to_string()),
             };
@@ -1094,13 +1041,9 @@ impl ModelExecutionRuntime<'_> {
             }
         }
         if self.has_started_tools() {
-            return self
-                .stop(
-                    RunStatus::RecoveryRequired,
-                    ExecutionStatus::RecoveryRequired,
-                )
-                .await
-                .map(Some);
+            return Err(AgentError::Run(
+                "tool execution ended without a confirmed result".into(),
+            ));
         }
         self.complete_tool_batch().await?;
         if !self.state.interactions.is_empty() {

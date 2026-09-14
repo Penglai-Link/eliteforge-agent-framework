@@ -262,7 +262,6 @@ async fn custom_node_commits_state_and_conversation_together_and_resumes_same_hi
             interaction_id: result.interactions[0].id,
             value: json!("continue"),
         }),
-        ..Default::default()
     });
     assert_eq!(
         agent.run(request).await.unwrap().status,

@@ -23,7 +23,6 @@ fn resume(session: &str, id: RunId, response: Option<InteractionResponse>) -> Ru
     request.resume = Some(ResumeRequest {
         run_id: id,
         response,
-        resolutions: Vec::new(),
     });
     request
 }
@@ -472,7 +471,7 @@ impl Tool for EffectThenHang {
     }
 }
 #[tokio::test]
-async fn cancellation_after_side_effect_requires_reconciliation_and_never_repeats_it() {
+async fn cancellation_after_side_effect_is_terminal_and_never_repeats_it() {
     let directory = tempfile::tempdir().unwrap();
     let store = database(&directory.path().join("uncertain.db")).await;
     let effects = Arc::new(AtomicUsize::new(0));
@@ -506,8 +505,14 @@ async fn cancellation_after_side_effect_requires_reconciliation_and_never_repeat
         .await
         .unwrap();
     agent.cancel(&handle).unwrap();
-    let stopped = agent.wait(handle).await.unwrap();
-    assert_eq!(stopped.status, RunStatus::RecoveryRequired);
+    assert!(matches!(
+        agent.wait(handle).await,
+        Err(AgentError::Cancelled)
+    ));
+    assert_eq!(
+        store.load(run_id).await.unwrap().status,
+        ExecutionStatus::Cancelled
+    );
     agent.close().await;
     let agent = TestBuilder::default()
         .plugin(store.clone().plugin())
@@ -529,27 +534,12 @@ async fn cancellation_after_side_effect_requires_reconciliation_and_never_repeat
         .build()
         .await
         .unwrap();
-    let stopped = agent.run(resume("uncertain", run_id, None)).await.unwrap();
-    assert_eq!(stopped.status, RunStatus::RecoveryRequired);
+    assert!(matches!(
+        agent.run(resume("uncertain", run_id, None)).await,
+        Err(AgentError::Cancelled)
+    ));
     assert_eq!(effects.load(Ordering::SeqCst), 1);
-    let state: WorkflowState =
-        serde_json::from_value(store.load(run_id).await.unwrap().state).unwrap();
-    let WorkflowCursor::Tools { executions, .. } = state.cursor else {
-        panic!("missing journal")
-    };
-    let mut request = resume("uncertain", run_id, None);
-    request
-        .resume
-        .as_mut()
-        .unwrap()
-        .resolutions
-        .push(CallResolution::Record {
-            invocation_id: executions[0].invocation_id,
-            output: ToolOutput::text("18"),
-        });
-    assert_eq!(agent.run(request).await.unwrap().output, "18");
-    assert_eq!(effects.load(Ordering::SeqCst), 1);
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
     agent.close().await;
     store.close().await.unwrap();
 }
@@ -988,7 +978,7 @@ impl ToolMiddleware for FailedAfter {
 }
 
 #[tokio::test]
-async fn policy_failure_has_no_effect_and_post_effect_interceptor_failure_requires_recovery() {
+async fn policy_and_post_effect_interceptor_failures_end_the_run() {
     for after in [false, true] {
         let directory = tempfile::tempdir().unwrap();
         let store = database(&directory.path().join("failure.db")).await;
@@ -1022,7 +1012,12 @@ async fn policy_failure_has_no_effect_and_post_effect_interceptor_failure_requir
         let id = handle.run_id;
         let result = agent.wait(handle).await;
         if after {
-            assert_eq!(result.unwrap().status, RunStatus::RecoveryRequired);
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("result transform failed")
+            );
         } else {
             assert!(
                 result
@@ -1034,13 +1029,13 @@ async fn policy_failure_has_no_effect_and_post_effect_interceptor_failure_requir
         assert_eq!(effects.load(Ordering::SeqCst), usize::from(after));
         assert_eq!(
             store.load(id).await.unwrap().status,
-            ExecutionStatus::RecoveryRequired
+            ExecutionStatus::Failed
         );
-        let lease = store
-            .claim(id, RunId::new_v4(), Duration::from_secs(1))
-            .await
-            .unwrap();
-        store.release(&lease).await.unwrap();
+        assert!(matches!(
+            agent.run(resume("failure", id, None)).await,
+            Err(AgentError::Run(_))
+        ));
+        assert_eq!(effects.load(Ordering::SeqCst), usize::from(after));
         agent.close().await;
         store.close().await.unwrap();
     }
@@ -1065,7 +1060,7 @@ impl ChatModel for TwoEffects {
     }
 }
 #[tokio::test]
-async fn finished_tool_is_reused_when_a_later_sibling_is_interrupted() {
+async fn finished_tool_is_preserved_when_a_later_sibling_is_cancelled() {
     let directory = tempfile::tempdir().unwrap();
     let store = database(&directory.path().join("siblings.db")).await;
     let effects = Arc::new(AtomicUsize::new(0));
@@ -1098,9 +1093,13 @@ async fn finished_tool_is_reused_when_a_later_sibling_is_interrupted() {
         .await
         .unwrap();
     agent.cancel(&handle).unwrap();
+    assert!(matches!(
+        agent.wait(handle).await,
+        Err(AgentError::Cancelled)
+    ));
     assert_eq!(
-        agent.wait(handle).await.unwrap().status,
-        RunStatus::RecoveryRequired
+        store.load(id).await.unwrap().status,
+        ExecutionStatus::Cancelled
     );
     let state: WorkflowState = serde_json::from_value(store.load(id).await.unwrap().state).unwrap();
     let WorkflowCursor::Tools { executions, .. } = state.cursor else {
@@ -1111,17 +1110,10 @@ async fn finished_tool_is_reused_when_a_later_sibling_is_interrupted() {
         ToolExecutionState::Finished(_)
     ));
     assert_eq!(executions[1].state, ToolExecutionState::Started);
-    let mut request = resume("siblings", id, None);
-    request
-        .resume
-        .as_mut()
-        .unwrap()
-        .resolutions
-        .push(CallResolution::Record {
-            invocation_id: executions[1].invocation_id,
-            output: ToolOutput::text("verified"),
-        });
-    assert_eq!(agent.run(request).await.unwrap().output, "completed batch");
+    assert!(matches!(
+        agent.run(resume("siblings", id, None)).await,
+        Err(AgentError::Cancelled)
+    ));
     assert_eq!(effects.load(Ordering::SeqCst), 2);
     agent.close().await;
     store.close().await.unwrap();
@@ -1191,25 +1183,18 @@ async fn delegated_budget_and_count_are_durable_before_child_provider_dispatch()
     assert_eq!(state.child_runs, 1);
     assert!(state.budget_usage.input_tokens + state.budget_usage.output_tokens >= 200);
     agent.cancel(&handle).unwrap();
+    assert!(matches!(
+        agent.wait(handle).await,
+        Err(AgentError::Cancelled)
+    ));
     assert_eq!(
-        agent.wait(handle).await.unwrap().status,
-        RunStatus::RecoveryRequired
+        store.load(id).await.unwrap().status,
+        ExecutionStatus::Cancelled
     );
-    let state: WorkflowState = serde_json::from_value(store.load(id).await.unwrap().state).unwrap();
-    let WorkflowCursor::Tools { executions, .. } = state.cursor else {
-        panic!("tools required")
-    };
-    let mut request = resume("parent", id, None);
-    request
-        .resume
-        .as_mut()
-        .unwrap()
-        .resolutions
-        .push(CallResolution::Retry {
-            invocation_id: executions[0].invocation_id,
-        });
-    let result = agent.run(request).await.unwrap();
-    assert!(result.output.contains("child run count limit"));
+    assert!(matches!(
+        agent.run(resume("parent", id, None)).await,
+        Err(AgentError::Cancelled)
+    ));
     agent.close().await;
     child.close().await;
     store.close().await.unwrap();

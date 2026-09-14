@@ -331,7 +331,6 @@ pub enum RunStatus {
     AwaitingInput,
     StepLimit,
     ToolCallLimit,
-    RecoveryRequired,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

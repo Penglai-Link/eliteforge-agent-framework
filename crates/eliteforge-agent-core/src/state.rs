@@ -9,7 +9,6 @@ use std::{sync::Arc, time::Duration};
 pub enum ExecutionStatus {
     Running,
     Waiting,
-    RecoveryRequired,
     Completed,
     Cancelled,
     Failed,
@@ -114,35 +113,10 @@ pub struct InteractionResponse {
     pub value: Value,
 }
 
-/// Operator reconciliation for an indeterminate call. Retry is explicit and
-/// scoped to its durable invocation ID; the host authorizes who may submit it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum CallResolution {
-    /// Reconcile a DAG node whose executor stopped without a durable result.
-    RecordNode {
-        node_id: String,
-        invocation_id: RunId,
-        result: crate::WorkflowNodeResult,
-    },
-    /// Explicitly authorize a fresh attempt, discarding the node's local checkpoint.
-    RetryNode {
-        node_id: String,
-        invocation_id: RunId,
-    },
-    Record {
-        invocation_id: RunId,
-        output: ToolOutput,
-    },
-    Retry {
-        invocation_id: RunId,
-    },
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct ResumeRequest {
     pub run_id: RunId,
     pub response: Option<InteractionResponse>,
-    pub resolutions: Vec<CallResolution>,
 }
 
 pub enum ToolPolicyDecision {

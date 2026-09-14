@@ -1,7 +1,7 @@
 //! Versioned DAG definitions and durable, plugin-extensible execution.
 //!
 //! Graph indices are private compilation details. Checkpoints, routes and
-//! reconciliation always use the stable IDs supplied by the definition.
+//! continuation always use the stable IDs supplied by the definition.
 use crate::*;
 use async_trait::async_trait;
 use serde::Serialize;
@@ -262,15 +262,14 @@ fn terminal_result(
     request: &RunRequest,
 ) -> Result<RunResult, AgentError> {
     if request.resume.as_ref().is_some_and(|r| {
-        !r.resolutions.is_empty()
-            || r.response.as_ref().is_some_and(|response| {
-                !state
-                    .nodes
-                    .values()
-                    .any(|n| embedded_workflow(n).is_some_and(|s| s.answers.contains(response)))
-            })
+        r.response.as_ref().is_some_and(|response| {
+            !state
+                .nodes
+                .values()
+                .any(|n| embedded_workflow(n).is_some_and(|s| s.answers.contains(response)))
+        })
     }) {
-        return Err(invalid("terminal DAG cannot accept new resolutions"));
+        return Err(invalid("terminal DAG cannot accept a new answer"));
     }
     match status {
         ExecutionStatus::Cancelled => Err(AgentError::Cancelled),
@@ -322,7 +321,6 @@ impl DagWorkflowLoop {
                             resumes.entry(id.clone()).or_insert_with(|| ResumeRequest {
                                 run_id: run.run_id,
                                 response: record.response,
-                                resolutions: vec![],
                             });
                         }
                         Ok(_) | Err(StateError::NotFound) => {}
@@ -331,49 +329,40 @@ impl DagWorkflowLoop {
                 }
             }
         }
-        journal.change(|state, cp| {
-            if let Some(resume) = &request.resume {
-                let mut resolved = BTreeSet::new();
-                for resolution in &resume.resolutions {
-                    match resolution {
-                        CallResolution::RecordNode { node_id, invocation_id, result } => {
-                            if !resolved.insert(node_id.clone()) { return Err(invalid("duplicate node reconciliation")); }
-                            self.definition.validate_result(node_id, result)?;
-                            if result.status != RunStatus::Completed { return Err(invalid("RecordNode requires a completed result")); }
-                            let node = reconcile_node(state, node_id, *invocation_id)?;
-                            node.status = WorkflowNodeStatus::Succeeded;
-                            node.result = Some(result.clone()); node.error = None;
-                        }
-                        CallResolution::RetryNode { node_id, invocation_id } => {
-                            if !resolved.insert(node_id.clone()) { return Err(invalid("duplicate node reconciliation")); }
-                            let node = reconcile_node(state, node_id, *invocation_id)?;
-                            let last_execution = node.last_execution.clone();
-                            *node = WorkflowNodeState { last_execution, ..Default::default() };
-                        }
-                        CallResolution::Record { invocation_id, .. } | CallResolution::Retry { invocation_id } => {
-                            let owners: Vec<_> = state.nodes.iter().filter(|(_, n)| embedded_workflow(n).is_some_and(|s|
-                                matches!(s.cursor, WorkflowCursor::Tools { executions, .. } if executions.iter().any(|e| e.invocation_id == *invocation_id && e.state == ToolExecutionState::Started))
-                            )).map(|(id, _)| id.clone()).collect();
-                            if owners.len() != 1 { return Err(invalid("tool reconciliation must identify one pending DAG invocation")); }
-                            resumes.entry(owners[0].clone()).or_insert_with(|| ResumeRequest { run_id: run.run_id, ..Default::default() }).resolutions.push(resolution.clone());
-                        }
+        journal
+            .change(|state, cp| {
+                if let Some(response) = request.resume.as_ref().and_then(|r| r.response.as_ref()) {
+                    let owners: Vec<_> = state
+                        .nodes
+                        .iter()
+                        .filter(|(_, n)| {
+                            n.result.as_ref().is_some_and(|r| {
+                                r.interactions
+                                    .iter()
+                                    .any(|i| i.id == response.interaction_id)
+                            }) || embedded_workflow(n).is_some_and(|s| {
+                                s.interactions
+                                    .iter()
+                                    .any(|i| i.id == response.interaction_id)
+                            })
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    if owners.len() != 1 {
+                        return Err(invalid("answer must identify one pending DAG interaction"));
                     }
+                    resumes
+                        .entry(owners[0].clone())
+                        .or_insert_with(|| ResumeRequest {
+                            run_id: run.run_id,
+                            ..Default::default()
+                        })
+                        .response = Some(response.clone());
                 }
-                if let Some(response) = &resume.response {
-                    let owners: Vec<_> = state.nodes.iter().filter(|(_, n)|
-                        n.result.as_ref().is_some_and(|r| r.interactions.iter().any(|i| i.id == response.interaction_id))
-                        || embedded_workflow(n).is_some_and(|s| s.interactions.iter().any(|i| i.id == response.interaction_id))
-                    ).map(|(id, _)| id.clone()).collect();
-                    if owners.len() != 1 { return Err(invalid("answer must identify one pending DAG interaction")); }
-                    resumes.entry(owners[0].clone()).or_insert_with(|| ResumeRequest { run_id: run.run_id, ..Default::default() }).response = Some(response.clone());
-                }
-                if resolved.iter().any(|id| resumes.contains_key(id)) {
-                    return Err(invalid("cannot combine node reconciliation with an answer or tool reconciliation for that node"));
-                }
-            }
-            cp.status = ExecutionStatus::Running;
-            Ok(None)
-        }).await?;
+                cp.status = ExecutionStatus::Running;
+                Ok(None)
+            })
+            .await?;
 
         let graph = Arc::new(self.definition.clone());
         let mut tasks = tokio::task::JoinSet::new();
@@ -383,78 +372,75 @@ impl DagWorkflowLoop {
                 run.check_cancelled()?;
                 if tokio::time::Instant::now() >= run.deadline { return Err(AgentError::Run("DAG run deadline exceeded".into())); }
                 let state = journal.state().await?;
-                let unresolved = state.nodes.iter().any(|(id, n)| (n.status == WorkflowNodeStatus::Failed && !resumes.contains_key(id)) ||
-                    (n.status == WorkflowNodeStatus::Running && !active.contains(id) && !services.workflow_nodes.get(&self.node(id).kind).expect("validated kind").supports_resume()));
+                if state.nodes.iter().any(|(id, n)| n.status == WorkflowNodeStatus::Failed ||
+                    (n.status == WorkflowNodeStatus::Running && !active.contains(id) && !services.workflow_nodes.get(&self.node(id).kind).expect("validated kind").supports_resume())) {
+                    return Err(AgentError::Run("DAG node execution was interrupted before its result was saved".into()));
+                }
                 let paused = state.nodes.iter().any(|(id, n)| n.status == WorkflowNodeStatus::Suspended && !resumes.contains_key(id));
-                if !unresolved {
-                    for id in &self.order {
-                        if active.len() >= self.definition.max_parallel_nodes { break; }
-                        let node = &state.nodes[id];
-                        if active.contains(id) { continue; }
-                        let start = match node.status {
-                            WorkflowNodeStatus::Running => true,
-                            WorkflowNodeStatus::Failed => resumes.contains_key(id),
-                            WorkflowNodeStatus::Suspended => resumes.contains_key(id),
-                            WorkflowNodeStatus::Pending if paused => false,
-                            WorkflowNodeStatus::Pending => match self.readiness(id, &state) {
-                                Ready::Wait => false,
-                                Ready::Run => true,
-                                Ready::Skip => {
-                                    journal.change(|s, _| { s.nodes.get_mut(id).unwrap().status = WorkflowNodeStatus::Skipped; Ok(Some(node_event(id, WorkflowNodeStatus::Skipped))) }).await?;
-                                    continue;
-                                }
-                            },
-                            _ => false,
-                        };
-                        if !start { continue; }
-                        run.check_cancelled()?;
-                        let definition = self.node(id);
-                        let implementation = services.workflow_nodes.get(&definition.kind).expect("validated node kind");
-                        let input = WorkflowNodeInput { node_id: id.clone(), invocation_id: node.invocation_id,
-                            config: definition.config.clone(), request: state.request.clone(),
-                            predecessors: self.definition.edges.iter().filter(|e| e.to == *id && selected(&state.nodes[&e.from], id))
-                                .map(|e| (e.from.clone(), state.nodes[&e.from].result.as_ref().unwrap().value.clone())).collect(),
-                            predecessor_content: self.definition.edges.iter().filter(|e| e.to == *id && selected(&state.nodes[&e.from], id))
-                                .filter_map(|e| state.nodes[&e.from].result.as_ref().unwrap().content.clone().map(|c| (e.from.clone(), c))).collect(),
-                            checkpoint: node.checkpoint.clone() };
-                        // Admission is durable before executor entry. No effect can
-                        // occur on a failed or uncertain intent write.
-                        let identity = WorkflowNodeExecution {
-                            workflow_id: self.definition.id.clone(), workflow_version: self.definition.version,
-                            node_id: id.clone(), invocation_id: node.invocation_id,
-                            attempt_id: RunId::new_v4(), execution_id: run.execution_id(),
-                            previous_attempt_id: node.last_execution.as_ref().map(|e| e.attempt_id),
-                            previous_execution_id: node.last_execution.as_ref().map(|e| e.execution_id),
-                        };
-                        journal.change(|s, _| {
-                            let node = s.nodes.get_mut(id).unwrap();
-                            node.status = WorkflowNodeStatus::Running;
-                            node.last_execution = Some(identity.clone());
-                            Ok(Some(node_event(id, WorkflowNodeStatus::Running)))
-                        }).await?;
-                        let mut node_run = run.clone();
-                        node_run.node_execution = Some(identity);
-                        let context = WorkflowNodeContext { run: node_run, resume: resumes.remove(id), node_id: id.clone(), journal: journal.clone() };
-                        let services = services.clone();
-                        let graph = graph.clone();
-                        let id = id.clone(); active.insert(id.clone());
-                        tasks.spawn(async move {
-                            let result = crate::WorkflowNodeNext { definition: &graph, middleware: &services.node_middleware, node: implementation.as_ref(), services: &services }.run(input, &context).await;
-                            (id, result)
-                        });
-                    }
+                for id in &self.order {
+                    if active.len() >= self.definition.max_parallel_nodes { break; }
+                    let node = &state.nodes[id];
+                    if active.contains(id) { continue; }
+                    let start = match node.status {
+                        WorkflowNodeStatus::Running => true,
+                        WorkflowNodeStatus::Suspended => resumes.contains_key(id),
+                        WorkflowNodeStatus::Pending if paused => false,
+                        WorkflowNodeStatus::Pending => match self.readiness(id, &state) {
+                            Ready::Wait => false,
+                            Ready::Run => true,
+                            Ready::Skip => {
+                                journal.change(|s, _| { s.nodes.get_mut(id).unwrap().status = WorkflowNodeStatus::Skipped; Ok(Some(node_event(id, WorkflowNodeStatus::Skipped))) }).await?;
+                                continue;
+                            }
+                        },
+                        _ => false,
+                    };
+                    if !start { continue; }
+                    run.check_cancelled()?;
+                    let definition = self.node(id);
+                    let implementation = services.workflow_nodes.get(&definition.kind).expect("validated node kind");
+                    let input = WorkflowNodeInput { node_id: id.clone(), invocation_id: node.invocation_id,
+                        config: definition.config.clone(), request: state.request.clone(),
+                        predecessors: self.definition.edges.iter().filter(|e| e.to == *id && selected(&state.nodes[&e.from], id))
+                            .map(|e| (e.from.clone(), state.nodes[&e.from].result.as_ref().unwrap().value.clone())).collect(),
+                        predecessor_content: self.definition.edges.iter().filter(|e| e.to == *id && selected(&state.nodes[&e.from], id))
+                            .filter_map(|e| state.nodes[&e.from].result.as_ref().unwrap().content.clone().map(|c| (e.from.clone(), c))).collect(),
+                        checkpoint: node.checkpoint.clone() };
+                    // Admission is durable before executor entry. No effect can
+                    // occur on a failed or uncertain intent write.
+                    let identity = WorkflowNodeExecution {
+                        workflow_id: self.definition.id.clone(), workflow_version: self.definition.version,
+                        node_id: id.clone(), invocation_id: node.invocation_id,
+                        attempt_id: RunId::new_v4(), execution_id: run.execution_id(),
+                        previous_attempt_id: node.last_execution.as_ref().map(|e| e.attempt_id),
+                        previous_execution_id: node.last_execution.as_ref().map(|e| e.execution_id),
+                    };
+                    journal.change(|s, _| {
+                        let node = s.nodes.get_mut(id).unwrap();
+                        node.status = WorkflowNodeStatus::Running;
+                        node.last_execution = Some(identity.clone());
+                        Ok(Some(node_event(id, WorkflowNodeStatus::Running)))
+                    }).await?;
+                    let mut node_run = run.clone();
+                    node_run.node_execution = Some(identity);
+                    let context = WorkflowNodeContext { run: node_run, resume: resumes.remove(id), node_id: id.clone(), journal: journal.clone() };
+                    let services = services.clone();
+                    let graph = graph.clone();
+                    let id = id.clone(); active.insert(id.clone());
+                    tasks.spawn(async move {
+                        let result = crate::WorkflowNodeNext { definition: &graph, middleware: &services.node_middleware, node: implementation.as_ref(), services: &services }.run(input, &context).await;
+                        (id, result)
+                    });
                 }
                 if tasks.is_empty() {
                     let latest = journal.state().await?;
                     // A skip can make a downstream node ready in this pass.
-                    if !unresolved && !paused && self.order.iter().any(|id| latest.nodes[id].status == WorkflowNodeStatus::Pending && !matches!(self.readiness(id, &latest), Ready::Wait)) { continue; }
-                    let (status, execution) = if unresolved { (RunStatus::RecoveryRequired, ExecutionStatus::RecoveryRequired) }
-                        else if latest.nodes.values().any(|n| n.status == WorkflowNodeStatus::Suspended) {
+                    if !paused && self.order.iter().any(|id| latest.nodes[id].status == WorkflowNodeStatus::Pending && !matches!(self.readiness(id, &latest), Ready::Wait)) { continue; }
+                    let (status, execution) = if latest.nodes.values().any(|n| n.status == WorkflowNodeStatus::Suspended) {
                             let status = latest.nodes.values().filter_map(|n| n.result.as_ref())
                                 .filter(|r| r.status != RunStatus::Completed)
-                                .min_by_key(|r| match r.status { RunStatus::RecoveryRequired => 0, RunStatus::AwaitingInput => 1, _ => 2 }).unwrap().status.clone();
-                            let execution = match status { RunStatus::RecoveryRequired => ExecutionStatus::RecoveryRequired,
-                                RunStatus::StepLimit | RunStatus::ToolCallLimit => ExecutionStatus::Completed, _ => ExecutionStatus::Waiting };
+                                .min_by_key(|r| match r.status { RunStatus::AwaitingInput => 0, _ => 1 }).unwrap().status.clone();
+                            let execution = match status { RunStatus::StepLimit | RunStatus::ToolCallLimit => ExecutionStatus::Completed, _ => ExecutionStatus::Waiting };
                             (status, execution)
                         } else if latest.nodes.values().all(|n| matches!(n.status, WorkflowNodeStatus::Succeeded | WorkflowNodeStatus::Skipped)) {
                             (RunStatus::Completed, ExecutionStatus::Completed)
@@ -503,16 +489,8 @@ impl DagWorkflowLoop {
             && !journal.poisoned.load(Ordering::Acquire)
         {
             let saved = journal
-                .change(|s, cp| {
-                    let uncertain = s.nodes.values().any(|n| {
-                        matches!(
-                            n.status,
-                            WorkflowNodeStatus::Running | WorkflowNodeStatus::Failed
-                        )
-                    });
-                    cp.status = if uncertain {
-                        ExecutionStatus::RecoveryRequired
-                    } else if matches!(error.primary(), AgentError::Cancelled) {
+                .change(|_, cp| {
+                    cp.status = if matches!(error.primary(), AgentError::Cancelled) {
                         ExecutionStatus::Cancelled
                     } else {
                         ExecutionStatus::Failed
@@ -639,29 +617,6 @@ fn node_event(id: &str, status: WorkflowNodeStatus) -> AgentEvent {
         node_id: id.to_owned(),
         status,
     }
-}
-fn reconcile_node<'a>(
-    state: &'a mut DagWorkflowState,
-    id: &str,
-    invocation: RunId,
-) -> Result<&'a mut WorkflowNodeState, AgentError> {
-    let n = state
-        .nodes
-        .get_mut(id)
-        .ok_or_else(|| invalid("unknown reconciliation node"))?;
-    if n.invocation_id != invocation
-        || !matches!(
-            n.status,
-            WorkflowNodeStatus::Running
-                | WorkflowNodeStatus::Failed
-                | WorkflowNodeStatus::Suspended
-        )
-    {
-        return Err(invalid(
-            "reconciliation requires the current interrupted node invocation",
-        ));
-    }
-    Ok(n)
 }
 fn embedded_workflow(node: &WorkflowNodeState) -> Option<WorkflowState> {
     let cp: Checkpoint = serde_json::from_value(node.checkpoint.clone()?).ok()?;

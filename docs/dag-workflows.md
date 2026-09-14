@@ -105,26 +105,12 @@ route 选择 left                            ├─ join
 
 节点在执行前持久化 `Running`。成功结果及路由持久化后，下游才能派发。
 未知写入结果会阻止该执行尝试继续提交或派发；恢复必须重新读取真实存储状态。
-完成节点直接复用结果，ReAct 节点根据自己的工具记录恢复。
+完成节点直接复用结果。运行中断后，只有支持 `supports_resume()` 的节点可以从检查点继续；
+其他未保存结果的节点会使运行失败。ReAct 节点遇到已开始但未保存结果的工具时同样失败。
 
 失败或取消会终止并回收当前 JoinSet 中的任务。插件必须协作式让出执行权；
-终止 future 不能撤销已经发生的远端副作用。没有已知结果的自定义节点保留为待核对状态，
-通过 `ResumeRequest.resolutions` 显式提交：
+终止 future 不能撤销已经发生的远端副作用。失败或取消的运行进入终态，再次读取时返回原有错误。
 
-```rust,ignore
-CallResolution::RecordNode {
-    node_id: "publish".into(),
-    invocation_id: saved.nodes["publish"].invocation_id,
-    result: WorkflowNodeResult::completed(verified_result),
-}
-// 或显式授权一个新尝试，清除该节点的本地 checkpoint 并产生新的 invocation ID：
-CallResolution::RetryNode {
-    node_id: "publish".into(),
-    invocation_id: saved.nodes["publish"].invocation_id,
-}
-```
-
-ReAct 的不确定工具仍使用原有 `Record` / `Retry`，按 invocation ID 定位到节点。
 输入和审批回复按 interaction ID 路由；多个节点等待时，可以逐个回答。
 等待交互期间暂停新节点派发，已经运行的兄弟节点会先完成或记录自己的等待状态。
 一旦出现错误，停止其他任务；不会为了得到完整结果而等待一个永久挂起的兄弟节点。
