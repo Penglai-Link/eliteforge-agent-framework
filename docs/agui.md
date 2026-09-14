@@ -94,6 +94,10 @@ cargo run -p eliteforge-agent-official-plugin-agui --example sse
 | `RunStarted` | `RUN_STARTED` | 开始本次运行 | `threadId`：会话 `session_id`；`runId`：本次 `executionId`，恢复时生成新值 |
 | `StepStarted / StepFinished` | `STEP_STARTED / STEP_FINISHED` | 开始或结束一个步骤，例如调用模型；结束不代表成功 | `stepName`：步骤名称，附带节点执行身份和步骤 ID，用于区分同名步骤 |
 | `WorkflowNodeChanged` | `STEP_STARTED / STEP_FINISHED`；`CUSTOM` | Workflow 节点开始运行时打开步骤，离开运行状态时结束步骤，并发送节点状态 | `stepName`：`node/{node_id}`；自定义事件 `name="framework.node"`，`value` 包含 `nodeId` 和 `status` |
+| `Collaboration::ChildRunStarted` | `SUBAGENT_STARTED` | 父运行已派发一个子 Agent | `subagentRunId`：子运行 ID；`name="agent_spawn"` |
+| `Collaboration::ChildRunFinished` | `SUBAGENT_FINISHED / SUBAGENT_ERROR`；`CUSTOM` | 子 Agent 正常结束、暂停或达到执行上限 | 完成为 `success`；等待输入为 `suspended`；交互详情通过 `name="framework.subagent.interactions"` 且带同一 `subagentRunId` 的自定义事件传递；执行上限映射为 `code="AGENT_LIMIT_REACHED"` |
+| `Collaboration::ChildRunFailed` | `SUBAGENT_ERROR` | 子 Agent 失败或取消 | `subagentRunId`：子运行 ID；`code="AGENT_RUN_FAILED" / "AGENT_CANCELLED"`；错误正文遵循 `include_error_details` |
+| `Collaboration::ThreadCreated / ThreadRunStarted / ThreadRunFinished / ThreadClosed` | `CUSTOM` | 独立 Thread 的创建、运行原因、终态、待处理交互和关闭 | `name="framework.thread.created / run.started / run.finished / closed"`；`value` 包含 `threadId`、`runId`、状态以及必要的 `interactionId / interactions` |
 | `MessageStarted / TextDelta / MessageFinished` | `TEXT_MESSAGE_START / TEXT_MESSAGE_CONTENT / TEXT_MESSAGE_END` | 开始消息、逐段输出文字、结束消息；首段非空文本到达时打开消息，最终回复补齐未流式返回的后缀 | `messageId`：消息 ID；开始事件的 `role="assistant"`；内容事件的 `delta`：本次追加的文字，例如 `"你好"` |
 | `ReasoningDelta`；消息结束或中止事件 | `REASONING_START / REASONING_MESSAGE_START / REASONING_MESSAGE_CONTENT / REASONING_MESSAGE_END / REASONING_END` | 逐段发送模型公开返回的推理文本，在消息结束或中止时关闭；可配置关闭推理输出 | 推理 ID 由原消息 ID 加 `/reasoning` 生成；内容事件的 `delta`：本次追加的推理文本 |
 | `MessageFinished.tool_calls` | `TOOL_CALL_START / TOOL_CALL_ARGS / TOOL_CALL_END` | 声明模型要调用的工具并发送参数；END 表示参数发送结束，工具结果随后到达 | `toolCallId`：调用的 `invocation_id`；`toolCallName`：工具名称；`parentMessageId`：所属消息；ARGS 的 `delta`：完整参数 JSON 字符串 |
@@ -140,8 +144,12 @@ RunResult 的最终回复与最近一条完整文本相同时不重复发送；�
 - 内置执行器将普通 `AwaitInput` 也保存为持久化字符串问答。应用通过
   `agent.answer()` 保存答案，再启动返回的恢复请求。只有未发布持久化交互的
   自定义 Loop 使用提示性 interrupt，此时不能将其 ID 作为可恢复的 interaction_id。
-- 每次恢复使用新输出流及 executionId。该流不混入旧执行或子 Agent 的事件；子 Agent 可
-  配置插件后通过自己的 `agent.start()` 启动，本版本不自动合并为 SUBAGENT 事件。
+- 每次恢复使用新输出流及 executionId。子 Agent 自己的 token、消息和工具增量不会混入父流；
+  父运行会收到它的标准 `SUBAGENT_*` 生命周期事件，最终完整结果仍通过原 `agent_spawn`
+  工具结果返回。独立 Thread 不属于父运行的子 Agent，因此用 `framework.thread.*` 自定义事件
+  表达状态变化，不伪装成第二个顶层 `RUN_STARTED`。
+- 生命周期事件不携带委派任务正文、Thread 消息或用户答案。子 Agent / Thread 暂停时会携带
+  `InteractionRequest` 的提示与响应 Schema，供界面展示和收集合法答案。
 
 ## 自定义节点和客户端状态
 
@@ -194,4 +202,4 @@ AG-UI 事件；现有 Workflow journal 不包含完整 token 流，不能据此�
 [protocol.rs](../crates/eliteforge-agent-official-plugin-agui/tests/protocol.rs) 使用真实 SDK 客户端消费输出，验证
 文本与推理配对、工具参数/结果顺序、并发模型和节点隔离、附件引用、审批通过与拒绝、
 执行器重建后的恢复、旧检查点兼容、最终回复、中间说明、转义会话 ID、状态与活动、
-取消、重试、超限、错误文本和慢观测 sink。所有模型均为本地测试实现，不需要模型账号。
+子 Agent 与独立 Thread 协作、取消、重试、超限、错误文本和慢观测 sink。所有模型均为本地测试实现，不需要模型账号。

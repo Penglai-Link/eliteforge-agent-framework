@@ -3,6 +3,7 @@ extern crate self as eliteforge_agent_core;
 
 pub mod budget;
 pub mod capability_packs;
+pub mod collaboration;
 pub mod content;
 pub mod context;
 pub mod conversation;
@@ -23,6 +24,7 @@ pub mod tokens;
 pub mod types;
 pub mod workflow;
 pub use capability_packs::*;
+pub use collaboration::*;
 pub use content::*;
 pub use context::*;
 pub use conversation::*;

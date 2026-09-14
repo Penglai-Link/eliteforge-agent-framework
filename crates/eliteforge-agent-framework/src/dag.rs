@@ -225,6 +225,11 @@ impl AgentLoop for DagWorkflowLoop {
                     .max_parallel_tools
                     .min(state.request.limits.max_parallel_tools),
             ));
+            run.limits.max_steps = run.limits.max_steps.min(state.request.limits.max_steps);
+            run.limits.max_total_tokens = run
+                .limits
+                .max_total_tokens
+                .min(state.request.limits.max_total_tokens);
             run.token_ceiling = run.token_ceiling.min(state.request.limits.max_total_tokens);
             run.max_child_runs = run.max_child_runs.min(state.request.limits.max_child_runs);
             run.max_child_depth = run

@@ -26,6 +26,7 @@ pub(crate) struct Adapter {
     calls: BTreeSet<RunId>,
     steps: BTreeMap<String, String>,
     activities: BTreeMap<String, String>,
+    subagents: BTreeSet<RunId>,
     result: Option<Box<RunResult>>,
 }
 impl Adapter {
@@ -44,6 +45,7 @@ impl Adapter {
             calls: BTreeSet::new(),
             steps: BTreeMap::new(),
             activities: BTreeMap::new(),
+            subagents: BTreeSet::new(),
             result: None,
         }
     }
@@ -104,6 +106,7 @@ impl Adapter {
                         json!({"nodeId":node_id,"status":status}),
                     ));
                 }
+                AgentEvent::Collaboration(event) => self.collaboration(*event, &mut out)?,
                 AgentEvent::RunFinished { status } => self.finish(status, &mut out)?,
                 AgentEvent::RunCancelled => {
                     self.close_open(&mut out);
@@ -131,13 +134,152 @@ impl Adapter {
                 _ => {}
             }
         }
-        if self.messages.len() + self.calls.len() + self.steps.len() + self.activities.len()
+        if self.messages.len()
+            + self.calls.len()
+            + self.steps.len()
+            + self.activities.len()
+            + self.subagents.len()
             > self.options.max_open_items
         {
             return Err("AGUI_OPEN_ITEM_LIMIT");
         }
         self.stamp(&mut out, envelope.node_execution.as_ref());
         Ok(out)
+    }
+    fn collaboration(
+        &mut self,
+        event: CollaborationEvent,
+        out: &mut Vec<Event>,
+    ) -> Result<(), &'static str> {
+        match event {
+            CollaborationEvent::ChildRunStarted {
+                child_run_id,
+                session_id: _,
+                depth: _,
+            } => {
+                if child_run_id.is_nil() || !self.subagents.insert(child_run_id) {
+                    return Err("AGUI_SUBAGENT_ORDER");
+                }
+                out.push(
+                    ag_ui::SubagentStartedEvent::new(child_run_id.to_string(), "agent_spawn")
+                        .with_description("Delegated child agent")
+                        .into(),
+                );
+            }
+            CollaborationEvent::ChildRunFinished {
+                child_run_id,
+                status,
+                interactions,
+            } => {
+                if !self.subagents.remove(&child_run_id) {
+                    return Err("AGUI_SUBAGENT_ORDER");
+                }
+                let id = child_run_id.to_string();
+                let interrupt_ids = interactions
+                    .iter()
+                    .map(|interaction| interaction.id.to_string())
+                    .collect::<Vec<_>>();
+                if !interactions.is_empty() {
+                    let mut event = ag_ui::CustomEvent::new(
+                        "framework.subagent.interactions",
+                        json!({"interactions":&interactions}),
+                    );
+                    event.subagent_run_id = Some(id.clone().into());
+                    out.push(event.into());
+                }
+                match status {
+                    RunStatus::Completed => out.push(
+                        ag_ui::SubagentFinishedEvent::new(id)
+                            .with_outcome(ag_ui::SubagentOutcome::Success)
+                            .into(),
+                    ),
+                    RunStatus::AwaitingInput | RunStatus::RecoveryRequired => out.push(
+                        ag_ui::SubagentFinishedEvent::new(id)
+                            .with_outcome(ag_ui::SubagentOutcome::suspended(interrupt_ids))
+                            .into(),
+                    ),
+                    RunStatus::StepLimit | RunStatus::ToolCallLimit => out.push(
+                        ag_ui::SubagentErrorEvent::new(id, "Child agent execution limit reached")
+                            .with_code("AGENT_LIMIT_REACHED")
+                            .into(),
+                    ),
+                }
+            }
+            CollaborationEvent::ChildRunFailed {
+                child_run_id,
+                cancelled,
+                message,
+            } => {
+                if !self.subagents.remove(&child_run_id) {
+                    return Err("AGUI_SUBAGENT_ORDER");
+                }
+                let message = if self.options.include_error_details {
+                    message
+                } else if cancelled {
+                    "Child agent run cancelled".into()
+                } else {
+                    "Child agent run failed".into()
+                };
+                let code = if cancelled {
+                    "AGENT_CANCELLED"
+                } else {
+                    "AGENT_RUN_FAILED"
+                };
+                out.push(
+                    ag_ui::SubagentErrorEvent::new(child_run_id.to_string(), message)
+                        .with_code(code)
+                        .into(),
+                );
+            }
+            CollaborationEvent::ThreadCreated { summary } => out.push(Event::custom(
+                "framework.thread.created",
+                json!({
+                    "threadId":summary.thread_id,
+                    "title":summary.title,
+                    "status":summary.status,
+                    "latestRunId":summary.latest_run_id,
+                }),
+            )),
+            CollaborationEvent::ThreadRunStarted {
+                thread_id,
+                run_id,
+                cause,
+                interaction_id,
+            } => out.push(Event::custom(
+                "framework.thread.run.started",
+                json!({
+                    "threadId":thread_id,
+                    "runId":run_id,
+                    "cause":cause,
+                    "interactionId":interaction_id,
+                }),
+            )),
+            CollaborationEvent::ThreadRunFinished {
+                thread_id,
+                run_id,
+                status,
+                interactions,
+                error,
+            } => out.push(Event::custom(
+                "framework.thread.run.finished",
+                json!({
+                    "threadId":thread_id,
+                    "runId":run_id,
+                    "status":status,
+                    "interactions":interactions,
+                    "error":error.map(|message| if self.options.include_error_details {
+                        message
+                    } else {
+                        "Thread run failed".into()
+                    }),
+                }),
+            )),
+            CollaborationEvent::ThreadClosed { thread_id } => out.push(Event::custom(
+                "framework.thread.closed",
+                json!({"threadId":thread_id}),
+            )),
+        }
+        Ok(())
     }
     fn output(
         &mut self,
@@ -320,6 +462,9 @@ impl Adapter {
     }
     fn finish(&mut self, status: RunStatus, out: &mut Vec<Event>) -> Result<(), &'static str> {
         self.close_open(out);
+        if !self.subagents.is_empty() {
+            return Err("AGUI_SUBAGENT_ORDER");
+        }
         if let Some(result) = &self.result {
             if result.status != status {
                 return Err("AGUI_RESULT_MISMATCH");

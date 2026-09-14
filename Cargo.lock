@@ -803,6 +803,7 @@ dependencies = [
  "eliteforge-agent-official-plugin-otel",
  "eliteforge-agent-official-plugin-skills",
  "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-official-plugin-tools-agents",
  "eliteforge-agent-official-plugin-tools-human",
  "eliteforge-agent-official-plugin-tools-mcp",
  "opentelemetry",
@@ -847,6 +848,21 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-tools-agents"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-tools-human",
+ "eliteforge-agent-test-support",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ members = [
     "crates/eliteforge-agent-official-plugin-model-genai",
     "crates/eliteforge-agent-state-sqlite",
     "crates/eliteforge-agent-official-plugin-tools-mcp",
+    "crates/eliteforge-agent-official-plugin-tools-agents",
     "crates/eliteforge-agent-context",
     "crates/eliteforge-agent-memory",
     "crates/eliteforge-agent-official-plugin-otel",

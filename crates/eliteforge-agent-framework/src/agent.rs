@@ -1,12 +1,15 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
-    sync::{Arc, Mutex, atomic::AtomicU64},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicU64},
+    },
 };
 
 use eliteforge_agent_plugin_kernel::{Plugin, PluginContainer};
 use futures::FutureExt;
-use tokio::sync::{Notify, broadcast, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::*;
@@ -313,28 +316,37 @@ impl AgentBuilder {
                 return Err(error);
             }
         };
-        Ok(Agent {
-            operations: services.operations.clone(),
-            inner: Arc::new(AgentInner {
-                id: RunId::new_v4(),
-                cleanup: Mutex::new(CleanupState {
-                    container: Some(container),
-                    started: false,
-                    complete: false,
-                    report: eliteforge_agent_plugin_kernel::ShutdownReport::default(),
-                }),
-                agent_loop,
-                services,
-                sinks,
-                outputs,
-                runs: Mutex::new(RunRegistry {
-                    closed: false,
-                    active: HashMap::new(),
-                    operations: HashMap::new(),
-                }),
-                drained: Notify::new(),
-                cleanup_done: Notify::new(),
+        let operations = services.operations.clone();
+        let inner = Arc::new(AgentInner {
+            id: RunId::new_v4(),
+            cleanup: Mutex::new(CleanupState {
+                container: Some(container),
+                started: false,
+                complete: false,
+                report: eliteforge_agent_plugin_kernel::ShutdownReport::default(),
             }),
+            agent_loop,
+            services,
+            sinks,
+            outputs,
+            runs: Mutex::new(RunRegistry {
+                closed: false,
+                active: HashMap::new(),
+                operations: HashMap::new(),
+            }),
+            drained: Notify::new(),
+            cleanup_done: Notify::new(),
+            threads: Arc::new(ThreadRegistry::default()),
+        });
+        let collaboration = Arc::new(CollaborationRuntime {
+            agent: Arc::downgrade(&inner),
+            threads: inner.threads.clone(),
+            operations: operations.clone(),
+        });
+        Ok(Agent {
+            operations,
+            inner,
+            collaboration,
         })
     }
 }
@@ -362,12 +374,14 @@ struct AgentInner {
     runs: Mutex<RunRegistry>,
     drained: Notify,
     cleanup_done: Notify,
+    threads: Arc<ThreadRegistry>,
 }
 
 #[derive(Clone)]
 pub struct Agent {
     inner: Arc<AgentInner>,
     operations: Arc<dyn ModelOperations>,
+    collaboration: Arc<CollaborationRuntime>,
 }
 
 /// Opaque realtime connection owned by the Agent's model runtime.
@@ -380,9 +394,16 @@ pub struct RealtimeHandle {
 impl Agent {
     /// An Agent view with per-call model options; all views share lifecycle and services.
     pub fn with_model_options(&self, options: ModelInvocationOptions) -> Self {
+        let operations = self.operations.with_options(options);
+        let collaboration = Arc::new(CollaborationRuntime {
+            agent: Arc::downgrade(&self.inner),
+            threads: self.inner.threads.clone(),
+            operations: operations.clone(),
+        });
         Self {
             inner: self.inner.clone(),
-            operations: self.operations.with_options(options),
+            operations,
+            collaboration,
         }
     }
 
@@ -765,6 +786,15 @@ impl Agent {
             }
         }
         request.extensions = extensions;
+        if request
+            .extensions
+            .get::<AgentCollaborationService>()
+            .is_none()
+        {
+            request
+                .extensions
+                .insert(AgentCollaborationService(self.collaboration.clone()));
+        }
         let cancellation = parent.map_or_else(CancellationToken::new, |p| p.children.child_token());
         {
             let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
@@ -789,6 +819,7 @@ impl Agent {
         let (result_sender, result) = oneshot::channel();
         let mut context = RunContext {
             model: request.model.clone(),
+            limits: request.limits.clone(),
             node_execution: None,
             execution_counters: None,
             tool_dispatch_gate: Arc::default(),
@@ -932,9 +963,17 @@ impl Agent {
     /// a new delegation must not silently reparent an existing durable execution.
     pub async fn run_child(
         &self,
-        mut request: RunRequest,
+        request: RunRequest,
         parent: &RunContext,
     ) -> Result<RunResult, AgentError> {
+        Ok(self.run_child_with_id(request, parent).await?.result)
+    }
+
+    async fn run_child_with_id(
+        &self,
+        mut request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<ChildRunResult, AgentError> {
         parent.check_cancelled()?;
         if request.resume.is_some() {
             return Err(AgentError::InvalidConfiguration(
@@ -953,6 +992,8 @@ impl Agent {
             return Err(AgentError::Cancelled);
         }
         request.limits.run_timeout = request.limits.run_timeout.min(remaining);
+        let child_session_id = request.session_id.clone();
+        let child_depth = parent.lineage.depth.saturating_add(1);
         let (admission, allowance) =
             ChildAdmission::reserve(parent, request.limits.max_total_tokens)?;
         request.limits.max_total_tokens = allowance;
@@ -979,6 +1020,17 @@ impl Agent {
                 );
             }
         };
+        let child_run_id = handle.run_id;
+        parent
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ChildRunStarted {
+                    child_run_id,
+                    session_id: child_session_id,
+                    depth: child_depth,
+                },
+            )))
+            .await;
+        let mut child_events = ChildEventGuard::new(parent.clone(), child_run_id);
         let mut permit = admission.dispatched();
         let usage = handle.control.usage.clone();
         let completion = handle.completion.clone();
@@ -999,7 +1051,24 @@ impl Agent {
             .including_reservations();
         let settlement = permit.settle_child(&charged, parent.token_ceiling);
         let result = finish_with_cleanup(result, settlement.map_err(Into::into));
-        finish_with_cleanup(result, parent.persist_budget().await.map_err(Into::into))
+        let result = finish_with_cleanup(result, parent.persist_budget().await.map_err(Into::into));
+        match &result {
+            Ok(result) => child_events.finish(CollaborationEvent::ChildRunFinished {
+                child_run_id,
+                status: result.status.clone(),
+                interactions: result.interactions.clone(),
+            }),
+            Err(error) => child_events.finish(CollaborationEvent::ChildRunFailed {
+                child_run_id,
+                cancelled: matches!(error.primary(), AgentError::Cancelled),
+                message: error.to_string(),
+            }),
+        }
+        let result = result?;
+        Ok(ChildRunResult {
+            run_id: child_run_id,
+            result,
+        })
     }
 
     /// Reject new runs, cancel existing runs, await their RAII cleanup, and close
@@ -1110,6 +1179,42 @@ struct ChildAdmission {
     child_runs: Arc<std::sync::atomic::AtomicUsize>,
     permit: Option<crate::budget::UsagePermit>,
     dispatched: bool,
+}
+
+struct ChildEventGuard {
+    parent: RunContext,
+    child_run_id: RunId,
+    finished: bool,
+}
+
+impl ChildEventGuard {
+    fn new(parent: RunContext, child_run_id: RunId) -> Self {
+        Self {
+            parent,
+            child_run_id,
+            finished: false,
+        }
+    }
+
+    fn finish(&mut self, event: CollaborationEvent) {
+        self.parent
+            .publish(AgentEvent::Collaboration(Box::new(event)));
+        self.finished = true;
+    }
+}
+
+impl Drop for ChildEventGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.parent.publish(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ChildRunFailed {
+                    child_run_id: self.child_run_id,
+                    cancelled: true,
+                    message: "child run was interrupted before completion".into(),
+                },
+            )));
+        }
+    }
 }
 impl ChildAdmission {
     fn reserve(parent: &RunContext, requested: u64) -> Result<(Self, u64), AgentError> {
@@ -1305,5 +1410,520 @@ impl RunHandle {
 impl Drop for RunHandle {
     fn drop(&mut self) {
         self.control.cancel();
+    }
+}
+
+const MAX_IN_PROCESS_THREADS: usize = 128;
+
+#[derive(Default)]
+struct ThreadRegistry {
+    state: Mutex<ThreadRegistryState>,
+}
+
+#[derive(Default)]
+struct ThreadRegistryState {
+    records: BTreeMap<String, Arc<ThreadRecord>>,
+    reservations: HashSet<String>,
+}
+
+impl ThreadRegistry {
+    fn reserve(self: &Arc<Self>, thread_id: &str) -> Result<ThreadSlotReservation, AgentError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.records.len() + state.reservations.len() >= MAX_IN_PROCESS_THREADS {
+            return Err(AgentError::Run(
+                "in-process thread capacity exceeded".into(),
+            ));
+        }
+        if state.records.contains_key(thread_id) || !state.reservations.insert(thread_id.to_owned())
+        {
+            return Err(AgentError::Run("thread ID collision".into()));
+        }
+        Ok(ThreadSlotReservation {
+            registry: self.clone(),
+            thread_id: thread_id.to_owned(),
+            active: true,
+        })
+    }
+
+    fn find(&self, thread_id: &str) -> Result<Arc<ThreadRecord>, AgentError> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .records
+            .get(thread_id)
+            .cloned()
+            .ok_or_else(|| AgentError::Run("thread not found".into()))
+    }
+}
+
+struct ThreadSlotReservation {
+    registry: Arc<ThreadRegistry>,
+    thread_id: String,
+    active: bool,
+}
+
+impl ThreadSlotReservation {
+    fn commit(mut self, record: Arc<ThreadRecord>) {
+        let mut state = self
+            .registry
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let reserved = state.reservations.remove(&self.thread_id);
+        debug_assert!(reserved, "thread slot reservation must exist");
+        let previous = state.records.insert(self.thread_id.clone(), record);
+        debug_assert!(previous.is_none(), "reserved thread ID must be unique");
+        self.active = false;
+    }
+}
+
+impl Drop for ThreadSlotReservation {
+    fn drop(&mut self) {
+        if self.active {
+            self.registry
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .reservations
+                .remove(&self.thread_id);
+        }
+    }
+}
+
+struct ThreadRecord {
+    session_id: String,
+    transition: AsyncMutex<()>,
+    state: Mutex<ThreadRecordState>,
+}
+
+struct ThreadRecordState {
+    summary: ThreadSummary,
+    latest: Option<Arc<ThreadRun>>,
+}
+
+struct ThreadRun {
+    run_id: RunId,
+    origin_execution_id: RunId,
+    done: AtomicBool,
+    terminal: Mutex<Option<ThreadStatus>>,
+    result: Mutex<Option<Result<ThreadResult, String>>>,
+    notify: Notify,
+}
+
+impl ThreadRun {
+    fn new(run_id: RunId, origin_execution_id: RunId) -> Self {
+        Self {
+            run_id,
+            origin_execution_id,
+            done: AtomicBool::new(false),
+            terminal: Mutex::new(None),
+            result: Mutex::new(None),
+            notify: Notify::new(),
+        }
+    }
+
+    async fn wait(&self) -> Result<ThreadResult, AgentError> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                return result.map_err(AgentError::Run);
+            }
+            notified.await;
+        }
+    }
+}
+
+struct CollaborationRuntime {
+    agent: Weak<AgentInner>,
+    threads: Arc<ThreadRegistry>,
+    operations: Arc<dyn ModelOperations>,
+}
+
+impl CollaborationRuntime {
+    fn agent(&self) -> Result<Agent, AgentError> {
+        let inner = self.agent.upgrade().ok_or(AgentError::Closed)?;
+        let collaboration = Arc::new(Self {
+            agent: Arc::downgrade(&inner),
+            threads: self.threads.clone(),
+            operations: self.operations.clone(),
+        });
+        Ok(Agent {
+            operations: self.operations.clone(),
+            inner,
+            collaboration,
+        })
+    }
+
+    fn prepare_request(
+        mut request: RunRequest,
+        session_id: String,
+        parent: &RunContext,
+    ) -> RunRequest {
+        request.session_id = session_id;
+        request.extensions = parent.extensions.clone();
+        if request.model.is_none() {
+            request.model = parent.model.clone();
+        }
+        request.limits.max_steps = request.limits.max_steps.min(parent.limits.max_steps);
+        request.limits.max_total_tokens = request.limits.max_total_tokens.min(parent.token_ceiling);
+        request
+    }
+
+    fn launch(
+        &self,
+        agent: Agent,
+        record: Arc<ThreadRecord>,
+        run: Arc<ThreadRun>,
+        handle: RunHandle,
+        origin: RunContext,
+    ) {
+        tokio::spawn(async move {
+            let result = agent.wait(handle).await;
+            let (status, stored) = match result {
+                Ok(result) => {
+                    let status = ThreadStatus::from(&result.status);
+                    (status, Ok(ThreadResult::from_run(run.run_id, &result)))
+                }
+                Err(error) => {
+                    let status = if matches!(error.primary(), AgentError::Cancelled) {
+                        ThreadStatus::Cancelled
+                    } else {
+                        ThreadStatus::Failed
+                    };
+                    (status, Err(error.to_string()))
+                }
+            };
+            {
+                let mut state = record.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state
+                    .latest
+                    .as_ref()
+                    .is_some_and(|latest| latest.run_id == run.run_id)
+                {
+                    state.summary.status = status.clone();
+                }
+            }
+            *run.terminal.lock().unwrap_or_else(|e| e.into_inner()) = Some(status.clone());
+            origin
+                .emit(AgentEvent::Collaboration(Box::new(
+                    thread_run_finished_event(&record.session_id, run.run_id, status, &stored),
+                )))
+                .await;
+            *run.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(stored);
+            run.done.store(true, std::sync::atomic::Ordering::Release);
+            run.notify.notify_waiters();
+        });
+    }
+
+    async fn start_thread_run(
+        &self,
+        agent: Agent,
+        record: Arc<ThreadRecord>,
+        request: RunRequest,
+        parent: &RunContext,
+        cause: ThreadRunCause,
+        interaction_id: Option<RunId>,
+    ) -> Result<ThreadSummary, AgentError> {
+        let handle = agent.start(request)?;
+        let run = Arc::new(ThreadRun::new(handle.run_id, parent.execution_id()));
+        let summary = {
+            let mut state = record.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.latest = Some(run.clone());
+            state.summary.status = ThreadStatus::Running;
+            state.summary.latest_run_id = Some(handle.run_id);
+            state.summary.clone()
+        };
+        parent
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ThreadRunStarted {
+                    thread_id: record.session_id.clone(),
+                    run_id: handle.run_id,
+                    cause,
+                    interaction_id,
+                },
+            )))
+            .await;
+        self.launch(agent, record, run, handle, parent.clone());
+        Ok(summary)
+    }
+}
+
+fn thread_run_finished_event(
+    thread_id: &str,
+    run_id: RunId,
+    status: ThreadStatus,
+    result: &Result<ThreadResult, String>,
+) -> CollaborationEvent {
+    CollaborationEvent::ThreadRunFinished {
+        thread_id: thread_id.to_owned(),
+        run_id,
+        status,
+        interactions: result
+            .as_ref()
+            .map_or_else(|_| Vec::new(), |result| result.interactions.clone()),
+        error: result.as_ref().err().cloned(),
+    }
+}
+
+#[async_trait::async_trait]
+impl AgentCollaborationRuntime for CollaborationRuntime {
+    async fn spawn_child(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<ChildRunResult, AgentError> {
+        let agent = self.agent()?;
+        let request =
+            Self::prepare_request(request, format!("tool-child-{}", RunId::new_v4()), parent);
+        agent.run_child_with_id(request, parent).await
+    }
+
+    async fn create_thread(
+        &self,
+        request: RunRequest,
+        title: Option<String>,
+        parent: &RunContext,
+    ) -> Result<ThreadSummary, AgentError> {
+        if title
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty() || value.len() > 200)
+        {
+            return Err(AgentError::InvalidConfiguration(
+                "thread title must be nonempty and at most 200 bytes".into(),
+            ));
+        }
+        let thread_id = format!("thread-{}", RunId::new_v4());
+        let reservation = self.threads.reserve(&thread_id)?;
+        let agent = self.agent()?;
+        let request = Self::prepare_request(request, thread_id.clone(), parent);
+        let handle = agent.start(request)?;
+        let run = Arc::new(ThreadRun::new(handle.run_id, parent.execution_id()));
+        let summary = ThreadSummary {
+            thread_id: thread_id.clone(),
+            title,
+            status: ThreadStatus::Running,
+            latest_run_id: Some(handle.run_id),
+        };
+        let record = Arc::new(ThreadRecord {
+            session_id: thread_id.clone(),
+            transition: AsyncMutex::new(()),
+            state: Mutex::new(ThreadRecordState {
+                summary: summary.clone(),
+                latest: Some(run.clone()),
+            }),
+        });
+        reservation.commit(record.clone());
+        parent
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ThreadCreated {
+                    summary: summary.clone(),
+                },
+            )))
+            .await;
+        parent
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ThreadRunStarted {
+                    thread_id: thread_id.clone(),
+                    run_id: handle.run_id,
+                    cause: ThreadRunCause::Created,
+                    interaction_id: None,
+                },
+            )))
+            .await;
+        self.launch(agent, record.clone(), run, handle, parent.clone());
+        Ok(summary)
+    }
+
+    async fn send_thread(
+        &self,
+        thread_id: &str,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<ThreadSummary, AgentError> {
+        let record = self.threads.find(thread_id)?;
+        let _transition = record.transition.lock().await;
+        {
+            let state = record.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state
+                .latest
+                .as_ref()
+                .is_some_and(|run| !run.done.load(std::sync::atomic::Ordering::Acquire))
+            {
+                return Err(AgentError::SessionBusy(thread_id.into()));
+            }
+            if state.summary.status == ThreadStatus::AwaitingInput {
+                return Err(AgentError::Run(
+                    "thread is awaiting input; use thread_answer".into(),
+                ));
+            }
+        }
+        let agent = self.agent()?;
+        let request = Self::prepare_request(request, record.session_id.clone(), parent);
+        self.start_thread_run(
+            agent,
+            record.clone(),
+            request,
+            parent,
+            ThreadRunCause::Message,
+            None,
+        )
+        .await
+    }
+
+    async fn answer_thread(
+        &self,
+        thread_id: &str,
+        interaction_id: RunId,
+        value: serde_json::Value,
+        parent: &RunContext,
+    ) -> Result<ThreadSummary, AgentError> {
+        let record = self.threads.find(thread_id)?;
+        let _transition = record.transition.lock().await;
+        {
+            let state = record.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state
+                .latest
+                .as_ref()
+                .is_some_and(|run| !run.done.load(std::sync::atomic::Ordering::Acquire))
+            {
+                return Err(AgentError::SessionBusy(thread_id.into()));
+            }
+            if state.summary.status != ThreadStatus::AwaitingInput {
+                return Err(AgentError::Run("thread is not awaiting input".into()));
+            }
+        }
+        let agent = self.agent()?;
+        let request = agent
+            .answer(&record.session_id, interaction_id, value)
+            .await?;
+        let request = Self::prepare_request(request, record.session_id.clone(), parent);
+        self.start_thread_run(
+            agent,
+            record.clone(),
+            request,
+            parent,
+            ThreadRunCause::InteractionResponse,
+            Some(interaction_id),
+        )
+        .await
+    }
+
+    async fn wait_thread(
+        &self,
+        thread_id: &str,
+        run_id: Option<RunId>,
+        parent: &RunContext,
+    ) -> Result<ThreadResult, AgentError> {
+        let record = self.threads.find(thread_id)?;
+        let run = record
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .latest
+            .clone()
+            .ok_or_else(|| AgentError::Run("thread has no run".into()))?;
+        if run_id.is_some_and(|id| id != run.run_id) {
+            return Err(AgentError::Run(
+                "requested run is not the latest thread run".into(),
+            ));
+        }
+        let result = run.wait().await;
+        if parent.execution_id() != run.origin_execution_id {
+            let status = run
+                .terminal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or(ThreadStatus::Failed);
+            let stored = match &result {
+                Ok(result) => Ok(result.clone()),
+                Err(error) => Err(error.to_string()),
+            };
+            parent
+                .emit(AgentEvent::Collaboration(Box::new(
+                    thread_run_finished_event(thread_id, run.run_id, status, &stored),
+                )))
+                .await;
+        }
+        result
+    }
+
+    async fn read_thread(&self, thread_id: &str, limit: usize) -> Result<ThreadView, AgentError> {
+        let record = self.threads.find(thread_id)?;
+        let agent = self.agent()?;
+        let mut conversation = agent
+            .conversation(&ConversationKey::new(record.session_id.clone()))
+            .await?;
+        if conversation.messages.len() > limit {
+            let start = conversation.messages.len() - limit;
+            conversation.messages = conversation.messages.split_off(start);
+        }
+        Ok(ThreadView {
+            summary: record
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .summary
+                .clone(),
+            conversation,
+        })
+    }
+
+    async fn list_threads(&self, _parent: &RunContext) -> Result<Vec<ThreadSummary>, AgentError> {
+        Ok(self
+            .threads
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .records
+            .values()
+            .map(|record| {
+                record
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .summary
+                    .clone()
+            })
+            .collect())
+    }
+
+    async fn close_thread(&self, thread_id: &str, _parent: &RunContext) -> Result<(), AgentError> {
+        let record = self.threads.find(thread_id)?;
+        let _transition = record.transition.lock().await;
+        {
+            let state = record.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state
+                .latest
+                .as_ref()
+                .is_some_and(|run| !run.done.load(std::sync::atomic::Ordering::Acquire))
+            {
+                return Err(AgentError::SessionBusy(thread_id.into()));
+            }
+        }
+        {
+            let mut registry = self.threads.state.lock().unwrap_or_else(|e| e.into_inner());
+            match registry.records.get(thread_id) {
+                Some(current) if Arc::ptr_eq(current, &record) => {
+                    registry.records.remove(thread_id);
+                }
+                _ => return Err(AgentError::Run("thread not found".into())),
+            }
+        }
+        _parent
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ThreadClosed {
+                    thread_id: thread_id.to_owned(),
+                },
+            )))
+            .await;
+        Ok(())
     }
 }

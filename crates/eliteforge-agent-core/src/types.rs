@@ -484,6 +484,7 @@ pub enum AgentEvent {
         node_id: String,
         status: crate::WorkflowNodeStatus,
     },
+    Collaboration(Box<crate::CollaborationEvent>),
     ModelSelected {
         stage: String,
         model: crate::ModelRef,
@@ -783,6 +784,8 @@ pub struct AgentServices {
 pub struct RunContext {
     pub model: Option<crate::ModelRef>,
     #[doc(hidden)]
+    pub limits: RunLimits,
+    #[doc(hidden)]
     pub node_execution: Option<crate::WorkflowNodeExecution>,
     #[doc(hidden)]
     pub execution_counters: Option<Arc<crate::budget::ExecutionCounters>>,
@@ -841,6 +844,12 @@ pub struct SteeringState {
 }
 
 impl RunContext {
+    /// Limits configured by the host for this run. Descendant or independent
+    /// collaboration runs may tighten this policy but must not enlarge it.
+    pub fn limits(&self) -> &RunLimits {
+        &self.limits
+    }
+
     /// Durable node invocation and the current attempt. Absent outside a node.
     pub fn node_execution(&self) -> Option<&crate::WorkflowNodeExecution> {
         self.node_execution.as_ref()

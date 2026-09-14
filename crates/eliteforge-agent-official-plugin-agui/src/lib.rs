@@ -219,6 +219,7 @@ fn relevant(event: &AgentEvent) -> bool {
         AgentEvent::RunStarted { .. }
             | AgentEvent::Output(_)
             | AgentEvent::WorkflowNodeChanged { .. }
+            | AgentEvent::Collaboration(_)
             | AgentEvent::Steered(_)
             | AgentEvent::RunFinished { .. }
             | AgentEvent::RunCancelled

@@ -1,7 +1,7 @@
 //! Official plugin configuration in one AgentBuilder::plugin_pack call.
 //!
 //! The pack includes every official plugin: Genai, SQLite, human interaction,
-//! Skills, AG-UI, MCP and telemetry. Resource acquisition happens during Agent build;
+//! agent collaboration, Skills, AG-UI, MCP and telemetry. Resource acquisition happens during Agent build;
 //! all runtime operations and plugin shutdown remain owned by the Agent.
 
 use eliteforge_agent_core::{Plugin, PluginPack};
@@ -12,6 +12,7 @@ pub use eliteforge_agent_official_plugin_model_genai as model;
 pub use eliteforge_agent_official_plugin_otel as telemetry;
 pub use eliteforge_agent_official_plugin_skills as skills;
 pub use eliteforge_agent_official_plugin_storage_sqlite as storage;
+pub use eliteforge_agent_official_plugin_tools_agents as agents;
 pub use eliteforge_agent_official_plugin_tools_human as human;
 pub use eliteforge_agent_official_plugin_tools_mcp as mcp;
 
@@ -23,6 +24,7 @@ pub struct EliteForgeOfficialPluginPack {
     model: Option<Arc<dyn Plugin>>,
     storage: storage::SqliteStoragePlugin,
     human_interaction: bool,
+    agent_tools: bool,
     skills: Option<skills::SkillsPlugin>,
     agui: Option<agui::AgUiPlugin>,
     mcp: Vec<mcp::McpToolsPlugin>,
@@ -37,6 +39,7 @@ impl EliteForgeOfficialPluginPack {
             model: Some(Arc::new(model::GenaiPlugin::default())),
             storage: storage::SqliteStoragePlugin::new(database),
             human_interaction: true,
+            agent_tools: true,
             skills: Some(skills::SkillsPlugin::default()),
             agui: Some(agui::AgUiPlugin::default()),
             mcp: Vec::new(),
@@ -65,6 +68,12 @@ impl EliteForgeOfficialPluginPack {
 
     pub fn human_interaction(mut self, enabled: bool) -> Self {
         self.human_interaction = enabled;
+        self
+    }
+
+    /// Enable or omit the official child-agent and independent-thread tools.
+    pub fn agent_tools(mut self, enabled: bool) -> Self {
+        self.agent_tools = enabled;
         self
     }
 
@@ -130,6 +139,9 @@ impl PluginPack for EliteForgeOfficialPluginPack {
         }
         if self.human_interaction {
             plugins.push(Arc::new(human::HumanInteractionPlugin));
+        }
+        if self.agent_tools {
+            plugins.push(Arc::new(agents::AgentToolsPlugin));
         }
         if let Some(skills) = self.skills {
             plugins.push(Arc::new(skills));

@@ -18,7 +18,7 @@ let agent = AgentBuilder::new()
     .build().await?;
 ```
 
-官方包默认包含项目里的全部 7 个官方插件：Genai、SQLite、用户问答、Skills、AGUI、MCP 和 OTel。
+官方包默认包含项目里的全部 8 个官方插件：Genai、SQLite、用户问答、Agent 协作工具、Skills、AGUI、MCP 和 OTel。
 MCP 未配置服务器时工具集为空；OTel 在构建时读取上层应用的全局 provider。
 `PluginPack` 继续用于官方和兼容的插件组合。
 
@@ -92,14 +92,15 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 | 人机协作 | 用户问答与工具审批 | ✅ 已支持 | `AwaitInput`、持久化问题、允许/拒绝和跨进程恢复 |
 | 运行控制 | 追加指令、取消与子执行额度 | ✅ 已支持 | Steering、取消、父子执行身份和预算隔离 |
 | 集成 | MCP 工具与资源 | ✅ 已支持 | 官方 SDK transport、发现、分页、资源和取消传播 |
-| 集成 | AG-UI 事件协议 | ✅ 已支持 | SSE、文本、推理、工具、状态、活动和交互恢复事件 |
+| 集成 | AG-UI 事件协议 | ✅ 已支持 | SSE、文本、推理、工具、状态、活动、交互恢复、子 Agent 和 Thread 生命周期事件 |
 | 扩展 | Plugin、PluginPack 与能力包 | ✅ 已支持 | 声明式扩展点、全部 install 后 ready、回滚、异步关闭、Skills 聚合和 `#[capability]` / `#[capability_factory]` 自动装配 |
 | 扩展 | Middleware、Hook 与自定义执行器 | ✅ 已支持 | Run、模型、工具、节点中间件；生命周期 Hook；自定义 `AgentLoop` |
 | 扩展 | Skills 系统 | ✅ 已支持 | 官方文件系统插件兼容 Agent Skills；能力包可内嵌 `skills/`、引用目录或声明 Provider，统一聚合后按需读取资源 |
 | 扩展 | 插件市场与在线安装 | — 未提供 | 当前提供 crate 与插件组合 API，未提供市场或安装器 |
-| 多 Agent | 子 Agent / 专家 Agent | 🧩 可扩展 | 具备父子执行和预算基础；Agent 定义、路由和注册表由上层应用实现 |
+| 多 Agent | 子 Agent / 专家 Agent | ✅ 已支持 | 官方 `agent_spawn` 工具；继承父运行取消、deadline、lineage、预算和深度 |
+| 多 Agent | 独立 Threads 与会话协作 | ✅ 已支持 | 官方 `thread_create/send/answer/wait/read/list/close` 工具；默认进程内 bounded registry，跨进程持久化由上层 runtime 提供 |
 | 多 Agent | 后台执行、队列与 Worktree 隔离 | 🏠 上层应用负责 | 需要部署队列、进程管理和 Git 工作树管理 |
-| 多 Agent | Agent Team 协作 | 🧩 可扩展 | 可用 DAG、子执行和事件接口编排；未提供内置团队协议 |
+| 多 Agent | Agent Team 协作 | 🧩 可扩展 | 可用 DAG、子执行、Threads 和事件接口编排；未提供固定团队决策协议 |
 | 产品接口 | 终端 UI、REPL、Slash Commands、Headless HTTP | 🏠 上层应用负责 | Framework 提供运行时和事件；UI、CLI、HTTP 与命令路由由上层应用构建 |
 | 产品接口 | 文件历史、Diff 与 Rewind | 🏠 上层应用负责 | 可作为工具或存储能力接入；框架不管理 Git 或目录文件 |
 | 配置 | 项目级 / 用户级配置 Profile | 🏠 上层应用负责 | AgentBuilder 接收已解析配置；读取、合并和安全存储由上层应用负责 |
@@ -119,6 +120,7 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 | `eliteforge-agent-core` | 公共类型、能力接口、CapabilityPack API 和 Plugin 契约 |
 | `eliteforge-agent-capability-tools` | 可选文件系统读写、搜索、文本修改，以及独立的通用跨平台系统命令能力包 |
 | `eliteforge-agent-official-plugin-skills` | Agent Skills 标准文件系统发现、渐进式加载和可替换 Provider |
+| `eliteforge-agent-official-plugin-tools-agents` | 子 Agent 委派与独立 Thread 协作工具 |
 | `eliteforge-agent-plugin-kernel` | 服务注册、依赖排序和资源关闭 |
 | `eliteforge-agent-official-plugin-pack` | 官方插件组合，一次配置到 Agent |
 | `eliteforge-agent-official-plugin-*` | Genai、SQLite、MCP、AG-UI、OTel 等官方实现 |
@@ -134,6 +136,7 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 - [模型插件](docs/model-plugins.md)：Genai 配置、协议、模型选择与多模态扩展。
 - [DAG 工作流](docs/dag-workflows.md)：节点、并行、分支和恢复。
 - [交互与审批](docs/interactions.md)：用户问答、工具审批和跨进程恢复。
+- [Agent 协作](docs/collaboration.md)：子 Agent 委派、独立 Threads 和协作边界。
 - [可观测](docs/observability.md)：事件、OpenTelemetry 和恢复身份。
 
 ## 常用命令

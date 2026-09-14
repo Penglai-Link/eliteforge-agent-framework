@@ -1,439 +1,649 @@
 # Framework 架构
 
-`eliteforge-agent-core` 定义公共数据、能力契约和可复用运行支撑；`eliteforge-agent-framework` 负责装配、Agent 与工作流执行、模型调度和资源关闭。
-`eliteforge-agent-plugin-kernel` 负责插件装配与资源生命周期。模型协议、存储、MCP、用户交互、Skills 和遥测由配套插件提供。
+EliteForge Agent Framework 是可组装、可恢复的 Agent 运行时。它管理执行、状态、工具、协作和事件；
+上层应用管理业务身份、权限、凭据、订阅和 UI。
 
-本文只说明整体架构和运行语义。扩展点、默认行为以及现有实现见[Plugin 与扩展点](plugins.md)；可运行的场景和代码见[快速上手](quickstart.md)。
+本文使用中文解释概念。反引号内的英文是源码中的类型、方法、字段或枚举值。
 
-## 总体结构
+## 1. 系统边界
 
-上层应用负责业务边界，Framework 负责 Agent 运行时，插件负责接入外部能力。
+框架只实现通用运行语义。模型协议、存储、MCP、技能、AG-UI 和遥测由插件提供。
 
 ```mermaid
-flowchart TD
-    Application[上层应用\n身份、权限、订阅、凭据、UI] --> Builder[AgentBuilder\n服务装配]
-    Application --> CapabilityPack[CapabilityPack\n业务配置与显式子包]
-    CapabilityPack --> Builder
-    Builder --> Agent[Agent\n运行入口、关闭、身份]
-    Agent --> Loop[AgentLoop\nReAct / Workflow / DAG]
-    Loop --> ModelInvoker[ModelInvoker\n模型步骤编排]
-    ModelInvoker --> ModelCatalog[ModelCatalog\n连接与模型目录]
-    ModelCatalog --> ModelSelection[ModelSelectionStrategy\n选择连接中的模型]
-    ModelInvoker --> ContextPipeline[Context Pipeline\n快照、贡献、预算、裁剪]
-    Loop --> ToolInvoker[ToolInvoker\n参数校验、撤销、执行]
-    Loop --> State[状态与会话\n完整聊天记录 / 任务进度 / 交互]
-    ContextPipeline --> ChatModel[ChatModel\n协议适配]
-    ContextPipeline --> Skills[SkillsPlugin\n元数据与按需读取]
-    ModelSelection -.选择 connection/model.-> ChatModel
-    ToolInvoker --> ToolProvider[ToolProvider\n上层应用工具 / 文件系统能力包 / MCP]
-    State --> Storage[存储插件\nSQLite 或自定义实现]
-    Agent --> Events[EventSink\n实时事件与遥测]
-    Builder --> CapabilityResolver[能力包解析\n筛选、预校验、factory]
-    CapabilityResolver --> Kernel
-    Builder --> Kernel[eliteforge-agent-plugin-kernel\n依赖排序、服务注册、资源释放]
-    ChatModel --> Kernel
-    ToolProvider --> Kernel
-    Storage --> Kernel
+flowchart LR
+    App[上层应用<br/>身份、权限、凭据、UI] --> Builder[AgentBuilder]
+
+    subgraph Runtime[框架运行时]
+        Builder --> Agent[Agent<br/>运行与关闭]
+        Agent --> Loop[AgentLoop<br/>ReAct / 工作流 / DAG]
+        Loop --> Model[ModelInvoker]
+        Loop --> Tool[ToolInvoker]
+        Agent --> Collaboration[AgentCollaborationRuntime<br/>子 Agent / Thread]
+    end
+
+    subgraph Plugins[插件]
+        Models[模型连接]
+        Tools[工具 / MCP / Skills]
+        Stores[会话 / 状态 / 交互存储]
+        Outputs[AG-UI / Telemetry]
+    end
+
+    Model --> Models
+    Tool --> Tools
+    Loop --> Stores
+    Agent --> Outputs
+    Collaboration --> Agent
+
+    Runtime -. 依赖契约 .-> Core[eliteforge-agent-core<br/>公共契约]
+    Plugins -. 实现契约 .-> Core
+    Kernel[插件容器<br/>依赖、注册、关闭] --> Builder
 ```
 
-### 模块职责
+| 模块 | 职责 |
+|---|---|
+| `eliteforge-agent-core` | 定义模型、工具、状态、交互、协作和事件契约 |
+| `eliteforge-agent-plugin-kernel` | 排序插件依赖，注册服务，回滚安装，关闭资源 |
+| `eliteforge-agent-framework` | 组装 Agent，执行运行循环，管理预算、恢复、协作和关闭 |
+| 配套插件 | 实现模型、存储、工具、AG-UI 和遥测 |
+| 上层应用 | 实现业务权限、配额、路由、凭据和交互界面 |
 
-| 模块 | 职责 | 不负责的内容 |
-|---|---|---|
-| 上层应用 | 业务身份、权限、订阅、凭据、配置、HTTP/UI、业务路由 | 不把业务策略下沉到通用 Framework |
-| `eliteforge-agent-plugin-kernel` | 插件依赖排序、类型服务注册、安装回滚、异步关闭和 Drop 兜底 | 不定义 Agent 执行语义 |
-| `eliteforge-agent-core` | 模型/工具接口、请求/响应、上下文、状态、交互、能力包描述与宏导出 | 不依赖具体插件或 Framework |
-| `eliteforge-agent-framework` | Agent、执行循环、能力包解析、服务装配、模型调度和运行控制 | 不包含供应商协议实现 |
-| `eliteforge-agent-capability-tools` | 可选的文件系统读写、搜索、文本修改，以及独立的通用跨平台系统命令工具 | 不提供进程或文件系统沙箱，不定义上层应用的授权策略 |
-| 配套插件 | 实现模型协议、存储、工具、Skills、上下文、摘要、附件、AG-UI 和遥测 | 不替上层应用管理业务权限和订阅 |
+## 2. 服务组装
 
-Framework 的默认 `genai` feature 依赖 `eliteforge-agent-official-plugin-model-genai`；该插件仅依赖 Core。关闭默认 feature 可移除 Genai。SQLite、MCP 和 OpenTelemetry 仍由应用显式安装；文件系统工具也需要应用显式选择对应能力包。DAG 使用 `petgraph` 校验拓扑，使用 Tokio 执行节点。
-上层应用通过适配层接入 Framework，上层应用自己的业务类型留在上层应用内。
+`AgentBuilder` 接受单个插件、`PluginPack` 和 `CapabilityPack`。`build().await` 统一处理依赖、
+安装、就绪回调和运行时构造。
 
-## 服务装配
+```mermaid
+flowchart LR
+    Input[单个插件 / 插件包 / 能力包] --> Resolve[解析依赖图]
+    Resolve --> Validate[校验 ID、依赖、环和数量语义]
+    Validate --> Install[按稳定拓扑顺序安装]
+    Install --> Ready[按安装顺序执行就绪回调]
+    Ready --> Services[读取运行时服务]
+    Services --> Agent[Agent]
+    Install -. 失败 .-> Rollback[逆序回滚已安装资源]
+```
 
-`AgentBuilder` 有三类装配入口：`plugin` 添加单个插件，`plugin_pack` 展开兼容的
-`PluginPack`，`capability_pack` 选择声明式业务能力包。三者最后都进入同一个依赖图；
-`build().await` 才创建能力实例、安装插件并构造运行时服务。
+`CapabilityPack` 只创建已选能力。未选能力不运行构造函数，也不创建业务对象。
 
-能力包解析器只读取宏登记的静态描述。它先按根包和显式 `include(...)` 筛选，再预校验 ID、
-依赖、环和共享实例声明；通过后按稳定拓扑顺序调用 factory，并将每项能力适配为普通 `Plugin`。
-因此，未选包不创建业务对象。官方组合仍由独立的
-`eliteforge-agent-official-plugin-pack` 的 `PluginPack` 提供，Framework 和 Core 不依赖它。
+| 数量语义 | 注册 | 读取 | 示例 |
+|---|---|---|---|
+| 唯一服务 | `provide(T)` | `get<T>()` | `StateStore`、`ModelSelectionStrategy` |
+| 多个贡献 | `contribute(T)` | `all<T>()` | `ToolProvider`、中间件、`EventSink` |
 
-上下文内容由 `ContextProvider` 实现提供，能力包适配器或 `ContextPlugin` 都会将其注册为
-`ContextService` 和通用扩展点。安装完成后，Builder 通过 `all::<ContextService>()` 汇总运行时
-服务；插件在 `ready` 中也可通过 `extensions::<dyn ContextProvider>()` 查询完整集合。其他多贡献
-接口同样保留兼容服务类型并进入通用扩展注册表。能力声明、配置、Skills 成员和生命周期见
+同一类型不能同时使用两种数量语义。详见 [插件与扩展点](plugins.md) 和
 [能力包与自动装配](capability-packs.md)。
 
-```text
-AgentBuilder.plugin(...) / plugin_pack(...) / capability_pack(...)
-        │
-        ▼
-CapabilityPack（仅 capability_pack）
-  ├─ 显式根包和 include 子包
-  ├─ 描述筛选、ID/依赖/环预校验
-  └─ 同步 factory → 适配后的 Plugin
-        │
-        ▼
-PluginContainer.build
-  ├─ 按依赖顺序安装全部插件
-  ├─ 按安装顺序执行全部 ready
-  ├─ 注册唯一服务和多个贡献
-  ├─ 安装失败时回滚已安装资源
-  └─ 注册关闭与清理回调
-        │
-        ▼
-AgentBuilder 读取服务
-  ├─ 创建 ModelInvoker / ToolInvoker
-  ├─ 选择 AgentLoop
-  ├─ 装配上下文、状态和事件服务
-  └─ 返回可运行的 Agent
-```
+## 3. 执行模型
 
-服务有两种数量语义：
+一次执行由四层组成：`Agent` 管理运行外壳，`AgentLoop` 推进状态机，调用器约束外部调用，
+存储服务保存可恢复状态。
 
-| 语义 | 注册方式 | 读取方式 | 典型用途 |
-|---|---|---|---|
-| 唯一服务 | `provide(T)` | `get<T>()` | 一个会话存储、一个执行循环、一个模型选择策略 |
-| 多个贡献 | `contribute(T)` | `all<T>()` | 多个模型连接、工具来源、Middleware、EventSink |
+### 3.1 运行身份
 
-同一个服务类型不能同时使用两种注册语义。插件依赖、来源追踪、安装回滚和资源释放的具体入口见[Plugin 与扩展点](plugins.md)。
+| 身份 | 语义 |
+|---|---|
+| `session_id` | 上层应用定义的会话。同一 Agent 实例内同时只有一个活动运行 |
+| `run_id` | 一次逻辑运行。恢复时保持不变 |
+| `execution_id` | 一次实际执行尝试。每次 `start()` 都生成新值 |
+| `ToolCall.invocation_id` | 框架分配的工具调用身份，跨审批、执行和恢复保持稳定 |
+| `RunLineage` | 记录子 Agent 树的根运行、父运行和嵌套深度。独立 Thread 不进入该树 |
 
-### 装配边界
+### 3.2 运行生命周期
 
-Framework 根据已注册的服务构造运行时；需要 Chat 且没有自定义连接时，默认 Genai 插件读取模型环境配置。数据库和其他存储由应用显式安装。
-内置执行器需要持久化状态时，上层应用必须显式安装对应存储插件。
-
-```text
-上层应用和插件注册运行所需服务
-            │
-            ▼
-Framework 读取服务并构造运行时
-            │
-            ▼
-Agent 开始执行
-```
-
-扩展点、默认行为和现有实现统一维护在[plugins.md](plugins.md)。
-
-## 执行模型
-
-一次运行从生命周期通知开始，经过执行循环和调用器，最后完成清理并发布终态事件。
+`Agent::start` 先完成同步准入，再启动异步执行。
 
 ```mermaid
 sequenceDiagram
-    participant A as Agent
-    participant H as RunLifecycleHook
-    participant L as AgentLoop
-    participant M as ModelInvoker
-    participant C as ContextAssembler
-    participant T as ToolInvoker
-    participant S as StateStore / ConversationStore
-    participant E as EventSink
+    participant App as 上层应用
+    participant Agent
+    participant Registry as 运行登记表
+    participant Runner as RunNext / AgentLoop
+    participant Events as 事件管线
 
-    A->>H: on_started
-    A->>L: 执行 RunRequest
-    loop 模型与工具交互
-        L->>M: 生成模型请求
-        M->>S: 读取会话和任务进度
-        M->>C: 组装 ContextWindow
-        C-->>M: messages + assembly report
-        M->>E: 发布模型事件
-        M-->>L: 文本或工具调用
-        L->>T: 校验并执行工具
-        T->>E: 发布工具事件
-        T->>S: 保存工具记录和状态
-        T-->>L: 工具结果
-    end
-    L->>S: 保存终态
-    A->>H: on_finished
-    A->>E: 发布终态事件
+    App->>Agent: start(request)
+    Agent->>Agent: 校验请求和 Tokio 运行时<br/>并准备 RunOutputFactory
+    Agent->>Registry: 检查 Agent 是否已关闭<br/>以及会话是否已在运行
+    Agent->>Agent: 创建 run_id、execution_id<br/>截止时间和用量预算
+    Agent->>Events: 启动 ObserverDispatcher
+    Agent->>Events: 同步发布 RunStarted
+    Agent-->>App: RunHandle
+
+    Agent->>Runner: 开始钩子 → 运行中间件 → AgentLoop
+    Runner-->>Agent: RunResult 或 AgentError
+    Agent->>Agent: 取消子运行，关闭 Run ResourceScope
+    Agent->>Agent: on_finished
+    Agent->>Events: RunResult 输出与终态事件
+    Agent->>Events: 限时排空观测队列
+    Agent->>Registry: 回收会话登记
+    Agent-->>App: 权威结果
 ```
 
-`AgentLoop` 决定执行顺序；`ModelInvoker` 协调模型选择、Context Pipeline、预算、超时、取消和模型中间件；`ToolInvoker` 负责工具参数检查、撤销、超时、取消和工具中间件。
-DAG 节点也必须通过这些调用器访问模型和工具。
+运行具有以下保证：
 
-| 执行器 | 执行结构 | 状态要求 | 适用场景 |
-|---|---|---|---|
-| `ReactAgentLoop` | 模型与工具循环 | `StateStore` + `ConversationStore` | 默认对话 Agent、问答和审批 |
-| `WorkflowLoop` | 串行 ReAct 阶段 | `StateStore` | 固定阶段和阶段级模型选择 |
-| `DagWorkflowLoop` | 节点、并行、条件分支和汇合 | `StateStore` | 多步骤任务和可恢复编排 |
-| 自定义 `AgentLoop` | 由实现决定 | 由实现声明 | 其他执行模型 |
+- `start()` 返回前已发布 `RunStarted`。
+- `RunNext` 同时监听取消信号和截止时间。截止时间是本次执行允许运行到的最晚时刻。
+- 执行停止后，`RunNext` 最多再等待 `cleanup_timeout` 指定的时间，让中间件和运行循环完成协作清理。
+- 丢弃 `RunHandle` 会取消运行；丢弃 `RunControl` 不会。
+- `RunLifecycleHook` 只观察开始和结束；`RunMiddleware` 才能包裹执行。
 
-Middleware 使用 `intercept + next` 包装调用；生命周期 Hook 是独立的通知接口，不参与执行链。
-调用顺序、错误处理和现有实现见[Middleware 与 Hook](extensions.md)。
+### 3.3 执行器
 
-两者的边界如下：
+| 执行器 | 控制流 | 持久化依赖 |
+|---|---|---|
+| `ReactAgentLoop` | 单阶段模型—工具循环 | `StateStore`、`ConversationStore`、`InteractionStore` |
+| `WorkflowLoop` | 多个串行 ReAct 阶段 | `StateStore`、`InteractionStore` |
+| `DagWorkflowLoop` | 节点、并行、分支、汇合和节点恢复 | `StateStore`；内置 ReAct 节点还需要 `InteractionStore` |
+| 自定义 `AgentLoop` | 由实现定义 | 由实现声明 |
 
-| 机制 | 接收内容 | 能否进入执行链 | 返回值语义 |
-|---|---|---|---|
-| `RunLifecycleHook` | 只读的 `RunLifecycleContext`；结束通知另外接收 `&Result<RunResult, AgentError>` | 不能，没有 `next` | 回调没有返回值；panic、超时和中断会被隔离并记录事件，不改变运行结果 |
-| `RunMiddleware` | `RunRequest`、`RunContext` 和 `RunNext` | 可以，调用 `next.run()` 前后包裹一次运行 | 返回 `Result<RunResult, AgentError>`，可以拒绝执行、观察结果或处理清理错误 |
+### 3.4 ReAct 与工作流
 
-因此，“生命周期 Hook 只接收开始和结束通知，不替换执行结果”不是说 Hook 没有结束结果可读，而是说：
+`ReactAgentLoop` 和 `WorkflowLoop` 共用 `ModelExecutionLoop`。前者读写完整会话；后者把消息记录
+保存在执行检查点中。两者使用同一恢复协议。
 
-```text
-on_started(context)
-    │ 只读身份通知
-    ▼
-RunMiddleware → AgentLoop → ... → RunResult
-    ▲                                  │
-    └──── on_finished(context, &result) ┘
-         只能观察，不能返回新的 result
-```
-
-Hook 的 `on_finished` 会看到成功结果或错误结果，但它没有 `RunNext`、可变结果或 `Result` 返回值；它适合统计、审计和通知，不适合鉴权、改写结果或实现清理。需要包裹执行、提前拒绝或参与清理时，应使用 Middleware 或资源生命周期接口。
-
-### ReAct 与工具
-
-```text
-用户消息
-   │
-   ▼
-模型生成
-   ├─ 文本 → 保存回复并结束
-   └─ 工具调用
-        │
-        ▼
-参数 Schema 校验 → 策略检查/审批 → ToolMiddleware → Tool.call
-        │                                      │
-        └────────────── 工具结果保存 ◄─────────┘
-                       │
-                       ▼
-                   回到模型生成
-```
-
-工具在真正派发前会再次检查撤销状态。已开始的外部副作用不能回滚；副作用发生后结果处理失败时，调用会标记为 `Indeterminate`，不能当作未执行。
-
-### 一次模型步骤的 Context Pipeline
-
-`ModelInvoker` 是模型步骤的编排者，但上下文处理由独立的 `ContextAssembler` 完成。它不是把历史直接交给模型，也不是把所有上下文规则藏在模型适配器中。
+执行检查点记录当前进度、预算和待处理交互。状态存储会为同一个 `run_id` 发放一把带有效期的运行锁，
+源码类型为 `ExecutionLease`。它不锁线程；只有获得锁的执行器才能修改该运行的状态。
+执行器失联后，锁会自动过期，其他执行器才能接管。每次接管都会生成更大的锁版本号，
+因此旧执行器即使恢复，也无法覆盖新状态。
 
 ```mermaid
 flowchart TD
-    Call[AgentLoop 的 ModelCall\nstage / step / instructions / tools / options] --> Select[ModelSelectionStrategy\n选择 ModelRef]
-    History[ConversationSession.snapshot\n不可变原始历史] --> Assemble
-    Select --> Capacity[ModelDescriptor + TokenEstimator\n计算输入容量与协议开销]
-    Capacity --> Assemble[ContextAssembler.assemble]
-    Call --> Assemble
-    Assemble --> Builtin[内置块\ninstructions / history]
-    Assemble --> Contributors[ContextContributor\n按 stage、step、model、current input 获取数据]
-    Builtin --> Layout[ContextLayout\n确定块顺序与块配置]
-    Contributors --> Layout
-    Layout --> Policy[ContextBudgetPolicy\n为每个块分配独立额度]
-    Policy --> Reduce[ContextReducer\nKeep / Recent / Select / Summary]
-    Reduce --> Validate[校验消息、工具轮次、额度和失败策略]
-    Validate --> Window[ContextWindow\nmessages + ContextAssemblyReport]
-    Window --> Request[ChatRequest\nmessages + tools + options + extensions]
-    Request --> Middleware[ModelMiddleware\nintercept + next]
-    Middleware --> Provider[ChatModel\n协议适配器]
+    Start[运行或恢复] --> Load{首次运行?}
+    Load -->|是| Create[创建执行检查点<br/>保存请求与用户消息]
+    Load -->|否| Existing[读取原 run_id 的执行检查点]
+    Create --> Terminal
+    Existing --> Terminal{执行检查点已终态?}
+    Terminal -->|是| Replay[幂等返回已保存结果]
+    Terminal -->|否| Lease[获取运行锁<br/>再次读取检查点]
+    Lease --> Restore[恢复预算、限制、工具可见性和撤销状态]
+    Restore --> Apply[应用交互答案与工具对账结果]
+    Apply --> Guard{当前执行位置}
+    Guard -->|存在 Started 工具| Recovery[RecoveryRequired]
+    Guard -->|存在待处理交互| Await[AwaitingInput]
+    Guard -->|Model| Invoke[执行模型步骤]
+    Invoke -->|最终内容| Next{还有阶段或 steering?}
+    Next -->|是| Guard
+    Next -->|否| Done[Completed]
+    Invoke -->|tool calls| Plan[分配 invocation_id<br/>持久化整批调用]
+    Plan --> Tools[执行工具批次]
+    Tools --> Guard
 ```
 
-上下文处理按以下顺序发生：
+恢复不使用旧内存。执行器先获取运行锁，再重新读取执行检查点。存储只接受当前锁版本的写入，
+因此旧执行无法覆盖新状态。
+持久化的预算和限制是权威上限；恢复请求只能收紧它们。
 
-1. `ModelSelectionStrategy` 根据阶段、步骤、尝试次数、工具和原始历史选择模型。
-2. `ModelDescriptor` 和 `TokenEstimator` 计算模型输入容量，并预留工具定义和生成选项占用的协议空间。
-3. `ConversationSession.snapshot()` 提供不可变的原始历史；本次模型调用不会改写它。
-4. `ContextAssembler` 生成上下文块。简单 Agent 默认有 `instructions` 和 `history` 两个内置块；显式布局可以加入长期记忆、检索结果或上层应用数据块。
-5. 每个 `ContextContributor` 在自己的额度内生成数据，`ContextBudgetPolicy` 为所有块分配独立预算，块之间不借用剩余额度。
-6. 每个块交给自己的 `ContextReducer`，可以保留、按消息/轮次裁剪、选择条目或调用摘要模型压缩；工具调用和工具结果必须保持完整关系。
-7. 组装器校验最终消息、指令不可变性、历史投影合法性和模型特定额度，输出 `ContextWindow` 与 `ContextAssemblyReport`。
-8. 只有组装完成后的 `window.messages` 才会进入 `ChatRequest`，随后经过 `ModelMiddleware`，最后交给 `ChatModel`。
+### 3.5 模型调用
 
-上下文失败、成功、压缩恢复都会发布对应事件；因此 UI、Telemetry 或调试工具可以观察每个块的原始额度、最终额度和处理结果，而不需要解析模型适配器内部状态。
+`ModelInvoker` 每次尝试都重新选择模型并组装上下文。
 
-相关代码入口：[context.rs](../crates/eliteforge-agent-core/src/context.rs)、[models.rs](../crates/eliteforge-agent-framework/src/models.rs)。配置层扩展点见[按场景选择扩展点](plugins.md#按场景选择扩展点)。
+```mermaid
+sequenceDiagram
+    participant Runner as AgentLoop
+    participant Select as ModelSelectionStrategy
+    participant Context as ContextAssembler
+    participant Model as ModelMiddleware / ChatModel
+    participant Budget as UsageLedger
+    participant Events as 事件与输出
 
-## 模型与订阅
-
-`ModelConnection` 是 Framework 的标准模型接入结构。它复用协议客户端、地址和认证，并暴露一个或多个模型描述符；`ModelSelectionStrategy` 决定每个阶段实际使用哪个模型。即使应用只有一个模型，也只需要注册一个只包含该模型的 `ModelConnection`。
-
-```text
-ModelConnection
-├─ ChatModel：协议客户端、地址、认证
-├─ ModelDescriptor[]：可用模型及能力
-└─ TokenEstimator：上下文估算与预算预留
-        │
-        ▼
-ModelSelectionStrategy
-├─ FixedModelStrategy：固定模型
-├─ StageModelStrategy：按阶段选择
-└─ RoutingStrategy：按候选顺序回退
-        │
-        ▼
-ModelInvoker
+    Runner->>Select: 阶段、步骤、尝试次数、工具、历史消息
+    Select-->>Runner: ModelRef
+    Runner->>Context: 指令、消息快照、模型容量
+    Context-->>Runner: ContextWindow + 组装报告
+    Runner->>Events: ContextAssembled、ModelSelected、ModelStarted
+    Runner->>Events: StepStarted、MessageStarted
+    Runner->>Model: ChatRequest
+    Model->>Budget: 预留模型用量并持久化
+    Model->>Events: ModelDispatched
+    Model-->>Events: 文本与推理增量
+    Model-->>Runner: ChatResponse 或 ModelError
+    alt 成功
+        Runner->>Budget: 结算用量
+        Runner->>Events: MessageFinished、ModelUsage
+    else 失败
+        Runner->>Events: MessageAborted
+    end
+    Runner->>Events: StepFinished
 ```
 
-`ChatModel` 是连接内部的协议适配器：它负责把 Framework 的 `ChatRequest` 转换成供应商请求，再把结果写回 Framework。`ModelConnection` 则负责把这个适配器、可用模型列表和 token 估算器放到模型目录中。也就是说，`ChatModel` 说明“怎么调用”，`ModelConnection` 说明“通过哪个连接可以调用哪些模型”。
+| 结果 | 处理 |
+|---|---|
+| 成功 | 校验输出，为工具调用分配框架级 `invocation_id` |
+| 短暂错误 | 仅在未输出任何增量且未达重试上限时重试 |
+| 上下文溢出 | 仅在未输出增量时重新组装；组装结果未变则失败 |
+| 其他错误 | 立即返回，不重放已可见输出 |
 
-应用直接创建 `GenaiPlugin`，或用 `ChatModelPlugin::new(adapter)` 注册自定义单模型实现。其他操作采用独立接口：EmbeddingModel、RerankModel、图片/视频生成、语音和实时会话。
+`ContextAssembler` 按 `ContextLayout` 组织指令、历史消息和贡献块，再由 `ContextBudgetPolicy`
+分配预算、`ContextReducer` 裁剪或摘要。原始会话不会因组装而被改写。
 
-```text
-GenaiPlugin / 自定义 Plugin → Core 注册契约 → Framework 模型目录与执行器
+### 3.6 工具执行与大结果转存
+
+工具批次和 `ArtifactStore` 解决不同问题。
+
+| 机制 | 作用 |
+|---|---|
+| 工具批次 | 先保存执行意图，再调用可能产生副作用的工具 |
+| `ArtifactStore` | 把过大的工具结果移出模型上下文，同时保留完整原文 |
+
+```mermaid
+flowchart TD
+    Calls[模型返回工具批次] --> Plan[持久化模型回复草案<br/>与计划执行项]
+    Plan --> Policy[逐项校验工具绑定和参数结构<br/>执行整批 ToolPolicy]
+    Policy --> Decision{当前调用决策}
+    Decision -->|拒绝| Rejected[记录该调用的错误结果]
+    Decision -->|需要审批| Waiting[标记待审批<br/>创建交互请求]
+    Decision -->|允许 / 已批准| Ready[标记可派发]
+    Rejected --> Persist[持久化整批策略结果]
+    Waiting --> Persist
+    Ready --> Persist
+    Persist --> Pending{存在交互请求?}
+    Pending -->|是| Awaiting[AwaitingInput<br/>整批不派发]
+    Pending -->|否| Candidates{存在待执行调用?}
+    Candidates -->|否| Commit
+    Candidates -->|是| Dispatch{所有待执行调用均允许并行?}
+    Dispatch -->|是| Parallel[先持久化全部开始状态<br/>再受限并发]
+    Dispatch -->|否| Serial[每项先持久化开始状态<br/>再串行执行]
+    Parallel --> Invoke[ToolInvoker<br/>撤销、参数、并发控制、中间件]
+    Serial --> Invoke
+    Invoke --> Outcome{执行结果}
+    Outcome -->|结果确定| Finished[持久化完成状态]
+    Outcome -->|需要用户输入| Input[持久化交互请求]
+    Outcome -->|结果无法确定| Recovery[RecoveryRequired]
+    Finished --> Commit[原子追加模型和工具消息]
+    Input --> Commit
+    Commit --> Output[发布 ToolResult]
+    Output --> Followup{存在交互请求?}
+    Followup -->|是| Awaiting
+    Followup -->|否| Model[返回模型执行位置]
 ```
 
-请求指定优先于阶段规则和每项能力的默认模型，未配置规则时要求唯一兼容实现。协议绑定到具体连接/模型/操作；continuation 还绑定格式版本。详细调用示例见[模型插件](model-plugins.md)。
+`Deny` 优先于 `RequireApproval`。任一调用等待审批时，整批工具都不派发。
+工具派发后发生取消、超时或代码异常退出时，执行结果可能无法确定；恢复前必须通过
+`CallResolution::Record` 或 `Retry` 对账。
 
-模型连接、模型目录和选择策略属于运行时配置；订阅归属、账号权限、计费和凭据轮换由上层应用管理。
-`ModelInvoker` 协调 `ContextAssembler`，并负责超时、重试、预算预留和结果验证。模型已输出增量后不自动重试；不确定失败按已预留额度保守计入预算。
+#### 大结果如何转存
 
-## 会话记录、任务进度与持久化
+仅注册 `ArtifactStore` 不会改变工具结果。还必须安装 `ToolOutputOffloader` 数据转储中间件，并配置转存阈值。
+工具执行完成后，中间件按以下流程处理 `ToolOutput`：
 
-一次 Agent 运行同时产生三类数据。把它们分开，是为了让“聊天内容”“任务进度”和“实时输出”各自承担一种职责。
+例如，工具返回 10 MB JSON 时，`ArtifactStore` 保存完整的 10 MB；会话只保存预览和
+`artifact:<id>`。模型需要更多内容时，再按范围读取。
+
+```mermaid
+flowchart TD
+    Tool[工具返回 ToolOutput<br/>content、structured、is_error、effect] --> Offloader[ToolOutputOffloader]
+    Offloader --> Size{content 与 structured<br/>的总大小超过阈值?}
+    Size -->|否| Inline[保留原始 ToolOutput]
+    Size -->|是| Serialize[把完整 ToolOutput<br/>序列化为 JSON]
+    Serialize --> Store[ArtifactStore.put<br/>保存完整结果]
+    Store --> Reference[生成 artifact:id 引用]
+    Reference --> Preview[生成精简 ToolOutput<br/>content = 预览与引用<br/>structured = 空<br/>保留 is_error 与 effect]
+    Inline --> Persist[写入执行检查点和会话]
+    Preview --> Persist
+    Persist --> Model[下一次模型调用只读取内联结果]
+    Store -->|保存失败| Recovery[RecoveryRequired]
+```
+
+转存完成后，各位置保存的内容不同：
+
+| 位置 | 保存内容 |
+|---|---|
+| `ArtifactStore` | 完整 `ToolOutput` JSON |
+| 执行检查点和会话 | 预览、`artifact:<id>` 引用和 `is_error`；`structured` 为空 |
+| 模型可见内容 | 预览与引用；不会自动读取完整结果 |
+
+`result_reference` 保存 `artifact:<id>`、数据类型和字节数。它只是定位信息，不是访问凭据；
+上层应用必须为每个 Agent 提供权限范围正确的 `ArtifactStore`。
+
+#### 如何读取完整结果
+
+需要读取原文时，应用必须注册 `ArtifactReadTool`。模型使用引用中的附件 ID 和读取范围调用该工具；
+工具从同一个 `ArtifactStore` 分页读取数据。框架不会自动把完整结果重新放回模型上下文。
+
+```mermaid
+sequenceDiagram
+    participant Model as 模型
+    participant Invoker as ToolInvoker
+    participant Reader as ArtifactReadTool
+    participant Store as ArtifactStore
+
+    Model->>Invoker: 调用读取工具<br/>id、offset、length
+    Invoker->>Reader: 校验参数并执行
+    Reader->>Store: read(id, offset, length)
+    Store-->>Reader: 数据、next_offset、eof
+    Reader-->>Invoker: UTF-8 文本或 Base64 数据
+    Invoker-->>Model: 作为新的工具结果进入会话
+```
+
+如果 `ArtifactStore.put` 失败，原工具已经执行，但完整结果没有可靠保存。`ToolInvoker` 将该结果标记为
+无法确定，运行进入 `RecoveryRequired`，不会自动重放工具。
+
+#### 结果无法确定时的恢复
+
+`RecoveryRequired` 更准确的含义是“必须先对账”。工具已经开始执行，但框架没有可靠保存最终结果。
+它不能找回丢失的结果；自动重试又可能造成重复扣款、重复发消息或重复创建数据。
+
+返回该状态后，框架立即停止当前执行，不再调用模型或工具，也不会后台重试。上层应用负责完成以下闭环：
 
 ```mermaid
 flowchart LR
-    Input[用户消息 / 工具结果]
-    Input --> Conversation[ConversationStore\n完整聊天记录]
-    Conversation --> Context[ContextAssembler\n为当前模型请求裁剪、摘要、拼接上下文]
-    Context --> Model[ChatModel\n本次模型输入]
-
-    Loop[AgentLoop\n当前执行到哪一步] --> State[StateStore\n任务进度与恢复信息]
-    State --> Resume[进程中断后继续]
-
-    Model --> Live[EventSink\n实时事件]
-    Live -.尽力交付.-> UI[UI / SSE]
+    Stop[返回 RecoveryRequired<br/>停止当前执行] --> Load[读取原 run_id 的检查点]
+    Load --> Find[找到状态为 Started 的工具调用<br/>取得 invocation_id]
+    Find --> Verify[核对外部系统的实际结果]
+    Verify --> Decision{核对结论}
+    Decision -->|已经完成| Record[CallResolution::Record<br/>提交实际 ToolOutput]
+    Decision -->|确认可以重试| Retry[CallResolution::Retry<br/>明确授权再次调用]
+    Decision -->|仍无法判断| Wait[保持 RecoveryRequired]
+    Record --> Resume[使用原 run_id 发起恢复]
+    Retry --> Resume
+    Resume --> Remaining{还有未核对调用?}
+    Remaining -->|是| Stop
+    Remaining -->|否| Continue[继续工具批次与模型循环]
 ```
 
-### 1. 完整聊天记录
+调用方应保留 `RunHandle.run_id`，也可以通过 `Agent::latest_checkpoint(session_id)` 找到原运行。
+`Agent::checkpoint(run_id)` 返回检查点；ReAct 和工作流在其中记录仍为 `Started` 的工具调用及其
+`invocation_id`。调用方核对外部系统后，把对应的 `CallResolution` 放入 `ResumeRequest.resolutions`，
+再调用 `Agent::start`。恢复沿用原 `run_id`，但生成新的 `execution_id`。
 
-`ConversationStore` 保存会话的原始消息，例如用户问题、模型回复、工具调用和工具结果。
-这些消息是追加保存的源数据。为了控制模型输入长度，Framework 可以在发送给模型前裁剪旧消息、加入摘要或加入检索结果，但不会因此删除或改写原始会话。
+`Record` 直接采用上层应用提交的 `ToolOutput`，不会再次调用工具。`Retry` 把该调用恢复为待执行状态；
+只有确认上次调用未生效，或工具本身支持幂等重试时，才能选择它。未核对的调用仍存在时，框架会再次返回
+`RecoveryRequired`。DAG 自定义节点使用对应的 `RecordNode` 和 `RetryNode`。
 
-### 2. 当前任务进度
+#### 示例：新增用户 API
 
-`StateStore` 保存一次运行的进度，例如：
+假设新增用户接口已经返回成功，但 `ArtifactStore.put` 随后失败：
 
-- 当前执行器、阶段或 DAG 节点；
-- 已完成的模型步骤和工具调用；
-- 正在等待的用户回答或工具审批；
-- 预算、重试次数和恢复所需的运行身份。
+```mermaid
+sequenceDiagram
+    participant App as 上层应用
+    participant Agent
+    participant Runner as 执行循环
+    participant Invoker as ToolInvoker
+    participant API as 用户服务
+    participant Store as ArtifactStore
 
-这份数据不是聊天记录，而是“任务做到哪里了”。进程崩溃后，Framework 读取它判断应该继续、直接复用已完成结果，还是要求上层应用核对一个可能已经产生外部副作用的调用。
-
-### 3. 本次模型输入和实时事件
-
-Context Pipeline 每次模型调用都会重新运行：
-
-```text
-ConversationStore.snapshot()
-        │
-        ▼
-ContextAssembler
-  ├─ 加入固定指令、长期记忆或检索结果
-  ├─ 为每个上下文块分配额度
-  ├─ 裁剪历史、选择数据或调用摘要模型
-  └─ 校验工具调用和工具结果仍然成组
-        │
-        ▼
-ContextWindow → ChatRequest → ChatModel
+    Runner->>Invoker: 调用新增用户工具，invocation_id = I
+    Invoker->>API: POST /users
+    API-->>Invoker: 201，user_id = 42
+    Invoker->>Store: 保存完整 ToolOutput
+    Store--xInvoker: 保存失败
+    Invoker-->>Runner: 结果无法确定
+    Runner-->>Agent: RunResult(RecoveryRequired)
+    Agent-->>App: 返回运行结果
+    App->>API: 按邮箱、业务请求号或幂等键查询
+    API-->>App: 用户已存在，user_id = 42
+    App->>Agent: 使用原 run_id 恢复<br/>Record(I, ToolOutput(user_id = 42))
+    Agent->>Runner: 应用对账结果
+    Note over Runner,API: 框架补写工具结果，不再调用 POST /users
+    Runner-->>Agent: 继续后续模型循环
+    Agent-->>App: 返回后续运行结果
 ```
 
-`ContextWindow` 只是本次请求的临时输入，不是另一份会话历史。具体的块顺序、额度、Reducer 和摘要规则见[上下文窗口](context-windows.md)。
+如果查询确认用户已经创建，上层应用使用 `CallResolution::Record` 补写可继续执行的结果，例如
+`user_id`。框架把调用标记为完成，不再请求新增用户接口。如果确认用户不存在，并且接口支持幂等请求，
+上层应用才可以选择 `Retry`。
 
-模型和工具产生的实时事件通过 `EventSink` 发给 UI、SSE 或观测系统。实时事件是“通知”，不是可靠的恢复依据；消费者过慢时可能丢事件。需要恢复时读取 `ConversationStore` 和 `StateStore`，而不是依赖实时事件流。
+如果外部系统不能查询结果，新增接口也不支持幂等请求，就不存在安全的自动恢复路径。运行必须保持
+`RecoveryRequired`，等待人工核对或修复外部系统。框架只提供稳定的 `invocation_id` 和对账入口；
+工具集成负责把业务请求号或幂等键传给外部 API。
 
-SQLite 中的职责对应如下：
+### 3.7 DAG 调度
 
-| 数据 | 保存内容 | 主要用途 |
+```mermaid
+flowchart TD
+    Start[编译并校验 DAG] --> Lease[创建或读取执行检查点<br/>获取运行锁后再读取]
+    Lease --> Scan[按稳定拓扑顺序扫描]
+    Scan --> Ready{节点是否就绪?}
+    Ready -->|否| Wait[等待前驱]
+    Ready -->|路径未选中| Skip[持久化 Skipped]
+    Ready -->|是| Intent[先持久化 Running<br/>与节点执行身份]
+    Intent --> Node[WorkflowNodeMiddleware<br/>→ WorkflowNode.execute]
+    Node -->|Completed| Success[持久化 Succeeded]
+    Node -->|Awaiting / Limit / Recovery| Suspend[持久化 Suspended]
+    Node -->|错误| Abort[中止并回收兄弟任务]
+    Success --> Scan
+    Suspend --> Result[汇总最高优先级暂停状态]
+    Skip --> Scan
+    Wait --> Result
+    Result -->|全部成功/跳过| Done[Completed]
+    Result -->|存在未知执行| Recovery[RecoveryRequired]
+```
+
+DAG 并发受 `max_parallel_nodes` 限制。内置 ReAct 节点把状态嵌入父 DAG 执行检查点，不单独获取运行锁。
+
+### 3.8 终止状态
+
+`RunFinished` 表示执行器返回了 `RunResult`，不等于任务成功。
+
+| `RunStatus` | 语义 | AG-UI |
 |---|---|---|
-| `ConversationStore` | 完整会话消息 | 下次对话继续使用历史 |
-| `StateStore` | 运行进度、节点状态、审批和预算 | 崩溃恢复、跨进程继续执行 |
-| `SummaryStore` | 从历史生成的摘要 | 减少上下文长度，原始消息仍保留 |
-| `ArtifactStore` | 大工具结果和附件 | 用引用替代超大的内联结果 |
+| `Completed` | 任务完成 | `RUN_FINISHED(success)` |
+| `AwaitingInput` | 等待交互答案 | `RUN_FINISHED(interrupt)` |
+| `RecoveryRequired` | 工具或节点可能已经产生副作用，但最终结果没有可靠保存；等待上层应用核对 | `RUN_FINISHED(interrupt)` |
+| `StepLimit` | 模型步数达限，任务未完成 | `RUN_ERROR(AGENT_LIMIT_REACHED)` |
+| `ToolCallLimit` | 工具调用数达限，任务未完成 | `RUN_ERROR(AGENT_LIMIT_REACHED)` |
 
-`SqliteStoragePlugin` 可以一次注册这些存储，但不会把它们合并成同一种数据。
+`AgentError::Cancelled` 产生 `RunCancelled`；其他错误产生 `RunFailed`。`ThreadStatus` 保留上表所有状态，
+不会把限额或恢复状态压成 `Completed`。
 
-### 恢复运行：为什么需要“租约”
+## 4. 持久化与恢复
 
-假设一个任务运行到一半，进程 A 崩溃了。进程 B 需要继续它。此时必须防止进程 A 的残留任务和进程 B 同时调用模型、执行工具或写回进度。
-
-Framework 因此在数据库中记录一项短期的“执行权”，代码中称为 execution lease。它类似一个带过期时间的分布式锁：
-
-```text
-进程 A：取得执行权 → 读取进度 → 执行一步 → 写回进度
-进程 B：                 拿不到执行权，等待或返回冲突
-
-进程 A 崩溃
-    │
-    ▼ 执行权过期
-
-进程 B：取得新的执行权 → 读取最新进度 → 继续执行
-旧的进程 A：即使恢复运行，也不能再写入进度
-```
-
-这里有三个关键点：
-
-- 同一个 `run_id` 同时只有一个进程可以推进状态；
-- 进程正常运行时需要续期，进程崩溃后执行权最终会过期；
-- 新进程取得执行权时会生成更高的 `generation`。旧进程写回时发现自己的 generation 已过期，写入会被拒绝。
-
-因此，租约不是业务概念，也不是模型调用的一部分。它只解决“谁有权修改这次运行的持久化进度”。
-
-会话追加也有类似保护：同一个会话同时只能有一个写入者，追加消息时会检查 `revision` 是否仍是读取时的版本。版本不一致表示另一个请求已经写入，当前追加会失败，而不会覆盖新消息。
-
-如果取消一个 SQLite 写操作，不能直接假设数据库已经回滚。上层应用需要重新读取状态，确认这一步是未写入、已完成，还是处于需要人工核对的未知状态。
-
-## 用户交互与审批
-
-ReAct、Workflow 和 DAG 内置 ReAct 节点共用持久化交互机制。用户问题、选项、答案和原始调用保存在交互记录中，上层应用负责身份验证和 UI。
-
-```text
-ask_user / RequireApproval
-          │
-          ▼
-保存交互与任务进度 → RUN_FINISHED(interrupt)
-          │
-          ▼
-上层应用展示 UI，提交回答或审批决定
-          │
-          ▼
-恢复同一 run → 保存答案 → 继续模型或执行工具
-```
-
-工具审批由 `ToolPolicy` 决定；执行器必须显式支持策略检查。数据库结构、默认问答工具和跨进程示例见[用户交互](interactions.md)。
-
-## 事件、观测与身份
-
-事件身份是 `(run_id, scope, sequence)`。`EventScope::Live { execution_id }` 区分每次执行或恢复尝试；持久化 Journal 使用独立序列，不能把实时流序号当作恢复游标。
-
-`EventSink` 有三类观测入口：
-
-| 入口 | 语义 | 约束 |
-|---|---|---|
-| `on_event` | 在有界异步队列中消费普通事件 | 消费者必须处理积压和丢失 |
-| `on_diagnostic` | 同步记录上下文组装和最终发送元数据 | 必须快速，不能 I/O |
-| `on_published` | 按实时发布顺序交接完整事件 | 不能 I/O 或再次发布事件 |
-
-`TelemetryPlugin` 使用上层应用注入的 OpenTelemetry provider 记录 run、node、model、tool、关联关系、耗时、结果和用量；默认不输出提示词、参数、结果、session 或错误正文。
-错误报告默认省略正文，可显式配置 `ErrorRedactor`。AG-UI 插件在 `on_published` 上转换输出事件和 SSE，HTTP 路由仍由上层应用提供。
-
-## 资源生命周期
-
-插件在安装时登记异步关闭和同步清理回调。`ResourceScope` 按注册顺序的逆序释放资源，并收集错误、panic 和超时。
+会话、运行状态和交互分别存储。实时事件不参与恢复。
 
 ```mermaid
 flowchart LR
-    Install[安装插件] --> Register[注册服务和资源]
-    Register --> Run[多次 Agent.run]
-    Run --> Close[Agent.close]
-    Close --> StopRuns[关闭新的运行入口并等待运行清理]
-    StopRuns --> Shutdown[异步 shutdown]
-    Shutdown --> Cleanup[同步 cleanup / Drop 兜底]
+    Conversation[ConversationStore<br/>完整消息] --> Context[ContextAssembler<br/>本次模型输入]
+    State[StateStore<br/>检查点、执行位置、节点、预算] --> Resume[恢复执行]
+    Interaction[InteractionStore<br/>请求、答案结构、答案] --> Resume
+    Event[EventSink<br/>实时通知] -. 不是恢复依据 .-> UI[界面 / SSE / 遥测]
 ```
 
-`Agent::close` 关闭所有克隆的新运行入口，等待运行清理后关闭插件，并返回 `ShutdownReport`。
-插件创建的 SQLite 和 MCP 连接在 `agent.close()` 时释放。应用只配置 `McpToolsPlugin::new`，无需单独连接或关闭 MCP client。
-显式注入的共享组件（例如跨应用使用的 OTel provider）仍由其所有者管理；关闭 Agent 只清理本实例的观测状态。
+| 存储 | 内容 |
+|---|---|
+| `ConversationStore` | 完整会话消息。上下文裁剪不改写原始会话 |
+| `StateStore` | 执行检查点、执行位置、节点/工具状态、预算和持久化事件日志 |
+| `InteractionStore` | 问题、审批、`response_schema`、工具调用和答案 |
+| `SummaryStore` | 由历史生成的上下文摘要；不替代原始会话 |
+| `ArtifactStore` | 大结果和附件引用 |
 
-## 延伸阅读
+运行锁解决一个问题：同一 `run_id` 不能被两个执行器同时修改。
 
-- [快速上手](quickstart.md)：按场景运行 Agent，并查看 Rust 代码。
-- [Plugin 与扩展点](plugins.md)：扩展接口、默认行为、注册类型和现有实现。
-- [Middleware 与 Hook](extensions.md)：执行拦截和生命周期通知的调用契约。
-- [DAG 工作流](dag-workflows.md)：节点、并行、条件分支和恢复。
-- [上下文窗口](context-windows.md)：上下文布局、预算、摘要和附件引用。
-- [可观测](observability.md)：OTel span、metrics 和恢复身份。
-- [执行约束](execution-contracts.md)：运行时行为保证与限制。
+```mermaid
+sequenceDiagram
+    participant A as 执行者 A
+    participant Store as 状态存储
+    participant B as 执行者 B
+
+    A->>Store: 请求 run_id 的运行锁
+    Store-->>A: 获得锁版本 1
+    B->>Store: 请求同一运行锁
+    Store-->>B: 锁已被占用
+    Note over A: 进程失效，锁自动过期
+    B->>Store: 重新请求运行锁
+    Store-->>B: 获得锁版本 2
+    B->>Store: 使用锁版本 2 写入
+    Store-->>B: 接受
+    A->>Store: 使用旧锁版本 1 写入
+    Store-->>A: 拒绝
+```
+
+存储写入被取消时，框架不猜测事务是否已提交。恢复执行重新读取状态，并在必要时返回
+`RecoveryRequired`。
+
+## 5. 用户交互
+
+交互记录用于工具审批和运行中问答。回答先持久化，恢复再启动。
+
+```mermaid
+sequenceDiagram
+    participant Runner as AgentLoop
+    participant State as StateStore
+    participant Interaction as InteractionStore
+    participant App as 上层应用
+    participant Agent
+
+    Runner->>State: 保存 AwaitingInput 与执行位置
+    Runner->>Interaction: 幂等保存 InteractionRequest
+    Runner-->>App: RunResult(AwaitingInput)
+    App->>Agent: answer(session_id, interaction_id, value)
+    Agent->>Interaction: 校验答案结构并原子保存
+    Interaction-->>Agent: RunRequest { resume: ResumeRequest(run_id) }
+    App->>Agent: 启动恢复请求
+    Agent->>State: 获取运行锁并读取检查点
+    Agent->>Interaction: 读取已提交答案
+    Agent->>Runner: 应用答案并继续执行
+```
+
+`Agent::answer` 只保存答案并返回带 `ResumeRequest` 的 `RunRequest`。调用方必须再次调用 `start()`。
+这个边界使恢复失败可重试，而不重复提交答案。详见 [用户交互](interactions.md)。
+
+## 6. Agent 协作
+
+框架提供两种协作语义。
+
+```mermaid
+flowchart LR
+    Parent[主运行] -->|agent_spawn| Child[子 Agent<br/>属于父运行树]
+    Parent -->|thread_create| Thread[独立 Thread<br/>单独会话]
+    Thread -->|thread_send| Thread
+    Thread -->|thread_wait / thread_read| Parent
+    Thread -->|AwaitingInput| Answer[thread_answer]
+    Answer --> Thread
+    Thread -->|thread_close| Closed[释放注册表容量]
+```
+
+| 语义 | 子 Agent | Thread |
+|---|---|---|
+| 用途 | 一次性委派 | 后台、长时间或多轮任务 |
+| 等待 | `agent_spawn` 同步等待 | 创建后后台运行，使用 `thread_wait` 等待 |
+| 身份 | 进入父运行 `RunLineage` | 使用独立会话，不进入父子运行树 |
+| 取消 | 继承父运行的取消信号和剩余运行时间 | 不继承发起运行的取消信号和截止时间；`Agent::close` 仍会关闭它 |
+| 预算 | 占用父运行预算，由父运行分配预算 | 使用跟新开会话一样的独立预算 |
+| 交互 | 没有单独的会话记录，结束后无法后续恢复 | `thread_answer` 恢复原 `run_id` |
+| 结果 | 返回完整 `RunResult` | `thread_wait` 返回完整 `ThreadResult` |
+
+### Thread 状态转换
+
+```mermaid
+flowchart TD
+    Create[thread_create] --> Reserve[预留容量]
+    Reserve --> Start[Agent.start]
+    Start --> Running[Running]
+    Running --> Completed[Completed]
+    Running --> Awaiting[AwaitingInput]
+    Running --> Limit[StepLimit / ToolCallLimit]
+    Running --> Recovery[RecoveryRequired]
+    Running --> Failed[Failed / Cancelled]
+    Awaiting -->|thread_answer<br/>原 run_id| Running
+    Completed -->|thread_send<br/>新 run_id| Running
+    Limit -->|thread_send<br/>新 run_id| Running
+    Recovery -. 上层编排对账 / 原 run_id .-> Running
+    Failed -->|thread_send<br/>新 run_id| Running
+    Completed --> Close[thread_close]
+    Awaiting --> Close
+    Limit --> Close
+    Recovery --> Close
+    Failed --> Close
+    Close --> Removed[删除记录<br/>释放容量]
+```
+
+默认 Thread 运行时具有以下语义：
+
+- `thread_create` 在 `Agent::start` 前预留容量；启动失败自动退还。
+- 同一 Thread 的发消息和回答操作串行执行；活动运行期间拒绝新操作。
+- `AwaitingInput` 只允许 `thread_answer`，不允许 `thread_send` 绕过答案结构校验。
+- `RecoveryRequired` 需要上层应用提交 `CallResolution`；默认 Thread 工具不提供隐式重试。
+- 旧运行只有在自己仍是 `latest_run_id` 时才能更新 Thread 摘要。
+- 进程内 Thread 注册表上限为 128，运行结束不自动删除记录；`thread_close` 显式释放容量。
+- Thread 注册信息仅存在当前进程。跨进程任务应替换 `AgentCollaborationRuntime`。
+
+子 Agent 和 Thread 结果都保留 `content`、`structured`、`interactions`、`status`、`usage`、`steps` 和
+`tool_calls`。详见 [Agent 协作](collaboration.md)。
+
+## 7. 事件与 AG-UI
+
+实时事件使用 `(run_id, EventScope::Live { execution_id }, sequence)` 定位。持久化事件日志使用独立序列。
+
+```mermaid
+sequenceDiagram
+    participant Producer as Agent / 执行循环 / 调用器
+    participant Context as RunContext.publish
+    participant Sink as EventSink
+    participant Live as RunHandle 实时事件
+    participant Observer as ObserverDispatcher
+    participant AGUI as AG-UI 事件流
+
+    Producer->>Context: AgentEvent
+    opt 诊断事件
+        Context->>Sink: on_diagnostic(原始事件)
+    end
+    Context->>Context: 取得发布锁<br/>封装事件并递增序号
+    Context->>Sink: on_published(封装后的事件)
+    opt AG-UI sink
+        Sink->>AGUI: 非阻塞写入有界通道
+    end
+    Context->>Live: 发送封装后的事件
+    alt 普通事件
+        Context->>Observer: 非阻塞写入原始事件
+        Observer->>Sink: on_event<br/>超时和代码异常隔离
+    else 终态事件
+        Context->>Observer: 单独保留终态事件
+        Observer->>Sink: 排空普通事件后交付终态事件
+    end
+    AGUI->>AGUI: 读取时转换为 AG-UI / SSE
+```
+
+| 入口 | 语义 |
+|---|---|
+| `on_diagnostic` | 同步记录上下文组装和模型派发诊断；不保证跨生产者顺序 |
+| `on_published` | 按实时发布顺序交接封装后的事件；必须快速，不得进行 I/O 或再次发布 |
+| `on_event` | 有界、尽力的异步观测；队列满时可丢失普通事件 |
+
+AG-UI 为每次执行尝试创建独立的有界通道。溢出、超大事件或顺序错误会终止输出流，
+但不会取消 Agent。权威结果仍来自 `RunHandle::wait`。
+
+| 协作事件 | AG-UI 映射 |
+|---|---|
+| 子 Agent 开始/结束/失败 | `SUBAGENT_STARTED / SUBAGENT_FINISHED / SUBAGENT_ERROR` |
+| 子 Agent 暂停交互 | `framework.subagent.interactions` CUSTOM |
+| Thread 创建/运行/结束/关闭 | `framework.thread.*` CUSTOM |
+
+Thread 不是子运行，因此不映射为 AG-UI `SUBAGENT_*`。协作生命周期事件不包含任务正文、
+Thread 消息或用户答案。详见 [AG-UI](agui.md)。
+
+## 8. 资源关闭
+
+```mermaid
+flowchart LR
+    subgraph Run[运行级]
+        Loop[AgentLoop 结束] --> Children[取消子运行]
+        Children --> Scope[逆序关闭运行级 ResourceScope]
+        Scope --> Hook[on_finished]
+        Hook --> Terminal[终态事件与会话登记回收]
+    end
+
+    subgraph Owner[Agent 级]
+        Close[Agent.close] --> Stop[拒绝新运行<br/>取消所有活动运行]
+        Stop --> Drain[等待运行和其他操作清理]
+        Drain --> Shutdown[逆序执行插件关闭回调]
+        Shutdown --> Cleanup[同步清理 / Drop 兜底]
+        Cleanup --> Report[ShutdownReport]
+    end
+```
+
+`Agent::close` 在所有 Agent 副本之间共享一次关闭。它先等待运行清理，再关闭插件容器。
+插件创建的 SQLite 和 MCP 连接在此阶段释放；外部注入的共享组件仍由其所有者管理。
+
+## 实现索引
+
+| 主题 | 主要实现 | 详细文档 |
+|---|---|---|
+| Agent 组装、运行和 Thread 运行时 | [agent.rs](../crates/eliteforge-agent-framework/src/agent.rs) | [快速上手](quickstart.md) |
+| ReAct / 工作流状态机 | [model_execution.rs](../crates/eliteforge-agent-framework/src/model_execution.rs) | [执行约束](execution-contracts.md) |
+| DAG 调度 | [dag.rs](../crates/eliteforge-agent-framework/src/dag.rs) | [DAG 工作流](dag-workflows.md) |
+| 模型选择与调用 | [models.rs](../crates/eliteforge-agent-framework/src/models.rs) | [模型插件](model-plugins.md) |
+| 工具/模型中间件与 `ToolInvoker` | [middleware.rs](../crates/eliteforge-agent-core/src/middleware.rs) | [中间件与钩子](extensions.md) |
+| 交互契约 | [interaction.rs](../crates/eliteforge-agent-core/src/interaction.rs) | [用户交互](interactions.md) |
+| 协作契约 | [collaboration.rs](../crates/eliteforge-agent-core/src/collaboration.rs) | [Agent 协作](collaboration.md) |
+| 事件发布与观测 | [types.rs](../crates/eliteforge-agent-core/src/types.rs)、[observers.rs](../crates/eliteforge-agent-core/src/observers.rs) | [可观测](observability.md) |
+| AG-UI 转换 | [adapter.rs](../crates/eliteforge-agent-official-plugin-agui/src/adapter.rs) | [AG-UI](agui.md) |

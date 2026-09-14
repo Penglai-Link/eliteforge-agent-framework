@@ -177,12 +177,27 @@ fn official_pack_registers_skills_by_default_and_can_disable_them() {
         .any(|id| id == "skills.default")
     );
     assert!(
+        plugin_ids(EliteForgeOfficialPluginPack::new(
+            directory.path().join("agent-tools.sqlite"),
+        ))
+        .iter()
+        .any(|id| id == "tools.agents")
+    );
+    assert!(
         !plugin_ids(
             EliteForgeOfficialPluginPack::new(directory.path().join("disabled.sqlite"))
                 .without_skills(),
         )
         .iter()
         .any(|id| id == "skills.default")
+    );
+    assert!(
+        !plugin_ids(
+            EliteForgeOfficialPluginPack::new(directory.path().join("disabled-agents.sqlite"))
+                .agent_tools(false),
+        )
+        .iter()
+        .any(|id| id == "tools.agents")
     );
 }
 
@@ -212,6 +227,7 @@ async fn defaults_can_be_explicitly_replaced_or_disabled() {
                 .without_model()
                 .without_agui()
                 .human_interaction(false)
+                .agent_tools(false)
                 .without_skills()
                 .storage(SqliteStoragePlugin::new(&replacement)),
         )

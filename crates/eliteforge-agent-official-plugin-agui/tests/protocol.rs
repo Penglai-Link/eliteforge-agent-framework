@@ -574,6 +574,179 @@ async fn state_activity_custom_and_final_only_loop_outputs_work_with_the_sdk_cli
     agent.close().await;
 }
 
+struct CollaborationPresentationLoop;
+
+#[async_trait]
+impl AgentLoop for CollaborationPresentationLoop {
+    async fn run(
+        &self,
+        _: &RunRequest,
+        context: &RunContext,
+        _: &AgentServices,
+    ) -> Result<RunResult, AgentError> {
+        let completed_child = RunId::new_v4();
+        context
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ChildRunStarted {
+                    child_run_id: completed_child,
+                    session_id: "child-completed".into(),
+                    depth: 1,
+                },
+            )))
+            .await;
+        context
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ChildRunFinished {
+                    child_run_id: completed_child,
+                    status: RunStatus::Completed,
+                    interactions: vec![],
+                },
+            )))
+            .await;
+
+        let interaction = InteractionRequest::input(
+            "Choose a target",
+            json!({"type":"string","enum":["staging","production"]}),
+        )?;
+        let waiting_child = RunId::new_v4();
+        context
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ChildRunStarted {
+                    child_run_id: waiting_child,
+                    session_id: "child-waiting".into(),
+                    depth: 1,
+                },
+            )))
+            .await;
+        context
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ChildRunFinished {
+                    child_run_id: waiting_child,
+                    status: RunStatus::AwaitingInput,
+                    interactions: vec![interaction.clone()],
+                },
+            )))
+            .await;
+
+        let thread_id = "thread-collaboration".to_owned();
+        let thread_run_id = RunId::new_v4();
+        context
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ThreadCreated {
+                    summary: ThreadSummary {
+                        thread_id: thread_id.clone(),
+                        title: Some("worker".into()),
+                        status: ThreadStatus::Running,
+                        latest_run_id: Some(thread_run_id),
+                    },
+                },
+            )))
+            .await;
+        context
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ThreadRunStarted {
+                    thread_id: thread_id.clone(),
+                    run_id: thread_run_id,
+                    cause: ThreadRunCause::Created,
+                    interaction_id: None,
+                },
+            )))
+            .await;
+        context
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ThreadRunFinished {
+                    thread_id: thread_id.clone(),
+                    run_id: thread_run_id,
+                    status: ThreadStatus::AwaitingInput,
+                    interactions: vec![interaction.clone()],
+                    error: None,
+                },
+            )))
+            .await;
+        context
+            .emit(AgentEvent::Collaboration(Box::new(
+                CollaborationEvent::ThreadClosed { thread_id },
+            )))
+            .await;
+
+        Ok(RunResult {
+            output: String::new(),
+            content: Content::default(),
+            structured: None,
+            status: RunStatus::AwaitingInput,
+            interactions: vec![interaction],
+            usage: Usage::default(),
+            steps: 0,
+            tool_calls: 0,
+        })
+    }
+}
+
+#[tokio::test]
+async fn collaboration_events_map_to_subagent_lifecycle_and_thread_custom_events() {
+    let agent = TestBuilder::default()
+        .plugin(AgUiPlugin::default())
+        .plugin(AgentLoopPlugin::new(CollaborationPresentationLoop))
+        .build()
+        .await
+        .unwrap();
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("collaboration", "delegate"))
+        .unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert_eq!(result.unwrap().status, RunStatus::AwaitingInput);
+    validate_client(&events).await;
+    assert_eq!(types(&events, EventType::SubagentStarted), 2);
+    assert_eq!(types(&events, EventType::SubagentFinished), 2);
+    assert_eq!(types(&events, EventType::SubagentError), 0);
+    let suspended = events.iter().find_map(|event| match event {
+        Event::SubagentFinished(event)
+            if event
+                .outcome
+                .as_ref()
+                .is_some_and(ag_ui::SubagentOutcome::is_suspended) =>
+        {
+            Some(event)
+        }
+        _ => None,
+    });
+    assert_eq!(
+        suspended
+            .and_then(|event| event.outcome.as_ref())
+            .map(ag_ui::SubagentOutcome::interrupt_ids)
+            .map(<[_]>::len),
+        Some(1)
+    );
+    let custom_names = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Custom(event) => Some(event.name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        custom_names,
+        [
+            "framework.subagent.interactions",
+            "framework.thread.created",
+            "framework.thread.run.started",
+            "framework.thread.run.finished",
+            "framework.thread.closed",
+        ]
+    );
+    let thread_finished = events.iter().find_map(|event| match event {
+        Event::Custom(event) if event.name == "framework.thread.run.finished" => Some(&event.value),
+        _ => None,
+    });
+    assert_eq!(
+        thread_finished
+            .and_then(|value| value["interactions"].as_array())
+            .map(Vec::len),
+        Some(1)
+    );
+    agent.close().await;
+}
+
 #[tokio::test]
 async fn malformed_patch_fails_the_stream_without_changing_execution() {
     let plugin = AgUiPlugin::default();

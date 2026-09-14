@@ -257,6 +257,14 @@ impl AgentLoop for ModelExecutionLoop {
             state.request.generation.validate()?;
             let mut execution_context = context.clone();
             execution_context.model = state.request.model.clone();
+            execution_context.limits.max_steps = execution_context
+                .limits
+                .max_steps
+                .min(state.request.limits.max_steps);
+            execution_context.limits.max_total_tokens = execution_context
+                .limits
+                .max_total_tokens
+                .min(state.request.limits.max_total_tokens);
             execution_context.token_ceiling = context
                 .token_ceiling
                 .min(state.request.limits.max_total_tokens);
