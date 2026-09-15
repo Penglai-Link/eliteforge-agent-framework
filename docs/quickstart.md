@@ -107,7 +107,7 @@ let agent = AgentBuilder::new()
 ```
 
 AGUI 已默认启用，调用 `agent.start_with_output::<AgUiStream>(request)` 取得运行和输出流。
-消费流、等待结果和关闭 Agent 的完整程序见[离线插件包示例](../crates/eliteforge-agent-official-plugin-pack/examples/official_pack.rs)：
+消费流、等待结果和关闭 Agent 的完整程序见[离线插件包示例](../crates/plugin/eliteforge-agent-official-plugin-pack/examples/official_pack.rs)：
 
 ```sh
 cargo run -p eliteforge-agent-official-plugin-pack --example official_pack -- agent.sqlite
@@ -224,7 +224,7 @@ println!("{}", result.output);
 agent.close().await;
 ```
 
-完整的 SQLite DAG 示例见 [dag.rs](../crates/eliteforge-agent-state-sqlite/examples/dag.rs)。复杂 DAG 的节点类型、并行限制和恢复语义见[DAG 工作流](dag-workflows.md)。
+完整的 SQLite DAG 示例见 [dag.rs](../crates/framework/eliteforge-agent-state-sqlite/examples/dag.rs)。复杂 DAG 的节点类型、并行限制和恢复语义见[DAG 工作流](dag-workflows.md)。
 
 ## 按阶段选择模型
 
@@ -249,7 +249,7 @@ let agent = AgentBuilder::new()
     .await?;
 ```
 
-上例固定使用 `writer`。阶段映射和故障回退见 [shared_connection.rs](../crates/eliteforge-agent-official-plugin-model-genai/examples/shared_connection.rs)，其中 `StageModelStrategy` 为 `plan` 和 `execute` 选择不同模型。
+上例固定使用 `writer`。阶段映射和故障回退见 [shared_connection.rs](../crates/plugin/eliteforge-agent-official-plugin-model-genai/examples/shared_connection.rs)，其中 `StageModelStrategy` 为 `plan` 和 `execute` 选择不同模型。
 
 ## 增加上下文
 
@@ -297,7 +297,7 @@ cargo run -p eliteforge-agent-state-sqlite --example durable_approval -- start /
 cargo run -p eliteforge-agent-state-sqlite --example durable_approval -- answer /tmp/approval.db <run-id> <interaction-id> true
 ```
 
-对应源码：[durable_approval.rs](../crates/eliteforge-agent-state-sqlite/examples/durable_approval.rs)。真实应用需要由上层应用负责鉴权、审批 UI 和回答提交。
+对应源码：[durable_approval.rs](../crates/framework/eliteforge-agent-state-sqlite/examples/durable_approval.rs)。真实应用需要由上层应用负责鉴权、审批 UI 和回答提交。
 
 ## 开启 OTel
 

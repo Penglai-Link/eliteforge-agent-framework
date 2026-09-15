@@ -174,5 +174,5 @@ HTTP、身份验证、卡片 UI 和业务状态仍由应用实现。
 ReAct 的 ConversationStore 同样在检查点提交后按前缀追加，恢复可补齐尚未同步的历史。
 这些步骤不假设不同存储抽象之间共享数据库事务。
 
-回归测试：[三种执行器的问答与 ReAct 审批](../crates/eliteforge-agent-official-plugin-storage-sqlite/tests/interactions.rs)、
-[SQLite 存储重开与答案竞争](../crates/eliteforge-agent-official-plugin-storage-sqlite/tests/stores.rs)。
+回归测试：[三种执行器的问答与 ReAct 审批](../crates/plugin/eliteforge-agent-official-plugin-storage-sqlite/tests/interactions.rs)、
+[SQLite 存储重开与答案竞争](../crates/plugin/eliteforge-agent-official-plugin-storage-sqlite/tests/stores.rs)。

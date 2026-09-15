@@ -5,14 +5,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core", version = "0.1.0" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-eliteforge-agent-framework = { path = "../eliteforge-agent-framework", default-features = false }
+eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
 eliteforge-agent-official-plugin-tools-human = { path = "../eliteforge-agent-official-plugin-tools-human" }
-eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }
+eliteforge-agent-test-support = { path = "../../framework/eliteforge-agent-test-support" }
 tokio.workspace = true

@@ -561,12 +561,12 @@ flowchart LR
 
 | 主题 | 主要实现 | 详细文档 |
 |---|---|---|
-| Agent 组装、运行和 Thread 运行时 | [agent.rs](../crates/eliteforge-agent-framework/src/agent.rs) | [快速上手](quickstart.md) |
-| ReAct / 工作流状态机 | [model_execution.rs](../crates/eliteforge-agent-framework/src/model_execution.rs) | [执行约束](execution-contracts.md) |
-| DAG 调度 | [dag.rs](../crates/eliteforge-agent-framework/src/dag.rs) | [DAG 工作流](dag-workflows.md) |
-| 模型选择与调用 | [models.rs](../crates/eliteforge-agent-framework/src/models.rs) | [模型插件](model-plugins.md) |
-| 工具/模型中间件与 `ToolInvoker` | [middleware.rs](../crates/eliteforge-agent-core/src/middleware.rs) | [中间件与钩子](extensions.md) |
-| 交互契约 | [interaction.rs](../crates/eliteforge-agent-core/src/interaction.rs) | [用户交互](interactions.md) |
-| 协作契约 | [collaboration.rs](../crates/eliteforge-agent-core/src/collaboration.rs) | [Agent 协作](collaboration.md) |
-| 事件发布与观测 | [types.rs](../crates/eliteforge-agent-core/src/types.rs)、[observers.rs](../crates/eliteforge-agent-core/src/observers.rs) | [可观测](observability.md) |
-| AG-UI 转换 | [adapter.rs](../crates/eliteforge-agent-official-plugin-agui/src/adapter.rs) | [AG-UI](agui.md) |
+| Agent 组装、运行和 Thread 运行时 | [agent.rs](../crates/framework/eliteforge-agent-framework/src/agent.rs) | [快速上手](quickstart.md) |
+| ReAct / 工作流状态机 | [model_execution.rs](../crates/framework/eliteforge-agent-framework/src/model_execution.rs) | [执行约束](execution-contracts.md) |
+| DAG 调度 | [dag.rs](../crates/framework/eliteforge-agent-framework/src/dag.rs) | [DAG 工作流](dag-workflows.md) |
+| 模型选择与调用 | [models.rs](../crates/framework/eliteforge-agent-framework/src/models.rs) | [模型插件](model-plugins.md) |
+| 工具/模型中间件与 `ToolInvoker` | [middleware.rs](../crates/framework/eliteforge-agent-core/src/middleware.rs) | [中间件与钩子](extensions.md) |
+| 交互契约 | [interaction.rs](../crates/framework/eliteforge-agent-core/src/interaction.rs) | [用户交互](interactions.md) |
+| 协作契约 | [collaboration.rs](../crates/framework/eliteforge-agent-core/src/collaboration.rs) | [Agent 协作](collaboration.md) |
+| 事件发布与观测 | [types.rs](../crates/framework/eliteforge-agent-core/src/types.rs)、[observers.rs](../crates/framework/eliteforge-agent-core/src/observers.rs) | [可观测](observability.md) |
+| AG-UI 转换 | [adapter.rs](../crates/plugin/eliteforge-agent-official-plugin-agui/src/adapter.rs) | [AG-UI](agui.md) |

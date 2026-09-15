@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core", version = "0.1.0" }
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
@@ -13,8 +13,8 @@ serde_json.workspace = true
 genai = "=0.7.0-beta.21"
 
 [dev-dependencies]
-eliteforge-agent-framework = { path = "../eliteforge-agent-framework", default-features = false }
+eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
 eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-official-plugin-storage-sqlite" }
-eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }
-eliteforge-agent-state-sqlite = { path = "../eliteforge-agent-state-sqlite" }
+eliteforge-agent-test-support = { path = "../../framework/eliteforge-agent-test-support" }
+eliteforge-agent-state-sqlite = { path = "../../framework/eliteforge-agent-state-sqlite" }
 tokio = { workspace = true, features = ["net", "io-util"] }

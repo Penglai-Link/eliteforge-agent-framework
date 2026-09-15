@@ -59,7 +59,7 @@ let agent = AgentBuilder::new()
 先为存储插件开启打包 feature：
 
 ```toml
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-framework/crates/eliteforge-agent-official-plugin-storage-sqlite", features = ["bundled-native"] }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-framework/crates/plugin/eliteforge-agent-official-plugin-storage-sqlite", features = ["bundled-native"] }
 ```
 
 再配置加载方式：

@@ -111,8 +111,8 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 | `PluginReadyContext::extensions<T>` / `extension<T>` | 读取完整扩展集合或唯一扩展 | `ready` 中 | 不可再注册服务；可登记关闭回调 |
 | `on_shutdown` / `on_cleanup` | 异步关闭 / 同步兜底回调 | Agent 关闭或安装失败、取消、Drop | 按资源回调注册的逆序处理 |
 
-来源：[Plugin 与容器](../crates/eliteforge-agent-plugin-kernel/src/container.rs)、
-[服务注册表](../crates/eliteforge-agent-plugin-kernel/src/services.rs)。
+来源：[Plugin 与容器](../crates/framework/eliteforge-agent-plugin-kernel/src/container.rs)、
+[服务注册表](../crates/framework/eliteforge-agent-plugin-kernel/src/services.rs)。
 
 ## 上下文
 
@@ -131,7 +131,7 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 安装自定义 `ContextAssembler` 时，单独配置的布局、贡献来源、预算和 reducer 会冲突；
 这些配置应由自定义组装器持有。显式布局中的历史块使用块自己的 reducer，不能再另装全局历史 reducer。
 
-来源：[上下文接口](../crates/eliteforge-agent-core/src/context.rs)、[上下文使用指南](context-windows.md)。
+来源：[上下文接口](../crates/framework/eliteforge-agent-core/src/context.rs)、[上下文使用指南](context-windows.md)。
 
 ## 工具与交互
 
@@ -145,7 +145,7 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 固定工具集合使用 `StaticToolProvider`。`ToolLease` 提供本次运行内的同步清理和异步关闭入口。
 不要在插件 `install` 阶段执行某个订单查询或业务写操作；此时只注册能力。
 
-来源：[工具接口](../crates/eliteforge-agent-core/src/types.rs)、[工具策略](../crates/eliteforge-agent-core/src/state.rs)、
+来源：[工具接口](../crates/framework/eliteforge-agent-core/src/types.rs)、[工具策略](../crates/framework/eliteforge-agent-core/src/state.rs)、
 [问答与审批](interactions.md)。
 
 ## 中间件、通知与输出
@@ -165,8 +165,8 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 中间件根据贡献顺序形成外层到内层的链，插件依赖会影响该顺序。
 Hook 和事件用于通知；资源关闭使用容器回调、`ToolLease` 或会话租约。
 
-来源：[Middleware](../crates/eliteforge-agent-core/src/middleware.rs)、[Hook](../crates/eliteforge-agent-core/src/hooks.rs)、
-[事件接口](../crates/eliteforge-agent-core/src/types.rs)、[输出工厂](../crates/eliteforge-agent-core/src/operations.rs)。
+来源：[Middleware](../crates/framework/eliteforge-agent-core/src/middleware.rs)、[Hook](../crates/framework/eliteforge-agent-core/src/hooks.rs)、
+[事件接口](../crates/framework/eliteforge-agent-core/src/types.rs)、[输出工厂](../crates/framework/eliteforge-agent-core/src/operations.rs)。
 语义与示例见[Middleware 与 Hook](extensions.md)和[AGUI](agui.md)。
 
 ## 模型
@@ -194,8 +194,8 @@ Chat 连接名必须唯一，多个 Chat 模型放进连接的模型列表。
 `ModelDiscovery` 是适配器可选的目录查询接口。发现结果需要经过筛选并形成显式模型注册，
 它不会因为对象实现了这个 trait 就自动加入 Agent 的模型目录。
 
-来源：[Chat 与模型选择](../crates/eliteforge-agent-core/src/models.rs)、[多模态能力与服务](../crates/eliteforge-agent-core/src/capabilities.rs)、
-[TokenEstimator](../crates/eliteforge-agent-core/src/tokens.rs)。
+来源：[Chat 与模型选择](../crates/framework/eliteforge-agent-core/src/models.rs)、[多模态能力与服务](../crates/framework/eliteforge-agent-core/src/capabilities.rs)、
+[TokenEstimator](../crates/framework/eliteforge-agent-core/src/tokens.rs)。
 
 ## 存储
 
@@ -220,9 +220,9 @@ Chat 连接名必须唯一，多个 Chat 模型放进连接的模型列表。
 SQLite 官方存储插件一次注册这些唯一角色。官方包的 `.storage(...)` 当前只接收 SQLite 插件配置；
 替换为其他数据库时，按所需角色单独装配或使用自己的包。
 
-来源：[会话](../crates/eliteforge-agent-core/src/conversation.rs)、[执行状态](../crates/eliteforge-agent-core/src/state.rs)、
-[交互](../crates/eliteforge-agent-core/src/interaction.rs)、[长期记忆](../crates/eliteforge-agent-core/src/long_term.rs)、
-[摘要](../crates/eliteforge-agent-context/src/summary.rs)、[附件](../crates/eliteforge-agent-context/src/artifact.rs)。
+来源：[会话](../crates/framework/eliteforge-agent-core/src/conversation.rs)、[执行状态](../crates/framework/eliteforge-agent-core/src/state.rs)、
+[交互](../crates/framework/eliteforge-agent-core/src/interaction.rs)、[长期记忆](../crates/framework/eliteforge-agent-core/src/long_term.rs)、
+[摘要](../crates/framework/eliteforge-agent-context/src/summary.rs)、[附件](../crates/framework/eliteforge-agent-context/src/artifact.rs)。
 
 ## 工作流与应用主动操作
 
@@ -235,8 +235,8 @@ SQLite 官方存储插件一次注册这些唯一角色。官方包的 `.storage
 `AgentOperation` 适合应用主动查询或调用业务服务。它使用 Agent 的取消和关闭控制，
 不会自动进入模型工具的策略或中间件链。
 
-来源：[WorkflowNode](../crates/eliteforge-agent-core/src/dag.rs)、[AgentLoop](../crates/eliteforge-agent-core/src/types.rs)、
-[AgentOperation](../crates/eliteforge-agent-core/src/operations.rs)。
+来源：[WorkflowNode](../crates/framework/eliteforge-agent-core/src/dag.rs)、[AgentLoop](../crates/framework/eliteforge-agent-core/src/types.rs)、
+[AgentOperation](../crates/framework/eliteforge-agent-core/src/operations.rs)。
 
 ## 应用操作入口速查
 

@@ -1,204 +1,135 @@
 # AG-UI 事件
 
-`eliteforge-agent-official-plugin-agui` 将 Framework 的运行输出转换为 AG-UI 事件，并提供 SSE 编码。
-ReAct、串行 Workflow 和 DAG 使用同一个插件。
+`eliteforge-agent-official-plugin-agui` 把当前执行的 Framework 实时事件转换为 AG-UI 事件，
+并提供 SSE 编码。它是输出插件，不负责 HTTP 路由、鉴权、浏览器连接或事件回放。
 
-```text
-ModelInvoker / Loop / 自定义节点
-              │ OutputEvent + 节点执行身份
-              ▼
-     EventSink.on_published
-              │ 按发布顺序写入有界通道
-              ▼
-         AgUiPlugin
-              │ 标准 AG-UI 事件 / SSE 帧
-              ▼
-     应用 HTTP 接口 → 前端
-```
+[Framework 架构](architecture.md)说明运行身份、执行生命周期和通用事件发布管线；本文只说明
+AG-UI 如何接收、转换和输出这些事件。
 
-Framework 提供通用输出事件及其顺序；`eliteforge-agent-official-plugin-agui` 负责协议类型、消息配对和 SSE 编码。
-HTTP 路由、认证、权限、浏览器连接和持久化回放由应用负责。
+## 接入
 
-实现参考了 Tron 的 `agui_translate.rs` 和 `agui_stream.rs`，协议格式以
-[AG-UI 官方事件说明](https://docs.ag-ui.com/concepts/events)为准。
-插件复用 MIT 许可的社区 [ag-ui 0.3.0 SDK](https://docs.rs/ag-ui/0.3.0/ag_ui/)，
-仅启用协议类型与 SSE 编码；没有引入它的服务端执行器。
-该 SDK 目前未获 AG-UI 官方组织认可。Tron 代码未修改。
-
-## 注册与使用
-
-```toml
-[dependencies]
-eliteforge-agent-official-plugin-agui = { path = "../eliteforge-agent-framework/crates/eliteforge-agent-official-plugin-agui" }
-```
-
-在已配置模型和 SQLite 存储的 AgentBuilder 上注册插件，完整配置见[用户问答与工具审批](interactions.md)：
-
-插件注册输出工厂和事件服务。`agent.start()` 在执行前创建本次运行的输出通道，
-然后发布事件；应用不需要保留插件实例。
+注册插件后，每次 `start()` 都可取得一个仅属于该 execution 的 `AgUiStream`：
 
 ```rust
 use eliteforge_agent_official_plugin_agui::{AgUiPlugin, AgUiStream};
 use eliteforge_agent_framework::RunRequest;
 
 let agent = builder.plugin(AgUiPlugin::default()).build().await?;
+let (handle, mut events) = agent
+    .start_with_output::<AgUiStream>(RunRequest::new("chat-1", "分析项目"))?;
 
-let mut handle = agent.start(RunRequest::new("chat-1", "分析项目"))?;
-let mut events = agent.output::<AgUiStream>(&mut handle)?;
-let control = agent.control(&handle)?;
+while let Some(frame) = events.recv_sse().await? {
+    // 将 frame 写入 HTTP text/event-stream 响应体。
+    print!("{frame}");
+}
 
-let consume = async {
-    while let Some(frame) = events.recv_sse().await? {
-        // HTTP handler 将 frame 写入 text/event-stream 响应体。
-        print!("{frame}");
-    }
-    Ok::<(), eliteforge_agent_official_plugin_agui::ag_ui::Error>(())
-};
-let (result, delivered) = tokio::join!(agent.wait(handle), consume);
-delivered?;
-let result = result?;
+let result = agent.wait(handle).await?;
 ```
 
-`agent.output()` 只能取出一次对应类型的输出。需要在启动前确认插件已安装时，可用
-`agent.start_with_output::<AgUiStream>(request)` 同时取得句柄和输出流；缺少插件会在执行前报错。
+`recv()` 返回 SDK 的 `Event`；`recv_sse()` 返回 `data: {json}\n\n` 形式的 SSE 帧。应用需要
+同时等待 `agent.wait(handle)`：它才是执行结果的权威来源。
 
-`events.recv()` 返回 SDK 的 `Event`，`events.recv_sse()` 返回编码后的 SSE 帧。
-消费方应识别 `RUN_ERROR`；`recv_sse()` 的 `Err` 只表示编码失败。
-SSE 内容直接使用 AG-UI JSON，不再套一层应用的普通 JSON 响应体：
+## 从 Framework 到前端
 
-```text
-data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"...","delta":"你好"}
+`on_published` 只负责把已封装的 `EventEnvelope` 非阻塞地交给当前执行的通道。应用读取
+`AgUiStream` 时，`Adapter` 才按发布顺序生成协议事件；`recv_sse()` 再编码 SSE。
 
+```mermaid
+sequenceDiagram
+    participant Producer as Agent / 执行循环 / 协作工具
+    participant Context as RunContext.publish
+    participant Plugin as AgUiPlugin.on_published
+    participant Stream as AgUiStream + Adapter
+    participant App as 上层应用
+    participant UI as 前端
+
+    Producer->>Context: 发布 AgentEvent
+    Context->>Context: 封装 execution_id、sequence
+    Context->>Plugin: on_published(EventEnvelope)
+    Plugin->>Stream: try_send（当前 execution）
+    App->>Stream: recv_sse()
+    Stream->>Stream: Adapter 转换为 AG-UI Event
+    Stream-->>App: data: {AG-UI JSON}
+    App-->>UI: text/event-stream
 ```
 
-`control` 可以交给接收用户消息的任务，继续调用 `agent.steer(&control, ...)`、`agent.cancel(&control)` 或 `agent.revoke_tools(&control, ...)`。
-保留控制句柄不会阻止事件流结束。丢弃事件接收器只停止消费；丢弃 `RunHandle` 或它的
-等待 future 会取消执行。HTTP 断开时是否取消 Agent，由上层应用决定。
-
-可直接运行不需要模型账号的完整示例：
-
-```sh
-cargo run -p eliteforge-agent-official-plugin-agui --example sse
-```
-
-源码：[sse.rs](../crates/eliteforge-agent-official-plugin-agui/examples/sse.rs)。服务端复用 Agent，退出时调用 `agent.close()`。
+因此，AG-UI 事件的顺序来自 Framework 的实时发布顺序，而非普通观察者 `on_event` 的处理顺序。
+`RUN_STARTED` 在 `Agent::start()` 返回 `RunHandle` 前已发布；终态则在执行器返回后发布。
 
 ## 事件映射
 
-框架内部事件记录 Agent 执行过程中发生的事情，插件将其转换成前端接收的 AGUI 事件。
-下表省略 `AgentEvent::` 和 `OutputEvent::` 前缀；`OutputEvent` 通过 `AgentEvent::Output` 发布。
-「数据」列说明转换后的 AGUI 关键字段，不是完整 JSON。
+「发出方与时机」描述 Framework 的原始事件；AG-UI 事件均由读取流时的 `Adapter` 转换得到。
+下表省略 `AgentEvent::` 和 `OutputEvent::` 前缀。
 
-| 框架内部事件 | AGUI事件 | 描述 | 数据 |
+| Framework 事件 | 发出方与时机 | AG-UI 事件 | 关键字段 |
 |---|---|---|---|
-| `RunStarted` | `RUN_STARTED` | 开始本次运行 | `threadId`：会话 `session_id`；`runId`：本次 `executionId`，恢复时生成新值 |
-| `StepStarted / StepFinished` | `STEP_STARTED / STEP_FINISHED` | 开始或结束一个步骤，例如调用模型；结束不代表成功 | `stepName`：步骤名称，附带节点执行身份和步骤 ID，用于区分同名步骤 |
-| `WorkflowNodeChanged` | `STEP_STARTED / STEP_FINISHED`；`CUSTOM` | Workflow 节点开始运行时打开步骤，离开运行状态时结束步骤，并发送节点状态 | `stepName`：`node/{node_id}`；自定义事件 `name="framework.node"`，`value` 包含 `nodeId` 和 `status` |
-| `Collaboration::ChildRunStarted` | `SUBAGENT_STARTED` | 父运行已派发一个子 Agent | `subagentRunId`：子运行 ID；`name="agent_spawn"` |
-| `Collaboration::ChildRunFinished` | `SUBAGENT_FINISHED / SUBAGENT_ERROR`；`CUSTOM` | 子 Agent 正常结束、暂停或达到执行上限 | 完成为 `success`；等待输入为 `suspended`；交互详情通过 `name="framework.subagent.interactions"` 且带同一 `subagentRunId` 的自定义事件传递；执行上限映射为 `code="AGENT_LIMIT_REACHED"` |
-| `Collaboration::ChildRunFailed` | `SUBAGENT_ERROR` | 子 Agent 失败或取消 | `subagentRunId`：子运行 ID；`code="AGENT_RUN_FAILED" / "AGENT_CANCELLED"`；错误正文遵循 `include_error_details` |
-| `Collaboration::ThreadCreated / ThreadRunStarted / ThreadRunFinished / ThreadClosed` | `CUSTOM` | 独立 Thread 的创建、运行原因、终态、待处理交互和关闭 | `name="framework.thread.created / run.started / run.finished / closed"`；`value` 包含 `threadId`、`runId`、状态以及必要的 `interactionId / interactions` |
-| `MessageStarted / TextDelta / MessageFinished` | `TEXT_MESSAGE_START / TEXT_MESSAGE_CONTENT / TEXT_MESSAGE_END` | 开始消息、逐段输出文字、结束消息；首段非空文本到达时打开消息，最终回复补齐未流式返回的后缀 | `messageId`：消息 ID；开始事件的 `role="assistant"`；内容事件的 `delta`：本次追加的文字，例如 `"你好"` |
-| `ReasoningDelta`；消息结束或中止事件 | `REASONING_START / REASONING_MESSAGE_START / REASONING_MESSAGE_CONTENT / REASONING_MESSAGE_END / REASONING_END` | 逐段发送模型公开返回的推理文本，在消息结束或中止时关闭；可配置关闭推理输出 | 推理 ID 由原消息 ID 加 `/reasoning` 生成；内容事件的 `delta`：本次追加的推理文本 |
-| `MessageFinished.tool_calls` | `TOOL_CALL_START / TOOL_CALL_ARGS / TOOL_CALL_END` | 声明模型要调用的工具并发送参数；END 表示参数发送结束，工具结果随后到达 | `toolCallId`：调用的 `invocation_id`；`toolCallName`：工具名称；`parentMessageId`：所属消息；ARGS 的 `delta`：完整参数 JSON 字符串 |
-| `ToolResult` | `TOOL_CALL_RESULT` | 返回工具执行结果，并关联原工具调用 | `toolCallId`：原调用 ID；`messageId`：结果消息 ID；`content`：JSON 字符串，包含 `content`、`structured`、`isError`、`effect`、`resultReference` |
-| `StateSnapshot` | `STATE_SNAPSHOT` | 应用主动发送一份完整的前端状态 | `snapshot`：完整状态，例如 `{"progress":0}` |
-| `StateDelta` | `STATE_DELTA` | 应用主动更新前端状态的部分字段 | `delta`：RFC 6902 补丁，例如 `[{"op":"replace","path":"/progress","value":50}]` |
-| `ActivitySnapshot` | `ACTIVITY_SNAPSHOT` | 应用发送一项活动的完整内容，例如任务进度卡片 | `messageId`：插件生成的活动消息 ID；`activityType`：活动类型；`content`：完整活动内容 |
-| `ActivityDelta` | `ACTIVITY_DELTA` | 更新已发送的活动内容 | `messageId`、`activityType`：与活动快照配对；`patch`：RFC 6902 补丁 |
-| `Custom` | `CUSTOM` | 应用发送自行约定的通知，例如视频预览地址 | `name`：事件名称；`value`：事件数据，例如 `name="video.preview"`、`value={"url":"…"}` |
-| `Steered` | `CUSTOM` | 运行中追加的用户指令已写入历史，模型未必已经处理 | `name="framework.steered"`；`value.text`：追加的指令文本 |
-| `MessageFinished`（含非文本内容或结构化回复） | `CUSTOM` | 传递图片等非文本内容或结构化数据，保留原始内容类型 | `name="framework.message"`；`value` 包含 `messageId`、`content`、`structured` |
-| `RunFinished { status: Completed }` | `RUN_FINISHED` | 本次运行正常完成 | `threadId`、`runId`：会话与本次执行 ID；`outcome` 表示 `success`；已收到 `OutputEvent::RunResult` 时，`result` 携带最终 `RunResult` |
-| `RunFinished { status: AwaitingInput }` | `RUN_FINISHED` | 本次执行暂停，等待用户回答或审批决定 | `outcome` 表示 `interrupt`；中断信息包含 ID 和原因；有持久化交互时附带提示、响应 schema，工具审批还携带 `toolCallId` |
-| `RunFinished { status: StepLimit / ToolCallLimit }` | `RUN_ERROR` | 达到最大执行步数或工具调用次数 | `code="AGENT_LIMIT_REACHED"`；`message`：执行次数超限说明 |
-| `RunCancelled` | `RUN_ERROR` | 本次运行被取消 | `code="AGENT_CANCELLED"`；`message`：取消说明 |
-| `RunFailed` | `RUN_ERROR` | 本次运行执行失败 | `code="AGENT_RUN_FAILED"`；`message`：默认通用错误说明，开启 `include_error_details` 后返回异常正文 |
+| `RunStarted` | `Agent::start()` 完成同步准入并创建输出通道后；返回 `RunHandle` 前 | `RUN_STARTED` | `threadId=session_id`；`runId=executionId` |
+| `StepStarted / StepFinished` | `ModelInvoker` 开始一次模型调用；`AttemptStream` 在响应完成、取消或退出时关闭 | `STEP_STARTED / STEP_FINISHED` | `stepName` 含节点执行身份和步骤 ID |
+| `WorkflowNodeChanged` | Workflow / DAG 调度器使节点进入 `Running` 或离开运行态时 | `STEP_STARTED / STEP_FINISHED`；`CUSTOM framework.node` | `nodeId`、`status` |
+| `MessageStarted / TextDelta / MessageFinished` | `ModelInvoker` 开启模型流、收到文本、收束响应时 | `TEXT_MESSAGE_START / TEXT_MESSAGE_CONTENT / TEXT_MESSAGE_END` | `messageId`；`delta` 是本次追加内容 |
+| `ReasoningDelta`、消息结束或中止 | `AttemptStream` 收到公开推理片段；消息关闭时收束 | `REASONING_START / REASONING_MESSAGE_START / REASONING_MESSAGE_CONTENT / REASONING_MESSAGE_END / REASONING_END` | 推理 ID 为 `{messageId}/reasoning` |
+| `MessageFinished.tool_calls` | 模型给出完整响应和工具调用声明时 | `TOOL_CALL_START / TOOL_CALL_ARGS / TOOL_CALL_END` | `toolCallId=invocation_id`；ARGS 是完整参数 JSON |
+| `ToolResult` | ReAct / Workflow 执行器完成工具批次并写入结果后 | `TOOL_CALL_RESULT` | 关联原 `invocation_id`；结果含内容、结构化数据和错误标记 |
+| `RunResult` | 执行器正常返回后，由 `Agent` 在终态前作为输出发布 | 无独立事件；终态事件可携带 `result` | 用于补齐未流式输出的最终回复 |
+| `Steered` | `agent.steer()` 写入追加指令后 | `CUSTOM framework.steered` | `value.text`；模型未必已处理该指令 |
+| `Collaboration::ChildRunStarted` | `agent_spawn` 成功启动子 Agent 后，由父 `RunContext` 发布 | `SUBAGENT_STARTED` | `subagentRunId`；`name=agent_spawn` |
+| `Collaboration::ChildRunFinished` | 子 Agent 返回结果后，由父运行发布 | `SUBAGENT_FINISHED`，或 `SUBAGENT_ERROR` | 成功、暂停和执行上限分别映射为对应结果；交互附在 `framework.subagent.interactions` |
+| `Collaboration::ChildRunFailed` | 子 Agent 失败、取消，或完成守卫在异常退出时析构 | `SUBAGENT_ERROR` | `AGENT_RUN_FAILED` 或 `AGENT_CANCELLED` |
+| `Collaboration::ThreadCreated` | `thread_create` 写入 Thread 记录后 | `CUSTOM framework.thread.created` | `threadId`、`title`、`status`、`latestRunId` |
+| `Collaboration::ThreadRunStarted` | 新建、普通消息或 `thread_answer` 启动 Thread 运行后 | `CUSTOM framework.thread.run.started` | `threadId`、`runId`、`cause`、必要时 `interactionId` |
+| `Collaboration::ThreadRunFinished` | Thread 运行结束、终态已确定后 | `CUSTOM framework.thread.run.finished` | `threadId`、`runId`、`status`、待处理 `interactions` |
+| `Collaboration::ThreadClosed` | `thread_close` 删除记录并释放容量后 | `CUSTOM framework.thread.closed` | `threadId` |
+| `RunFinished { Completed }` | 执行器成功返回后 | `RUN_FINISHED` | `outcome=success`；可带 `result` |
+| `RunFinished { AwaitingInput }` | 执行器保存等待交互的状态后 | `RUN_FINISHED` | `outcome=interrupt`；含交互 ID、提示和响应 schema |
+| `RunFinished { StepLimit / ToolCallLimit }` | 执行器因限制结束后 | `RUN_ERROR` | `code=AGENT_LIMIT_REACHED` |
+| `RunCancelled / RunFailed` | 运行取消，或执行器返回非取消错误后 | `RUN_ERROR` | `AGENT_CANCELLED` 或 `AGENT_RUN_FAILED` |
 
-框架现有 `TextDelta`、`ReasoningDelta` 和工具观测事件继续保留。插件消费带消息身份的
-`OutputEvent`，避免同一段文本被发送两次。模型只返回完整结果时也能生成完整的消息事件。
-流式文本和最终文本不一致时，插件结束该输出流并报告 `AGUI_TEXT_MISMATCH`。
-RunResult 的最终回复与最近一条完整文本相同时不重复发送；否则补发完整文本消息。
-因此，自定义 Loop 输出过中间说明后，返回的最终回复仍会进入文本事件流。
+## 协作事件的时序
 
-## 工具、并发与恢复
+子 Agent 属于父运行：父流只接收其生命周期，不接收子 Agent 的 token、消息或工具增量。
+Thread 是独立运行，不是父运行的嵌套子 Agent；它使用 `framework.thread.*`，不会在父流中
+伪装为第二个顶层 `RUN_STARTED`。
 
-- 每次模型调用生成独立消息 ID，并为每个工具调用分配 `ToolCall.invocation_id`。
-  供应商的 `ToolCall.id` 用于模型协议；`invocation_id` 用于执行、审批、检查点和 AG-UI。
-  同一 Loop 或节点并行调用多个模型，即使供应商返回相同 ID，也不会混用结果。
-- `EventEnvelope.node_execution` 保存节点执行身份。AG-UI `metadata.framework` 包含
-  runId、executionId、sourceSequence 和节点信息。这里的 runId 是跨恢复不变的 Framework
-  运行 ID；AG-UI 顶层 runId 是本次 executionId。
-- 工具结果来自输出中间件处理后的结果。大内容已转存时，事件携带预览和引用；不会重新
-  读取附件，将大数据塞回事件中。`TOOL_CALL_RESULT.content` 是包含上述字段的 JSON 字符串。
-- ReAct 和 Workflow 在完整工具批次写入历史后发布结果；暂停时发布已完成的工具结果。
-  一批工具中有慢调用时，其它工具的结果事件也可能延后。执行中状态仍可通过原有工具事件观察。
-- Workflow 恢复时，工具结果沿用检查点中的 invocation_id，只发送原调用的结果，
-  不重复声明工具或发送参数。应用应保留之前的会话消息，才能把结果显示在原调用下。
-  执行器和插件重建后也不依赖内存中的旧映射。
-- 审批和结构化输入沿用真实 interaction_id、提示和响应 schema。应用将用户答案转换成
-  `InteractionResponse`，随新的 `ResumeRequest` 启动恢复。
-- 工具审批使用标准 `reason: "tool_call"`，`toolCallId` 指向对应的 invocation_id。
-  审批通过或拒绝后，结果均关联这个调用；拒绝不会执行工具。
-- 内置执行器将普通 `AwaitInput` 也保存为持久化字符串问答。应用通过
-  `agent.answer()` 保存答案，再启动返回的恢复请求。只有未发布持久化交互的
-  自定义 Loop 使用提示性 interrupt，此时不能将其 ID 作为可恢复的 interaction_id。
-- 每次恢复使用新输出流及 executionId。子 Agent 自己的 token、消息和工具增量不会混入父流；
-  父运行会收到它的标准 `SUBAGENT_*` 生命周期事件，最终完整结果仍通过原 `agent_spawn`
-  工具结果返回。独立 Thread 不属于父运行的子 Agent，因此用 `framework.thread.*` 自定义事件
-  表达状态变化，不伪装成第二个顶层 `RUN_STARTED`。
-- 生命周期事件不携带委派任务正文、Thread 消息或用户答案。子 Agent / Thread 暂停时会携带
-  `InteractionRequest` 的提示与响应 Schema，供界面展示和收集合法答案。
+```mermaid
+sequenceDiagram
+    participant Parent as 父 Agent 运行
+    participant Tools as agent_spawn / Thread 工具
+    participant Child as 子 Agent
+    participant Thread as 独立 Thread
+    participant Stream as 父运行的 AG-UI 流
+    participant UI as 前端
 
-## 自定义节点和客户端状态
+    Parent->>Tools: agent_spawn
+    Tools->>Child: Agent::run_child()
+    Tools->>Stream: ChildRunStarted
+    Stream-->>UI: SUBAGENT_STARTED
+    Child-->>Tools: 结果 / 错误
+    Tools->>Stream: ChildRunFinished / ChildRunFailed
+    Stream-->>UI: SUBAGENT_FINISHED / SUBAGENT_ERROR
 
-自定义 Loop 或 WorkflowNode 可以使用通用输出事件，无须依赖 AG-UI 类型：
-
-```rust
-use eliteforge_agent_framework::OutputEvent;
-use serde_json::json;
-
-context.emit_output(OutputEvent::StateSnapshot(json!({"progress": 0})));
-context.emit_output(OutputEvent::StateDelta(json!([
-    {"op": "replace", "path": "/progress", "value": 50}
-])));
-context.emit_output(OutputEvent::Custom {
-    name: "video.preview".into(),
-    value: json!({"url": "https://example.com/preview.mp4"}),
-});
+    Parent->>Tools: thread_create / thread_send / thread_answer
+    opt 新建 Thread
+        Tools->>Stream: ThreadCreated
+        Stream-->>UI: CUSTOM framework.thread.created
+    end
+    Tools->>Thread: 启动独立运行
+    Tools->>Stream: ThreadRunStarted
+    Stream-->>UI: CUSTOM framework.thread.run.started
+    Thread-->>Tools: 终态 / 待回答交互
+    Tools->>Stream: ThreadRunFinished
+    Stream-->>UI: CUSTOM framework.thread.run.finished
+    opt thread_close 成功
+        Tools->>Stream: ThreadClosed
+        Stream-->>UI: CUSTOM framework.thread.closed
+    end
 ```
 
-这里的 `context` 是 `RunContext`；WorkflowNode 中使用 `context.run`。
-自定义逐段输出要显式发送 MessageStarted、TextDelta 和 MessageFinished；工具结果使用
-ToolResult，并保留模型返回的 `ToolCall.invocation_id`，不要为了发送结果重新创建 ToolCall。
-完全自定义的工具调用使用 `ToolCall::new` 创建一次，将同一调用用于声明和结果。
-状态快照是前端数据，不会自动暴露 ConversationStore、模型私有上下文或执行检查点。
-辅助模型调用（例如摘要压缩）的文本和推理不会进入 UI 输出流。
+协作生命周期事件不携带委派任务正文、Thread 消息或用户答案。暂停交互只携带界面收集答案所需的
+`InteractionRequest`。
 
-## 容量与失败
+## 边界与失败
 
-`AgUiOptions` 默认最多缓存 256 条源事件，单条源事件或编码后的协议事件最多 1 MiB，
-最多保留 1024 个尚未关闭的消息、工具、步骤和活动。可以按业务请求量调整。
-活动快照在一次执行内保留配对记录，受同一个数量限制。
-启动前会检查运行开始事件序列化后的大小，包括会话 ID 的 JSON 转义和重复字段。
-超限会直接拒绝启动；合法的引号、反斜杠和 Unicode 会话 ID 可以正常使用。
-
-`on_published` 按发布顺序执行，做有界检查与非阻塞入队。它不是生命周期 Hook，也不拦截执行；
-普通 `on_event` 继续使用原有观测队列。慢观测 sink 不会挤掉 AG-UI 通道里的事件。
-实现该同步方法时，不应进行 I/O、等待或再次发布事件。
-
-通道满、消息超限、非法 Patch 或事件顺序错误，会关闭已经向客户端打开的消息/步骤，
-随后发出一个明确的 RUN_ERROR。没有静默丢弃后继续宣告成功，也不会因此重复调用工具。
-协议流失败和 Agent 执行失败是两件事；执行的最终结果仍以 `agent.wait(handle)` 为准。
-运行异常默认使用通用错误文本，上层应用显式设置 `include_error_details` 后才输出异常正文。
-
-此插件提供事件输出，不实现完整的 RunAgentInput HTTP 端点、客户端工具执行、
-MESSAGES_SNAPSHOT 历史快照或持久化 SSE 重连回放。需要回放时，上层应用保存已经转换好的
-AG-UI 事件；现有 Workflow journal 不包含完整 token 流，不能据此还原丢失的文本增量。
-
-## 验证
-
-[protocol.rs](../crates/eliteforge-agent-official-plugin-agui/tests/protocol.rs) 使用真实 SDK 客户端消费输出，验证
-文本与推理配对、工具参数/结果顺序、并发模型和节点隔离、附件引用、审批通过与拒绝、
-执行器重建后的恢复、旧检查点兼容、最终回复、中间说明、转义会话 ID、状态与活动、
-子 Agent 与独立 Thread 协作、取消、重试、超限、错误文本和慢观测 sink。所有模型均为本地测试实现，不需要模型账号。
+- 每次执行尝试都有独立的 AG-UI 通道；恢复会得到新的 `executionId` 和输出流。
+- 通道溢出、事件超限或协议顺序错误会结束该 AG-UI 流并发送 `RUN_ERROR`，不会取消 Agent、重试工具或改变 `agent.wait(handle)` 的结果。
+- `on_published` 必须快速，不得 I/O、等待或再次发布事件；普通 `on_event` 是尽力的异步观测，不能替代 AG-UI 输出。
+- 此插件不实现 HTTP 端点、客户端工具执行、历史快照或 SSE 重连回放；这些能力由上层应用实现。

@@ -588,7 +588,7 @@ A 前置 → B 前置 → 业务执行 → B 后置 → A 后置
 自定义输出时，在同步的 `prepare` 中创建每次执行独立的通道，把接收端写入 `RunOutputs`，
 把发送端放入该次运行的 `Extensions`；再由 `EventSink` 转换并发送事件。
 `prepare` 在首个运行事件前执行，同一接收端只能通过 `agent.output::<T>` 取一次。
-完整实现可参考[AGUI 插件](../crates/eliteforge-agent-official-plugin-agui/src/lib.rs)，前端接法见[AGUI 文档](agui.md)。
+完整实现可参考[AGUI 插件](../crates/plugin/eliteforge-agent-official-plugin-agui/src/lib.rs)，前端接法见[AGUI 文档](agui.md)。
 
 ### 让应用主动调用插件能力
 
@@ -788,7 +788,7 @@ impl PluginPack for ShopPluginPack {
 
 应用再调用 `.plugin_pack(ShopPluginPack)`。包只负责展开配置；包内插件、单独插件和嵌套包最终进入同一个依赖图。
 展开时不连接数据库、不启动业务任务；资源在插件 `install` 中创建。
-官方包的成员由[展开实现](../crates/eliteforge-agent-official-plugin-pack/src/lib.rs)显式维护，新增官方插件时要同步更新。
+官方包的成员由[展开实现](../crates/plugin/eliteforge-agent-official-plugin-pack/src/lib.rs)显式维护，新增官方插件时要同步更新。
 
 ## 构建时如何收集能力
 
@@ -911,8 +911,8 @@ let catalog = context.services()
 
 插件内部任务用插件生命周期管理；一次运行内的工具连接或临时会话分别使用 `ToolLease`、
 `ConversationSession` 等对应作用域。`RunLifecycleHook::on_finished` 是通知，不是必达的资源释放点。
-真实连接和清理注册可参考[MCP 插件](../crates/eliteforge-agent-official-plugin-tools-mcp/src/lib.rs)
-与[SQLite 插件](../crates/eliteforge-agent-official-plugin-storage-sqlite/src/lib.rs)。
+真实连接和清理注册可参考[MCP 插件](../crates/plugin/eliteforge-agent-official-plugin-tools-mcp/src/lib.rs)
+与[SQLite 插件](../crates/plugin/eliteforge-agent-official-plugin-storage-sqlite/src/lib.rs)。
 
 ## 常见问题
 

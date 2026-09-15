@@ -16,10 +16,10 @@ tokio-rusqlite = { version = "0.7.0", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/eliteforge-agent-official-plugin-storage-sqlite" }
 eliteforge-agent-framework = { path = "../eliteforge-agent-framework", default-features = false }
 eliteforge-agent-state-sqlite = { path = "../eliteforge-agent-state-sqlite" }
 eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }
-eliteforge-agent-official-plugin-model-genai = { path = "../eliteforge-agent-official-plugin-model-genai" }
+eliteforge-agent-official-plugin-model-genai = { path = "../../plugin/eliteforge-agent-official-plugin-model-genai" }
 eliteforge-agent-context = { path = "../eliteforge-agent-context" }
 tempfile = "3"

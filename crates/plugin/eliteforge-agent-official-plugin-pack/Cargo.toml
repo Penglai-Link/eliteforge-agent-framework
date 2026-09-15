@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-eliteforge-agent-core = { path = "../eliteforge-agent-core" }
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core" }
 eliteforge-agent-official-plugin-model-genai = { path = "../eliteforge-agent-official-plugin-model-genai" }
 eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-official-plugin-storage-sqlite" }
 eliteforge-agent-official-plugin-tools-human = { path = "../eliteforge-agent-official-plugin-tools-human" }
@@ -16,7 +16,7 @@ eliteforge-agent-official-plugin-tools-agents = { path = "../eliteforge-agent-of
 eliteforge-agent-official-plugin-otel = { path = "../eliteforge-agent-official-plugin-otel" }
 
 [dev-dependencies]
-eliteforge-agent-framework = { path = "../eliteforge-agent-framework", default-features = false }
+eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
 async-trait.workspace = true
 tokio.workspace = true
 serde_json.workspace = true

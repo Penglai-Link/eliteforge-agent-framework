@@ -10,8 +10,8 @@ genai = ["dep:eliteforge-agent-official-plugin-model-genai"]
 
 [dependencies]
 eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
-eliteforge-agent-official-plugin-skills = { path = "../eliteforge-agent-official-plugin-skills", version = "0.1.0" }
-eliteforge-agent-official-plugin-model-genai = { path = "../eliteforge-agent-official-plugin-model-genai", version = "0.1.0", optional = true }
+eliteforge-agent-official-plugin-skills = { path = "../../plugin/eliteforge-agent-official-plugin-skills", version = "0.1.0" }
+eliteforge-agent-official-plugin-model-genai = { path = "../../plugin/eliteforge-agent-official-plugin-model-genai", version = "0.1.0", optional = true }
 eliteforge-agent-plugin-kernel = { version = "0.1.0", path = "../eliteforge-agent-plugin-kernel" }
 async-trait.workspace = true
 futures.workspace = true
@@ -27,5 +27,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [dev-dependencies]
 eliteforge-agent-capability-test-fixture = { path = "../eliteforge-agent-capability-test-fixture" }
 eliteforge-agent-context = { path = "../eliteforge-agent-context" }
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/eliteforge-agent-official-plugin-storage-sqlite" }
 eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }

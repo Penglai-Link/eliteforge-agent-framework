@@ -14,8 +14,8 @@ live-model = [
 ]
 
 [dependencies]
-eliteforge-agent-framework = { path = "../crates/eliteforge-agent-framework", optional = true }
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../crates/eliteforge-agent-official-plugin-storage-sqlite", optional = true }
+eliteforge-agent-framework = { path = "../crates/framework/eliteforge-agent-framework", optional = true }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../crates/plugin/eliteforge-agent-official-plugin-storage-sqlite", optional = true }
 tokio = { workspace = true, optional = true }
 
 [[bin]]
