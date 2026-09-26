@@ -7,8 +7,8 @@ no Tron compatibility rules were added to the execution contracts.
 ## Workspace
 
 - Repository: `eliteforge-agent-framework`
-- Branch: `feature/clouds3n/agent-spawn-threads`
-- Base commit: `b85e050`; the current Agent Spawn and Threads delivery is in the working tree.
+- Branch: `feature/clouds3n/dynamic-capability-runtime`
+- Base commit: `7beabbfab96cd55a8711cc17d70d2908f93bf96f`; dynamic capability runtime changes are in the working tree.
 - No Tron files, Git branches, commits or remote state were changed.
 - Validation environment: macOS arm64, Rust/Cargo 1.95.0.
 
@@ -42,7 +42,7 @@ no Tron compatibility rules were added to the execution contracts.
 | Event semantics | Distinct live execution-attempt and durable-journal scopes; serialized publication; workflow steering messages and events committed together before live publication, including final replies; typed child-Agent and independent-Thread lifecycle events; bounded normal-event drain followed by a separately bounded terminal attempt per sink | `eliteforge-agent-framework/tests/execution_contracts.rs`; `eliteforge-agent-official-plugin-tools-agents/tests/tools.rs`; steering/replay/failure and acquired-checkpoint/event-scope tests in `eliteforge-agent-state-sqlite/tests/workflow.rs` |
 | Agent plugin operations | Plugins configure services and per-run output factories; Agent owns execution, controls, model operations, storage requests and shutdown admission; typed custom operations and output ownership checks | `eliteforge-agent-framework/tests/agent_operations.rs`; storage bundle and MCP transport tests |
 | Capability packs | Core exports `CapabilityPack` / builder, `#[extension_point]`, `#[capability]` and `#[capability_factory]`; selected packs and explicit children resolve static descriptors, preflight IDs/dependencies/cycles, create sync configured instances in stable order, share declared instances, prepare Skills resources and enter install-then-ready Plugin lifecycle | `eliteforge-agent-framework/tests/capability_packs.rs`; cross-crate declarations in `eliteforge-agent-capability-test-fixture/src/lib.rs`; resolver unit coverage in `eliteforge-agent-core/src/capability_packs.rs` |
-| Plugin packs | AgentBuilder::plugin_pack expands custom, nested and official packs into one dependency graph; official defaults register eight plugins: Genai, SQLite, human tools, Agent collaboration tools, Skills, AG-UI, empty MCP and telemetry using upper-application global providers | `eliteforge-agent-framework/tests/plugin_packs.rs`; `eliteforge-agent-official-plugin-pack/tests/official_pack.rs`; `eliteforge-agent-official-plugin-tools-agents/tests/tools.rs`; `eliteforge-agent-official-plugin-skills/tests/skills.rs`; `tests/global_telemetry.rs`; offline `examples/official_pack.rs` |
+| Capability package composition | AgentBuilder::capability_pack expands custom, nested and official packs into one dependency graph; official defaults register eight plugins: Genai, SQLite, human tools, Agent collaboration tools, Skills, AG-UI, empty MCP and telemetry using upper-application global providers | `eliteforge-agent-framework/tests/capability_packs.rs`; `eliteforge-agent-official-capability-pack/tests/official_pack.rs`; `eliteforge-agent-official-plugin-tools-agents/tests/tools.rs`; `eliteforge-agent-official-plugin-skills/tests/skills.rs`; `tests/global_telemetry.rs`; offline `examples/official_pack.rs` |
 | AG-UI output | Community ag-ui 0.3.0 event types and SSE; ordered bounded handoff independent of ordinary observer backlog; text/reasoning/tool/step/state/activity/custom events; native subagent lifecycle plus independent-thread custom events; distinct model/tool invocation identities, offloaded result references, tool-bound approval/denial across executor restart, final-response deduplication and serialized admission checks; explicit overflow/size/order errors | 23 SDK-client and lifecycle cases in `eliteforge-agent-official-plugin-agui/tests/protocol.rs`; offline `eliteforge-agent-official-plugin-agui/examples/sse.rs` |
 | genai | Exact `=0.7.0-beta.21`, real local HTTP/SSE, shared auth, model discovery, tools, signed-thinking continuation, media input and generation options | `eliteforge-agent-official-plugin-model-genai/tests/protocol.rs` |
 | MCP | Official rmcp 3.2.0 stdio and Streamable HTTP, bounded discovery/cursor detection, typed errors/results, protocol cancellation on cancel/drop, owned/shared close | `eliteforge-agent-official-plugin-tools-mcp/tests/transport.rs` launches actual SDK services over HTTP and in a child process |
@@ -54,7 +54,18 @@ no Tron compatibility rules were added to the execution contracts.
 | Artifacts | Directory capability, canonical random IDs, atomic immutable publication, fsync, bounded byte ranges, cancellation, symlink rejection, combined content/structured offload, explicit result reference, artifact preservation after publication/history failures | `eliteforge-agent-context/src/artifact.rs`; `eliteforge-agent-context/tests/artifacts.rs` |
 | OpenTelemetry | Injected providers; run/node/model/tool spans, node-scoped model/tool links, persisted attempt identities across continuation, bounded redacted error events, duration/usage/error/cancellation metrics; inline assembly/failure/dispatch diagnostics while spans are alive; no payloads by default; providers remain owned by the upper application | `eliteforge-agent-official-plugin-otel/tests/export.rs` uses actual SDK in-memory exporters |
 
-## Current verification
+## Dynamic capability runtime
+
+The current change unifies CapabilityPack composition and adds signed version installation,
+scoped sidecars, duplex framed RPC, all Core and Context storage adapters, idle Agent
+reconfiguration, durable package pins, and independent pages. SDK and development-host
+entry points use the production protocol. No Tron integration is included.
+
+See [design and APIs](dynamic-capability-runtime.md), [migration](dynamic-capability-migration.md)
+and [current acceptance matrix](dynamic-capability-acceptance.md). The evidence below predates
+this refactor and describes the previous static capability composition delivery.
+
+## Prior capability composition verification
 
 - `cargo test -p eliteforge-agent-capability-macros -p eliteforge-agent-core`: passed.
 - `cargo test -p eliteforge-agent-framework --test capability_packs`: 31 passed, covering external extension declarations, singleton conflicts, factory bindings, Context storage adapters, `ready` rollback and capability-owned Skills sources.
@@ -152,7 +163,7 @@ interaction effects and an explicit result reference inline. The upper applicati
   arbitrary plugin sandboxing, lowest-Rust-version certification or load certification.
 - Capability-pack factories are synchronous and only receive their selected pack configuration.
   They do not resolve services, perform async initialization or provide member-level switches.
-  Official `PluginPack` composition is intentionally unchanged; it remains the supported
+  Official composition now implements the unified `CapabilityPack`; it remains the supported
   official-plugin entry point.
 
 The execution invariants and acceptance scope are retained in [execution-contracts.md](execution-contracts.md). Current layers and defaults are described in [architecture.md](architecture.md), with the extension inventory in [plugins.md](plugins.md).

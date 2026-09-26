@@ -59,6 +59,11 @@ impl RunOutputs {
         self.0.insert(key, Box::new(output));
         Ok(())
     }
+    pub fn get_mut<T: Send + 'static>(&mut self) -> Option<&mut T> {
+        self.0
+            .get_mut(&TypeId::of::<T>())
+            .and_then(|output| output.downcast_mut())
+    }
     pub fn take<T: Send + 'static>(&mut self) -> Result<T, AgentError> {
         self.0
             .remove(&TypeId::of::<T>())
@@ -78,6 +83,10 @@ impl RunOutputs {
 #[crate::extension_point(adapter = crate::RunOutputPlugin, contribute)]
 pub trait RunOutputFactory: Send + Sync {
     fn output_type(&self) -> TypeId;
+    /// Aggregate independent stable output contracts into one host-owned typed container.
+    fn aggregates(&self) -> bool {
+        false
+    }
     fn prepare(
         &self,
         request: &RunRequest,

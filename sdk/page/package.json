@@ -1,0 +1,22 @@
+{
+  "name": "@eliteforge/capability-page-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./dist/page.js",
+    "./host": "./dist/host.js"
+  },
+  "types": "./dist/page.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "check": "tsc --noEmit",
+    "test:browser": "node tests/browser.mjs"
+  },
+  "devDependencies": {
+    "playwright": "1.58.2",
+    "typescript": "~5.9.3"
+  }
+}

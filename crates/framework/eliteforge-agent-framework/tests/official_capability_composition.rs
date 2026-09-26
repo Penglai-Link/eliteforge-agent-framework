@@ -61,12 +61,22 @@ impl AgentLoop for UnusedLoop {
 }
 
 struct ApplicationPack(Log);
-impl PluginPack for ApplicationPack {
-    fn into_plugins(self) -> Vec<Arc<dyn Plugin>> {
-        PluginPackBuilder::new()
+impl CapabilityPack for ApplicationPack {
+    fn id(&self) -> &str {
+        "test.application"
+    }
+    fn configuration(&self) -> &CapabilityConfig {
+        &()
+    }
+    fn included_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
+        vec![Arc::new(
+            CapabilityPackBuilder::new("test.nested", ()).plugin(recorded("nested", None, &self.0)),
+        )]
+    }
+    fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
+        test_pack()
             .plugin(recorded("dependent", Some("outside"), &self.0))
-            .plugin_pack(PluginPackBuilder::new().plugin(recorded("nested", None, &self.0)))
-            .into_plugins()
+            .plugins()
     }
 }
 
@@ -75,15 +85,11 @@ async fn nested_packs_and_individual_plugins_share_dependency_order_and_shutdown
     let log = Log::default();
     let builder = AgentBuilder::new()
         .default_models(false)
-        .plugin_pack(ApplicationPack(log.clone()))
+        .capability_pack(ApplicationPack(log.clone()))
         .plugin_arc(Arc::new(recorded("outside", Some("nested"), &log)))
-        .plugin_pack(
-            PluginPackBuilder::new()
-                .plugin(AgentLoopPlugin::new(UnusedLoop))
-                .plugin(ConversationStorePlugin::new(
-                    TestConversationStore::default(),
-                )),
-        );
+        .capability_pack(test_pack().plugin(AgentLoopPlugin::new(UnusedLoop)).plugin(
+            ConversationStorePlugin::new(TestConversationStore::default()),
+        ));
     assert!(
         log.lock().unwrap().is_empty(),
         "configuration must not install plugins"
@@ -112,13 +118,13 @@ async fn nested_packs_and_individual_plugins_share_dependency_order_and_shutdown
 async fn duplicates_across_packs_and_individual_plugins_fail_before_installation() {
     for between_packs in [false, true] {
         let log = Log::default();
-        let builder = AgentBuilder::new().plugin_pack(PluginPackBuilder::new().plugin(recorded(
+        let builder = AgentBuilder::new().capability_pack(test_pack().plugin(recorded(
             "duplicate",
             None,
             &log,
         )));
         let builder = if between_packs {
-            builder.plugin_pack(PluginPackBuilder::new().plugin(recorded("duplicate", None, &log)))
+            builder.capability_pack(test_pack().plugin(recorded("duplicate", None, &log)))
         } else {
             builder.plugin(recorded("duplicate", None, &log))
         };
@@ -134,7 +140,7 @@ async fn duplicates_across_packs_and_individual_plugins_fail_before_installation
 async fn missing_dependencies_and_cycles_across_pack_boundaries_fail_before_installation() {
     let log = Log::default();
     let error = AgentBuilder::new()
-        .plugin_pack(ApplicationPack(log.clone()))
+        .capability_pack(ApplicationPack(log.clone()))
         .build()
         .await
         .err()
@@ -143,7 +149,7 @@ async fn missing_dependencies_and_cycles_across_pack_boundaries_fail_before_inst
         matches!(error, AgentError::Plugin(PluginError::MissingDependency { dependency, .. }) if dependency == "outside")
     );
     let error = AgentBuilder::new()
-        .plugin_pack(ApplicationPack(log.clone()))
+        .capability_pack(ApplicationPack(log.clone()))
         .plugin(recorded("outside", Some("dependent"), &log))
         .build()
         .await
@@ -161,13 +167,9 @@ async fn failed_pack_member_rolls_back_individual_and_nested_members_in_reverse_
     let log = Log::default();
     let error = AgentBuilder::new()
         .plugin(recorded("outside", None, &log))
-        .plugin_pack(
-            PluginPackBuilder::new()
-                .plugin_pack(PluginPackBuilder::new().plugin(recorded(
-                    "nested",
-                    Some("outside"),
-                    &log,
-                )))
+        .capability_pack(
+            test_pack()
+                .capability_pack(test_pack().plugin(recorded("nested", Some("outside"), &log)))
                 .plugin(Recorded {
                     fail: true,
                     ..recorded("failure", Some("nested"), &log)
@@ -192,4 +194,15 @@ async fn failed_pack_member_rolls_back_individual_and_nested_members_in_reverse_
             "close outside",
         ]
     );
+}
+
+fn test_pack() -> CapabilityPackBuilder<()> {
+    static ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    CapabilityPackBuilder::new(
+        format!(
+            "test.pack.{}",
+            ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ),
+        (),
+    )
 }

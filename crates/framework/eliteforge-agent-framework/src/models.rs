@@ -423,6 +423,9 @@ impl ChatStream for AttemptStream<'_> {
 
 #[async_trait]
 impl ChatExecutor for ModelInvoker {
+    async fn validate_async(&self) -> Result<(), AgentError> {
+        self.strategy.validate_async(&self.catalog).await
+    }
     fn catalog(&self) -> &ModelCatalog {
         self.catalog()
     }

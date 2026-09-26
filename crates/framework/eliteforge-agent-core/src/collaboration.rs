@@ -112,7 +112,7 @@ pub struct ThreadResult {
     pub tool_calls: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildRunResult {
     pub run_id: RunId,
     pub result: RunResult,

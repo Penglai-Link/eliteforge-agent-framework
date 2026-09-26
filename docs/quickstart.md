@@ -8,7 +8,7 @@
 |---|---|
 | 最小可运行 Agent | [创建第一个 Agent](#创建第一个-agent) |
 | 声明业务能力并按包自动装配 | [自动装配业务能力](#自动装配业务能力) |
-| 一次配置官方插件 | [使用官方插件包](#使用官方插件包) |
+| 一次配置官方插件 | [使用官方能力包](#使用官方能力包) |
 | 边生成边推送给前端 | [流式输出](#流式输出) |
 | 运行中追加指令或取消 | [控制运行](#控制运行) |
 | 保持同一会话上下文 | [连续对话](#连续对话) |
@@ -62,11 +62,11 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 ~~~rust
 use eliteforge_agent_core::CapabilityPackBuilder;
 use eliteforge_agent_framework::AgentBuilder;
-use eliteforge_agent_official_plugin_pack::EliteForgeOfficialPluginPack;
+use eliteforge_agent_official_capability_pack::EliteForgeOfficialCapabilityPack;
 use shop_plugin::ShopConfig;
 
 let agent = AgentBuilder::new()
-    .plugin_pack(EliteForgeOfficialPluginPack::new("agent.sqlite"))
+    .capability_pack(EliteForgeOfficialCapabilityPack::new("agent.sqlite"))
     .capability_pack(
         CapabilityPackBuilder::new(
             "shop",
@@ -86,36 +86,36 @@ let shop = CapabilityPackBuilder::new("shop", shop_config)
     .include(CapabilityPackBuilder::new("shop.audit", audit_config));
 ~~~
 
-这里的 `PluginPack` 只负责官方插件组合，`CapabilityPack` 负责业务声明的自动装配；
+官方与业务装配统一使用 `CapabilityPack`；
 两者可以并用。完整的宏写法、`id`、`instance`、`depends_on`、配置 factory、Skills 成员和生命周期见
 [能力包与自动装配](capability-packs.md)。
 
-## 使用官方插件包
+## 使用官方能力包
 
-安装 `eliteforge-agent-official-plugin-pack` 后，一个包默认装配全部官方插件：模型、SQLite、用户问答、Agent 协作工具、Skills、AGUI、MCP 和 OTel。Skills 默认按 Agent Skills 渐进式发现系统级目录与当前目录的本地技能。子 Agent 与 Thread 的边界和工具用法见[Agent 协作](collaboration.md)。
+安装 `eliteforge-agent-official-capability-pack` 后，一个包默认装配全部官方插件：模型、SQLite、用户问答、Agent 协作工具、Skills、AGUI、MCP 和 OTel。Skills 默认按 Agent Skills 渐进式发现系统级目录与当前目录的本地技能。子 Agent 与 Thread 的边界和工具用法见[Agent 协作](collaboration.md)。
 
 ```rust
 use eliteforge_agent_framework::AgentBuilder;
-use eliteforge_agent_official_plugin_pack::{
-    EliteForgeOfficialPluginPack,
+use eliteforge_agent_official_capability_pack::{
+    EliteForgeOfficialCapabilityPack,
     agui::AgUiStream,
 };
 
 let agent = AgentBuilder::new()
-    .plugin_pack(EliteForgeOfficialPluginPack::new("agent.sqlite"))
+    .capability_pack(EliteForgeOfficialCapabilityPack::new("agent.sqlite"))
     .build().await?;
 ```
 
 AGUI 已默认启用，调用 `agent.start_with_output::<AgUiStream>(request)` 取得运行和输出流。
-消费流、等待结果和关闭 Agent 的完整程序见[离线插件包示例](../crates/plugin/eliteforge-agent-official-plugin-pack/examples/official_pack.rs)：
+消费流、等待结果和关闭 Agent 的完整程序见[离线能力包示例](../crates/plugin/eliteforge-agent-official-capability-pack/examples/official_pack.rs)：
 
 ```sh
-cargo run -p eliteforge-agent-official-plugin-pack --example official_pack -- agent.sqlite
+cargo run -p eliteforge-agent-official-capability-pack --example official_pack -- agent.sqlite
 ```
 
 这个示例使用本地演示模型，无需凭据。MCP 默认没有服务器，工具集为空；OTel 使用上层应用的全局 provider。
-替换模型、配置 MCP 服务器和遥测 provider，以及兼容的自定义 `PluginPack`，见
-[插件包](plugins.md#插件包)。
+替换模型、配置 MCP 服务器和遥测 provider，以及自定义 `CapabilityPack`，见
+[能力包组合](plugins.md#能力包组合)。
 
 ## 流式输出
 

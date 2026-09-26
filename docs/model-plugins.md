@@ -9,7 +9,7 @@
 使用官方包时，从它的 `model` 模块引入 Genai，无需再单独声明该插件的依赖：
 
 ```rust
-use eliteforge_agent_official_plugin_pack::model::{GenaiPlugin, AdapterKind, AuthData};
+use eliteforge_agent_official_capability_pack::model::{GenaiPlugin, AdapterKind, AuthData};
 ```
 
 单独使用 Genai 时，在应用的 `Cargo.toml` 中添加发布版本依赖：
@@ -29,7 +29,7 @@ eliteforge-agent-official-plugin-model-genai = "0.1.0"
 
 ## 默认装配
 
-下表说明 Framework 自身的基础装配；[官方插件包](plugins.md#插件包)会同时安装其他官方插件。
+下表说明 Framework 自身的基础装配；[官方能力包](plugins.md#能力包组合)会同时安装其他官方插件。
 
 | 配置项 | 默认行为 | 显式配置场景 |
 |---|---|---|

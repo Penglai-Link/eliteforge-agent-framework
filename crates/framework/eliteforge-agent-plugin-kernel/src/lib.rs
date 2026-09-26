@@ -10,7 +10,6 @@
 mod container;
 mod error;
 mod extensions;
-mod pack;
 mod resources;
 mod services;
 
@@ -21,6 +20,5 @@ pub use container::{
 };
 pub use error::PluginError;
 pub use extensions::{ExtensionMultiplicity, ExtensionPoint};
-pub use pack::{PluginPack, PluginPackBuilder};
 pub use resources::{ResourceScope, ShutdownReport};
 pub use services::ServiceRegistry;

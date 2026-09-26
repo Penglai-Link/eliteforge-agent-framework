@@ -20,3 +20,7 @@ mod model_execution;
 pub use model_execution::TranscriptProjection;
 #[cfg(test)]
 mod tests;
+
+mod capability_state;
+
+pub use eliteforge_agent_capability_runtime::*;

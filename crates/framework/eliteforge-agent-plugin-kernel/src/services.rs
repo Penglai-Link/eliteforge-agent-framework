@@ -9,11 +9,13 @@ use crate::{ExtensionPoint, PluginError};
 
 type ErasedService = Arc<dyn Any + Send + Sync>;
 
+#[derive(Clone)]
 struct Registration {
     plugin: String,
     service: ErasedService,
 }
 
+#[derive(Clone)]
 enum ServiceEntry {
     Unique(Registration),
     Contributions(Vec<Registration>),
@@ -25,7 +27,7 @@ enum ServiceEntry {
 /// Trait object services can be registered as `Arc<dyn MyService>`; retrieving
 /// one with `get::<Arc<dyn MyService>>()` returns `Arc<Arc<dyn MyService>>`.
 /// Registrations become immutable after container construction.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ServiceRegistry {
     entries: HashMap<TypeId, ServiceEntry>,
     extensions: ExtensionRegistry,
@@ -169,6 +171,38 @@ impl ServiceRegistry {
         self.extensions.register(plugin, value)
     }
 
+    pub(crate) fn detach(&mut self, owners: &std::collections::HashSet<String>) -> Self {
+        let mut selected = Self::default();
+        for (key, entry) in std::mem::take(&mut self.entries) {
+            match entry {
+                ServiceEntry::Unique(registration) => {
+                    if owners.contains(&registration.plugin) {
+                        selected
+                            .entries
+                            .insert(key, ServiceEntry::Unique(registration));
+                    } else {
+                        self.entries.insert(key, ServiceEntry::Unique(registration));
+                    }
+                }
+                ServiceEntry::Contributions(registrations) => {
+                    let (retained, remaining): (Vec<_>, Vec<_>) = registrations
+                        .into_iter()
+                        .partition(|r| owners.contains(&r.plugin));
+                    if !retained.is_empty() {
+                        selected
+                            .entries
+                            .insert(key, ServiceEntry::Contributions(retained));
+                    }
+                    if !remaining.is_empty() {
+                        self.entries
+                            .insert(key, ServiceEntry::Contributions(remaining));
+                    }
+                }
+            }
+        }
+        selected.extensions = self.extensions.detach(owners);
+        selected
+    }
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.extensions.clear();

@@ -169,15 +169,16 @@ impl ToolDescriptor {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
     pub options: crate::GenerationOptions,
     pub messages: Vec<Message>,
     pub tools: Vec<ToolDescriptor>,
+    #[serde(skip)]
     pub extensions: Extensions,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub content: crate::Content,
     pub structured: Option<Value>,
@@ -201,8 +202,10 @@ impl ChatResponse {
     }
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum ModelError {
+    #[error("operation result is unknown: {0}")]
+    Indeterminate(String),
     #[error(transparent)]
     State(#[from] crate::StateError),
     #[error("transient model error: {0}")]
@@ -213,7 +216,7 @@ pub enum ModelError {
     Fatal(String),
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum ToolError {
     #[error("{0}")]
     Failed(String),
@@ -221,8 +224,10 @@ pub enum ToolError {
     Indeterminate(String),
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum ConversationError {
+    #[error("operation result is unknown: {0}")]
+    Indeterminate(String),
     #[error("conversation budget exceeded: {0}")]
     BudgetExceeded(String),
     #[error("conversation revision conflict")]
@@ -231,8 +236,10 @@ pub enum ConversationError {
     Other(String),
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum ContextError {
+    #[error("operation result is unknown: {0}")]
+    Indeterminate(String),
     #[error("context budget exceeded: {0}")]
     BudgetExceeded(String),
     #[error("invalid context history: {0}")]
@@ -243,6 +250,8 @@ pub enum ContextError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
+    #[error("operation result is unknown: {0}")]
+    Indeterminate(String),
     #[error(transparent)]
     Plugin(#[from] eliteforge_agent_plugin_kernel::PluginError),
     #[error(transparent)]
@@ -606,6 +615,9 @@ pub trait AgentLoop: Send + Sync {
     fn validate_services(&self, _services: &AgentServices) -> Result<(), AgentError> {
         Ok(())
     }
+    async fn validate_services_async(&self, services: &AgentServices) -> Result<(), AgentError> {
+        self.validate_services(services)
+    }
     fn supports_resume(&self) -> bool {
         false
     }
@@ -763,6 +775,7 @@ pub trait ToolProvider: Send + Sync {
 /// Services frozen at build time. Each run owns all its mutable execution state.
 #[derive(Clone)]
 pub struct AgentServices {
+    pub extension_router: Option<Arc<dyn ExtensionRouter>>,
     pub operations: Arc<dyn crate::ModelOperations>,
     pub interactions: Option<crate::InteractionManager>,
     pub lifecycle_hooks: Vec<Arc<dyn crate::RunLifecycleHook>>,
@@ -777,6 +790,33 @@ pub struct AgentServices {
     pub tool_policy: Vec<Arc<dyn crate::ToolPolicy>>,
     pub tools: Vec<Arc<dyn ToolProvider>>,
     pub context: Vec<Arc<dyn ContextProvider>>,
+}
+
+/// Stable custom contracts expose data, never Any/TypeId or borrowed service objects.
+#[async_trait]
+pub trait ExtensionRouter: Send + Sync {
+    async fn call(
+        &self,
+        source: &str,
+        target: &str,
+        operation: &str,
+        params: Value,
+        run: &RunContext,
+        services: &AgentServices,
+    ) -> Result<Value, AgentError>;
+}
+
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ScopedAgentServices(pub Arc<AgentServices>);
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ScopedRunContext(pub RunContext);
+/// W3C propagation data only. Plugin logs, metrics and spans remain local.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceContext {
+    pub traceparent: String,
+    pub tracestate: String,
 }
 
 #[derive(Clone)]

@@ -9,9 +9,10 @@ use std::sync::{
 use tokio::sync::Notify;
 
 struct MediaEstimator;
+#[async_trait]
 impl TokenEstimator for MediaEstimator {
-    fn message(&self, _: &ModelRef, message: &Message) -> usize {
-        4 + message
+    async fn message(&self, _: &ModelRef, message: &Message) -> Result<usize, ModelError> {
+        Ok(4 + message
             .content
             .0
             .iter()
@@ -20,7 +21,7 @@ impl TokenEstimator for MediaEstimator {
                 ContentBlock::Text { text } => text.len().div_ceil(4),
                 _ => 50,
             })
-            .sum::<usize>()
+            .sum::<usize>())
     }
 }
 struct ModalityRouter;

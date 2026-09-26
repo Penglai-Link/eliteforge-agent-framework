@@ -76,7 +76,7 @@ impl ContextContributor for MemoryContributor {
                 let message = Message::user(Content(vec![ContentBlock::Json {
                     value: json!({"memory": entry}),
                 }]));
-                let tokens = input.estimator.message(input.model, &message);
+                let tokens = input.estimator.message(input.model, &message).await?;
                 if tokens <= remaining {
                     remaining -= tokens;
                     versions.push((entry.value.id, entry.version));
@@ -220,6 +220,9 @@ impl Tool for MemoryTool {
             }),
             Err(error) => {
                 let code = match error {
+                    MemoryError::Indeterminate(message) => {
+                        return Err(ToolError::Indeterminate(message));
+                    }
                     MemoryError::NotFound => "memory_not_found",
                     MemoryError::Conflict => "memory_conflict",
                     MemoryError::Invalid(_) => "memory_invalid",

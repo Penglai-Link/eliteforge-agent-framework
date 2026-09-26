@@ -586,9 +586,10 @@ async fn auxiliary_failure_keeps_typed_model_error_instead_of_flattening_it() {
 }
 
 struct DoubleEstimate;
+#[async_trait]
 impl TokenEstimator for DoubleEstimate {
-    fn message(&self, _: &ModelRef, message: &Message) -> usize {
-        estimate_message_tokens(message).saturating_mul(2)
+    async fn message(&self, _: &ModelRef, message: &Message) -> Result<usize, ModelError> {
+        Ok(estimate_message_tokens(message).saturating_mul(2))
     }
 }
 struct SmallSummaryWindow;
@@ -650,14 +651,17 @@ async fn summary_packing_uses_its_connection_estimator_and_output_reservation() 
         .unwrap();
     agent.run(RunRequest::new("small", "unused")).await.unwrap();
     {
-        let calls = provider.requests.lock().unwrap();
+        let calls = provider.requests.lock().unwrap().clone();
         assert!(
             calls.len() > 1,
             "summary-model capacity requires multiple bounded calls"
         );
         for (_, request) in calls.iter() {
             assert!(
-                DoubleEstimate.request(&ModelRef::new("shared", "summary"), request)
+                DoubleEstimate
+                    .request(&ModelRef::new("shared", "summary"), request)
+                    .await
+                    .unwrap()
                     + request.options.max_output_tokens.unwrap() as usize
                     <= 5000
             );

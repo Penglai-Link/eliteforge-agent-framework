@@ -11,13 +11,13 @@ use std::{
 pub const INSTRUCTIONS_BLOCK: &str = "framework.instructions";
 pub const HISTORY_BLOCK: &str = "framework.history";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextTrust {
     Instruction,
     Data,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ContextBlock {
     pub id: String,
     pub messages: Vec<Message>,
@@ -120,16 +120,18 @@ impl ContextBlockConfig {
 #[derive(Clone, Default)]
 pub struct ContextLayout(pub Vec<ContextBlockConfig>);
 #[crate::extension_point(single, adapter = crate::ContextBudgetPolicyPlugin)]
+#[async_trait]
 pub trait ContextBudgetPolicy: Send + Sync {
-    fn allocate(
+    async fn allocate(
         &self,
         blocks: &[ContextBlockConfig],
         available: ContextBudget,
     ) -> Result<Vec<ContextBudget>, AgentError>;
 }
 pub struct IndependentBlockBudget;
+#[async_trait]
 impl ContextBudgetPolicy for IndependentBlockBudget {
-    fn allocate(
+    async fn allocate(
         &self,
         blocks: &[ContextBlockConfig],
         available: ContextBudget,
@@ -200,7 +202,8 @@ impl ContextReducer for KeepContext {
             input.budget,
             input.model,
             input.estimator,
-        )?;
+        )
+        .await?;
         Ok(input.block.messages.clone())
     }
 }
@@ -209,7 +212,7 @@ pub struct RecentConversation;
 impl ContextReducer for RecentConversation {
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
         let mut result = input.block.messages.clone();
-        trim_context_with(&mut result, input.budget, input.model, input.estimator)?;
+        trim_context_with(&mut result, input.budget, input.model, input.estimator).await?;
         for _ in 0..input.overflow_recoveries {
             if !remove_oldest_turn(&mut result) {
                 return Err(context_budget_error(
@@ -237,7 +240,7 @@ impl ContextReducer for SelectContextEntries {
         let mut result = Vec::new();
         let mut tokens = 0usize;
         for message in &input.block.messages {
-            let size = input.estimator.message(input.model, message);
+            let size = input.estimator.message(input.model, message).await?;
             if result.len() < input.budget.max_messages
                 && tokens.saturating_add(size) <= input.budget.max_tokens
             {
@@ -311,6 +314,7 @@ impl ContextFailureReport {
         }
     }
 }
+#[derive(Serialize, Deserialize)]
 pub struct ContextWindow {
     pub messages: Vec<Message>,
     pub report: ContextAssemblyReport,
@@ -433,7 +437,8 @@ impl ContextAssembler for DefaultContextAssembler {
         let protocol = input
             .estimator
             .tools(input.model, input.tools)
-            .saturating_add(input.estimator.options(input.model, input.options));
+            .await?
+            .saturating_add(input.estimator.options(input.model, input.options).await?);
         let available = ContextBudget {
             max_tokens: input
                 .budget
@@ -445,7 +450,7 @@ impl ContextAssembler for DefaultContextAssembler {
         // Simple Agents have two known sources. Their quotas are fixed once,
         // before reduction. Explicit multi-block layouts always own their quotas.
         let layout = if self.layout.0.is_empty() {
-            let fixed = context_tokens(input.instructions, input.model, input.estimator);
+            let fixed = context_tokens(input.instructions, input.model, input.estimator).await?;
             vec![
                 ContextBlockConfig::new(
                     INSTRUCTIONS_BLOCK,
@@ -473,7 +478,7 @@ impl ContextAssembler for DefaultContextAssembler {
         } else {
             self.layout.0.clone()
         };
-        let allocations = self.policy.allocate(&layout, available)?;
+        let allocations = self.policy.allocate(&layout, available).await?;
         if allocations.len() != layout.len()
             || allocations
                 .iter()
@@ -542,11 +547,8 @@ impl ContextAssembler for DefaultContextAssembler {
                     ));
                 }
                 report.source_version = block.source_version.clone();
-                report.original_tokens = Some(context_tokens(
-                    &block.messages,
-                    input.model,
-                    input.estimator,
-                ));
+                report.original_tokens =
+                    Some(context_tokens(&block.messages, input.model, input.estimator).await?);
                 let reduction = ContextReductionInput {
                     block: &block,
                     budget,
@@ -563,7 +565,7 @@ impl ContextAssembler for DefaultContextAssembler {
                     },
                 };
                 let output = config.reducer.reduce(&reduction).await?;
-                ensure_context_fits(&output, budget, input.model, input.estimator)?;
+                ensure_context_fits(&output, budget, input.model, input.estimator).await?;
                 validate_messages(&output).map_err(ContextError::from)?;
                 if config.id == INSTRUCTIONS_BLOCK && output != input.instructions {
                     return Err(AgentError::InvalidConfiguration(
@@ -583,7 +585,7 @@ impl ContextAssembler for DefaultContextAssembler {
                         self.max_source_bytes,
                     )?;
                 }
-                report.final_tokens = context_tokens(&output, input.model, input.estimator);
+                report.final_tokens = context_tokens(&output, input.model, input.estimator).await?;
                 if output != block.messages {
                     report.outcome = ContextBlockOutcome::Reduced;
                 }
@@ -629,10 +631,11 @@ impl ContextAssembler for DefaultContextAssembler {
             }
             reports.push(report);
         }
-        ensure_context_fits(&messages, available, input.model, input.estimator)?;
+        ensure_context_fits(&messages, available, input.model, input.estimator).await?;
         validate_messages(&messages).map_err(ContextError::from)?;
-        let total =
-            context_tokens(&messages, input.model, input.estimator).saturating_add(protocol);
+        let total = context_tokens(&messages, input.model, input.estimator)
+            .await?
+            .saturating_add(protocol);
         Ok(ContextWindow {
             messages,
             report: ContextAssemblyReport {
@@ -719,23 +722,25 @@ fn validate_history_projection(source: &[Message], output: &[Message]) -> Result
     }
     Ok(())
 }
-pub fn context_tokens(
+pub async fn context_tokens(
     messages: &[Message],
     model: &ModelRef,
     estimator: &dyn TokenEstimator,
-) -> usize {
-    messages
-        .iter()
-        .fold(0usize, |n, m| n.saturating_add(estimator.message(model, m)))
+) -> Result<usize, AgentError> {
+    let mut total = 0usize;
+    for message in messages {
+        total = total.saturating_add(estimator.message(model, message).await?);
+    }
+    Ok(total)
 }
-pub fn ensure_context_fits(
+pub async fn ensure_context_fits(
     messages: &[Message],
     budget: ContextBudget,
     model: &ModelRef,
     estimator: &dyn TokenEstimator,
 ) -> Result<(), AgentError> {
     if messages.len() > budget.max_messages
-        || context_tokens(messages, model, estimator) > budget.max_tokens
+        || context_tokens(messages, model, estimator).await? > budget.max_tokens
     {
         return Err(context_budget_error("context block exceeds its quota"));
     }
@@ -745,7 +750,7 @@ fn context_budget_error(message: &str) -> AgentError {
     ContextError::BudgetExceeded(message.into()).into()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct ContextBudget {
     pub max_messages: usize,
     pub max_tokens: usize,
@@ -775,22 +780,21 @@ pub fn trim_context(
     Ok(())
 }
 
-pub fn trim_context_with(
+pub async fn trim_context_with(
     messages: &mut Vec<Message>,
     budget: ContextBudget,
     model: &ModelRef,
     estimator: &dyn TokenEstimator,
-) -> Result<(), ContextError> {
+) -> Result<(), AgentError> {
     while messages.len() > budget.max_messages
-        || messages.iter().fold(0usize, |sum, message| {
-            sum.saturating_add(estimator.message(model, message))
-        }) > budget.max_tokens
+        || context_tokens(messages, model, estimator).await? > budget.max_tokens
     {
         if !remove_oldest_turn(messages) {
             return Err(ContextError::BudgetExceeded(
                 "fixed instructions and newest turn exceed the model-specific context budget"
                     .into(),
-            ));
+            )
+            .into());
         }
     }
     Ok(())

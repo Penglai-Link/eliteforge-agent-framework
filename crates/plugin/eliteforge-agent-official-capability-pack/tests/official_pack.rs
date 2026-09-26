@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_official_plugin_pack::{
-    EliteForgeOfficialPluginPack, agui::AgUiStream, human::AskUserPresentation,
+use eliteforge_agent_official_capability_pack::{
+    EliteForgeOfficialCapabilityPack, agui::AgUiStream, human::AskUserPresentation,
     mcp::DiscoverMcpTools, model::GenaiPlugin, storage::SqliteStoragePlugin,
 };
 use serde_json::{Value, json};
@@ -57,13 +57,13 @@ async fn official_pack_supports_agent_output_questions_and_persistent_resume() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("agent.sqlite");
     let pack = || {
-        EliteForgeOfficialPluginPack::new(&path)
+        EliteForgeOfficialCapabilityPack::new(&path)
             .without_skills()
             .model(ChatModelPlugin::new(AskThenReply))
     };
     let builder = AgentBuilder::new()
         .default_models(false)
-        .plugin_pack(pack());
+        .capability_pack(pack());
     assert!(
         !path.exists(),
         "configuring the pack must not open the database"
@@ -87,7 +87,7 @@ async fn official_pack_supports_agent_output_questions_and_persistent_resume() {
 
     let agent = AgentBuilder::new()
         .default_models(false)
-        .plugin_pack(pack())
+        .capability_pack(pack())
         .build()
         .await
         .unwrap();
@@ -146,8 +146,8 @@ async fn pack_installs_explicit_genai_even_when_framework_auto_models_are_disabl
     let directory = tempfile::tempdir().unwrap();
     let agent = AgentBuilder::new()
         .default_models(false)
-        .plugin_pack(
-            EliteForgeOfficialPluginPack::new(directory.path().join("agent.sqlite"))
+        .capability_pack(
+            EliteForgeOfficialCapabilityPack::new(directory.path().join("agent.sqlite"))
                 .model(GenaiPlugin::new("configured-chat").connection("gateway")),
         )
         .build()
@@ -162,22 +162,22 @@ async fn pack_installs_explicit_genai_even_when_framework_auto_models_are_disabl
 #[test]
 fn official_pack_registers_skills_by_default_and_can_disable_them() {
     let directory = tempfile::tempdir().unwrap();
-    let plugin_ids = |pack: EliteForgeOfficialPluginPack| {
-        pack.into_plugins()
+    let plugin_ids = |pack: EliteForgeOfficialCapabilityPack| {
+        pack.plugins()
             .into_iter()
             .map(|plugin| plugin.id().to_owned())
             .collect::<Vec<_>>()
     };
 
     assert!(
-        plugin_ids(EliteForgeOfficialPluginPack::new(
+        plugin_ids(EliteForgeOfficialCapabilityPack::new(
             directory.path().join("default.sqlite"),
         ))
         .iter()
         .any(|id| id == "skills.default")
     );
     assert!(
-        plugin_ids(EliteForgeOfficialPluginPack::new(
+        plugin_ids(EliteForgeOfficialCapabilityPack::new(
             directory.path().join("agent-tools.sqlite"),
         ))
         .iter()
@@ -185,7 +185,7 @@ fn official_pack_registers_skills_by_default_and_can_disable_them() {
     );
     assert!(
         !plugin_ids(
-            EliteForgeOfficialPluginPack::new(directory.path().join("disabled.sqlite"))
+            EliteForgeOfficialCapabilityPack::new(directory.path().join("disabled.sqlite"))
                 .without_skills(),
         )
         .iter()
@@ -193,7 +193,7 @@ fn official_pack_registers_skills_by_default_and_can_disable_them() {
     );
     assert!(
         !plugin_ids(
-            EliteForgeOfficialPluginPack::new(directory.path().join("disabled-agents.sqlite"))
+            EliteForgeOfficialCapabilityPack::new(directory.path().join("disabled-agents.sqlite"))
                 .agent_tools(false),
         )
         .iter()
@@ -222,8 +222,8 @@ async fn defaults_can_be_explicitly_replaced_or_disabled() {
     let replacement = directory.path().join("replacement.sqlite");
     let agent = AgentBuilder::new()
         .default_models(false)
-        .plugin_pack(
-            EliteForgeOfficialPluginPack::new(&original)
+        .capability_pack(
+            EliteForgeOfficialCapabilityPack::new(&original)
                 .without_model()
                 .without_agui()
                 .human_interaction(false)

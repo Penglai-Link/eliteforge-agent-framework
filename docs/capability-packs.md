@@ -3,8 +3,7 @@
 能力包是应用选择业务能力的入口。一个能力包可以同时带上接口实现、普通插件、工具、模型绑定和
 Skills 资源。业务开发通常只需要做三件事：**声明接口、实现接口、让应用选择能力包**。
 
-`CapabilityPack` 和 `PluginPack` 可以并存。前者负责按包 ID 发现和创建声明式成员；后者仍适合
-把已经创建好的插件组合起来。两者最终进入同一个插件依赖图和同一套生命周期。
+`CapabilityPack` 同时支持声明式成员、插件工厂与已创建插件。独立的插件包概念已经移除；所有成员进入同一个依赖图和生命周期。动态安装、进程与页面见[动态能力包](dynamic-capability-packs.md)。
 
 ## 最小扩展点
 
@@ -280,9 +279,9 @@ flowchart LR
 | `#[capability_factory]` | 需要包配置、工具描述、模型连接/路由、配置对象或任意普通 Plugin |
 | `CapabilityPackBuilder::skills(...)` | 内嵌或目录型 Skills 资源 |
 | `#[capability] impl SkillProvider` | 自定义、非文件系统的 Skills 来源 |
-| `Plugin` / `PluginPack` | 已有手工装配代码、复杂异步资源或官方插件组合 |
+| `Plugin` / `CapabilityPack` | 已有手工装配代码、复杂异步资源或官方插件组合 |
 
-`PluginPack`、手工 `ContextPlugin` / `ToolProviderPlugin`、`SkillsPlugin` 和旧的能力声明都继续可用。
+`CapabilityPack`、手工 `ContextPlugin` / `ToolProviderPlugin`、`SkillsPlugin` 和旧的能力声明都继续可用。
 新的声明不会自动改变工具权限、模型发现结果或操作系统隔离；这些仍由应用的配置、策略和宿主负责。
 
 相关文档：[插件开发指南](plugins.md)、[扩展点参考](plugin-extension-reference.md)、

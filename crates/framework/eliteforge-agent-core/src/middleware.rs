@@ -190,10 +190,12 @@ impl ModelNext<'_> {
                 self.descriptor,
                 self.target,
                 self.estimator,
-            )?;
+            )
+            .await?;
             let input_tokens = self
                 .estimator
                 .request(self.target, &request)
+                .await?
                 .min(u64::MAX as usize) as u64;
             let (mut permit, output_tokens) = crate::budget::UsagePermit::reserve(
                 self.run.usage.clone(),
@@ -211,10 +213,12 @@ impl ModelNext<'_> {
                 self.descriptor,
                 self.target,
                 self.estimator,
-            )?;
+            )
+            .await?;
             let final_input_tokens = self
                 .estimator
                 .request(self.target, &request)
+                .await?
                 .min(u64::MAX as usize) as u64;
             if final_input_tokens > input_tokens {
                 return Err(ModelError::Fatal(
@@ -236,6 +240,9 @@ impl ModelNext<'_> {
             let options = request.options.clone();
             self.run.persist_budget().await?;
             self.run.emit(AgentEvent::ModelDispatched(report)).await;
+            request
+                .extensions
+                .insert(crate::ScopedRunContext(self.run.clone()));
             let response = self
                 .provider
                 .generate(&self.target.model, request, self.stream)
@@ -273,7 +280,7 @@ impl ModelNext<'_> {
 }
 
 #[doc(hidden)]
-pub fn validate_model_request(
+pub async fn validate_model_request(
     request: &ChatRequest,
     budget: ContextBudget,
     descriptor: &ModelDescriptor,
@@ -286,7 +293,7 @@ pub fn validate_model_request(
         .map_err(|e| ModelError::Fatal(e.to_string()))?;
     crate::conversation::validate_messages(&request.messages)
         .map_err(|e| ModelError::Fatal(e.to_string()))?;
-    let tokens = estimator.request(model, request);
+    let tokens = estimator.request(model, request).await?;
     if request.messages.len() > budget.max_messages || tokens > budget.max_tokens {
         return Err(ModelError::ContextOverflow(
             "composed model request exceeds budget".into(),

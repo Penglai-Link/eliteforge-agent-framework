@@ -1,0 +1,8 @@
+<!doctype html><html><meta charset="utf-8"><title>独立插件页面</title><style>body{font:16px system-ui;padding:24px}body.dark{background:#20242c;color:white}button{font:inherit;padding:8px}pre{white-space:pre-wrap}</style><h2 id="title">插件自己的页面</h2><p id="context"></p><button id="call" disabled>调用本插件后端</button><pre id="result"></pre><pre id="topic"></pre>
+<script type="module">
+import{CapabilityPage}from'./sdk/page.js';
+const page=await CapabilityPage.connect();page.onContext(context=>{document.body.className=context.theme;document.querySelector('#title').textContent=context.language==='zh-CN'?'插件自己的页面':'Independent plugin page';document.querySelector('#context').textContent=`${context.theme} / ${context.language}`;});
+page.subscribe('chart',data=>document.querySelector('#topic').textContent=JSON.stringify(data));
+document.querySelector('#call').disabled=false;document.querySelector('#call').onclick=async()=>{try{document.querySelector('#result').textContent=JSON.stringify(await page.call('echo',{message:'page-only data'}));}catch(error){document.querySelector('#result').textContent=String(error);}};
+window.addEventListener('pagehide',()=>page.close());
+</script></html>

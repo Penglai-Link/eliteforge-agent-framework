@@ -35,11 +35,13 @@ pub trait ExtensionPoint: Send + Sync {
     fn name() -> &'static str;
 }
 
+#[derive(Clone)]
 struct ExtensionRegistration {
     plugin: String,
     value: Arc<dyn Any + Send + Sync>,
 }
 
+#[derive(Clone)]
 enum ExtensionEntry {
     Single(ExtensionRegistration),
     Multiple(Vec<ExtensionRegistration>),
@@ -47,7 +49,7 @@ enum ExtensionEntry {
 
 /// Internal storage for interface implementations declared with
 /// `#[extension_point]`.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct ExtensionRegistry {
     entries: HashMap<TypeId, ExtensionEntry>,
 }
@@ -156,6 +158,38 @@ impl ExtensionRegistry {
         }
     }
 
+    pub(crate) fn detach(&mut self, owners: &std::collections::HashSet<String>) -> Self {
+        let mut selected = Self::default();
+        for (key, entry) in std::mem::take(&mut self.entries) {
+            match entry {
+                ExtensionEntry::Single(registration) => {
+                    if owners.contains(&registration.plugin) {
+                        selected
+                            .entries
+                            .insert(key, ExtensionEntry::Single(registration));
+                    } else {
+                        self.entries
+                            .insert(key, ExtensionEntry::Single(registration));
+                    }
+                }
+                ExtensionEntry::Multiple(registrations) => {
+                    let (retained, remaining): (Vec<_>, Vec<_>) = registrations
+                        .into_iter()
+                        .partition(|r| owners.contains(&r.plugin));
+                    if !retained.is_empty() {
+                        selected
+                            .entries
+                            .insert(key, ExtensionEntry::Multiple(retained));
+                    }
+                    if !remaining.is_empty() {
+                        self.entries
+                            .insert(key, ExtensionEntry::Multiple(remaining));
+                    }
+                }
+            }
+        }
+        selected
+    }
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
     }

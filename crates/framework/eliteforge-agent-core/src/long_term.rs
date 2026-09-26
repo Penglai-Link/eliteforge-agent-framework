@@ -26,7 +26,7 @@ pub struct MemoryEntry {
     pub updated_at_ms: u64,
     pub value: MemoryWrite,
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryQuery {
     pub text: String,
     pub limit: usize,
@@ -42,8 +42,10 @@ impl MemoryQuery {
         }
     }
 }
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum MemoryError {
+    #[error("operation result is unknown: {0}")]
+    Indeterminate(String),
     #[error("memory entry does not exist or has expired")]
     NotFound,
     #[error("memory version conflict")]

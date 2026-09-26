@@ -37,26 +37,48 @@ impl ShutdownReport {
 /// then register graceful shutdown. Drop cannot await remote acknowledgements.
 #[derive(Default)]
 pub struct ResourceScope {
-    callbacks: Vec<Cleanup>,
+    callbacks: Vec<(String, Cleanup)>,
+    owner: String,
     report: ShutdownReport,
 }
 impl ResourceScope {
     pub fn on_cleanup(&mut self, callback: impl FnOnce() + Send + 'static) {
-        self.callbacks.push(Cleanup::Sync(Box::new(callback)));
+        self.callbacks
+            .push((self.owner.clone(), Cleanup::Sync(Box::new(callback))));
     }
     pub fn on_shutdown<F, Fut>(&mut self, callback: F)
     where
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = Result<(), String>> + Send + 'static,
     {
-        self.callbacks
-            .push(Cleanup::Async(Box::new(|| Box::pin(callback()))));
+        self.callbacks.push((
+            self.owner.clone(),
+            Cleanup::Async(Box::new(|| Box::pin(callback()))),
+        ));
+    }
+    pub(crate) fn set_owner(&mut self, owner: &str) {
+        self.owner = owner.into();
+    }
+    pub(crate) fn detach(&mut self, owners: &std::collections::HashSet<String>) -> Self {
+        let (retained, remaining) = std::mem::take(&mut self.callbacks)
+            .into_iter()
+            .partition(|(owner, _)| owners.contains(owner));
+        self.callbacks = remaining;
+        Self {
+            callbacks: retained,
+            owner: String::new(),
+            report: ShutdownReport::default(),
+        }
+    }
+    pub(crate) fn prepend(&mut self, mut retained: Self) {
+        retained.callbacks.append(&mut self.callbacks);
+        self.callbacks = std::mem::take(&mut retained.callbacks);
     }
     /// The timeout applies to each async callback. A failure never skips later
     /// callbacks. If this future is dropped, unpolled callbacks remain owned and
     /// synchronous fallbacks still run when the scope is dropped or closed.
     pub async fn close_async(&mut self, timeout: Duration) -> ShutdownReport {
-        while let Some(callback) = self.callbacks.pop() {
+        while let Some((_, callback)) = self.callbacks.pop() {
             match callback {
                 Cleanup::Sync(callback) => {
                     if catch_unwind(AssertUnwindSafe(callback)).is_err() {
@@ -77,7 +99,7 @@ impl ResourceScope {
         self.report.clone()
     }
     pub fn close(&mut self) -> ShutdownReport {
-        while let Some(callback) = self.callbacks.pop() {
+        while let Some((_, callback)) = self.callbacks.pop() {
             if let Cleanup::Sync(callback) = callback
                 && catch_unwind(AssertUnwindSafe(callback)).is_err()
             {

@@ -1,9 +1,12 @@
 [workspace]
 members = [
+    "crates/tools/eliteforge-agent-capability-dev-host",
+    "crates/framework/eliteforge-agent-capability-runtime",
     "crates/framework/eliteforge-agent-capability-macros",
     "crates/framework/eliteforge-agent-capability-test-fixture",
     "crates/framework/eliteforge-agent-capability-tools",
     "crates/framework/eliteforge-agent-context",
+    "crates/framework/eliteforge-agent-context-contracts",
     "crates/framework/eliteforge-agent-core",
     "crates/framework/eliteforge-agent-framework",
     "crates/framework/eliteforge-agent-memory",
@@ -14,7 +17,7 @@ members = [
     "crates/plugin/eliteforge-agent-official-plugin-agui",
     "crates/plugin/eliteforge-agent-official-plugin-model-genai",
     "crates/plugin/eliteforge-agent-official-plugin-otel",
-    "crates/plugin/eliteforge-agent-official-plugin-pack",
+    "crates/plugin/eliteforge-agent-official-capability-pack",
     "crates/plugin/eliteforge-agent-official-plugin-skills",
     "crates/plugin/eliteforge-agent-official-plugin-storage-sqlite",
     "crates/plugin/eliteforge-agent-official-plugin-tools-agents",

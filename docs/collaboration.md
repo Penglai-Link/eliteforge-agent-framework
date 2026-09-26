@@ -81,15 +81,15 @@ Thread 与父运行不是嵌套关系，因此映射为 `framework.thread.*` CUS
 
 ## 启用
 
-官方插件包默认安装协作工具；不需要时可以关闭：
+官方能力包默认安装协作工具；不需要时可以关闭：
 
 ```rust
 use eliteforge_agent_framework::AgentBuilder;
-use eliteforge_agent_official_plugin_pack::EliteForgeOfficialPluginPack;
+use eliteforge_agent_official_capability_pack::EliteForgeOfficialCapabilityPack;
 
 let agent = AgentBuilder::new()
-    .plugin_pack(
-        EliteForgeOfficialPluginPack::new("agent.sqlite")
+    .capability_pack(
+        EliteForgeOfficialCapabilityPack::new("agent.sqlite")
             .agent_tools(true),
     )
     .build()

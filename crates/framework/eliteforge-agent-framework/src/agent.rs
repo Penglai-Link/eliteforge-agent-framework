@@ -14,8 +14,69 @@ use tokio_util::sync::CancellationToken;
 
 use crate::*;
 
+struct BoundCapabilityPack {
+    original: Arc<dyn CapabilityPack>,
+    included: Vec<Arc<dyn CapabilityPack>>,
+}
+impl CapabilityPack for BoundCapabilityPack {
+    fn id(&self) -> &str {
+        self.original.id()
+    }
+    fn configuration(&self) -> &CapabilityConfig {
+        self.original.configuration()
+    }
+    fn preflight(&self) -> Result<(), AgentError> {
+        self.original.preflight()
+    }
+    fn requires_skills_runtime(&self) -> bool {
+        self.original.requires_skills_runtime()
+    }
+    fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
+        self.original.plugins()
+    }
+    fn rebuildable(&self) -> bool {
+        self.original.rebuildable()
+    }
+    fn retained_plugins(&self) -> Vec<Arc<dyn Plugin>> {
+        self.original.retained_plugins()
+    }
+    fn included_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
+        self.included.clone()
+    }
+    fn skill_sources(&self) -> Vec<CapabilitySkillSource> {
+        self.original.skill_sources()
+    }
+    fn for_agent_scope(&self, scope: &str) -> Option<Arc<dyn CapabilityPack>> {
+        Some(Arc::new(Self {
+            original: self
+                .original
+                .for_agent_scope(scope)
+                .unwrap_or_else(|| self.original.clone()),
+            included: self.included.clone(),
+        }))
+    }
+    fn lock_reconfiguration(&self) -> Result<Box<dyn Send>, AgentError> {
+        self.original.lock_reconfiguration()
+    }
+    fn reconfiguration_blockers(&self) -> Result<Vec<String>, AgentError> {
+        self.original.reconfiguration_blockers()
+    }
+    fn version_bindings(&self) -> Vec<CapabilityVersionBinding> {
+        self.original.version_bindings()
+    }
+    fn protect_task(&self, run: RunId) -> futures::future::BoxFuture<'_, Result<(), AgentError>> {
+        self.original.protect_task(run)
+    }
+    fn release_task(&self, run: RunId) -> futures::future::BoxFuture<'_, Result<(), AgentError>> {
+        self.original.release_task(run)
+    }
+}
+
+#[derive(Clone)]
 pub struct AgentBuilder {
     plugins: Vec<Arc<dyn Plugin>>,
+    factories: Vec<ConfiguredPluginFactory>,
+    scope: String,
     capability_packs: Vec<Arc<dyn CapabilityPack>>,
     capability_skills_root: Option<PathBuf>,
     default_models: bool,
@@ -24,6 +85,8 @@ impl Default for AgentBuilder {
     fn default() -> Self {
         Self {
             plugins: Vec::new(),
+            factories: Vec::new(),
+            scope: RunId::new_v4().to_string(),
             capability_packs: Vec::new(),
             capability_skills_root: None,
             default_models: true,
@@ -48,7 +111,7 @@ impl AgentBuilder {
         self
     }
 
-    /// Select a configured capability pack for this Agent's dependency graph.
+    /// Select a configured capability pack for this AgentGeneration's dependency graph.
     pub fn capability_pack(mut self, pack: impl CapabilityPack + 'static) -> Self {
         self.capability_packs.push(Arc::new(pack));
         self
@@ -61,14 +124,92 @@ impl AgentBuilder {
         self
     }
 
-    /// Add a group of configured plugins to this Agent's dependency graph.
-    /// Duplicate IDs and dependency errors are reported by `build`, before installation.
-    pub fn plugin_pack(mut self, pack: impl PluginPack) -> Self {
-        self.plugins.extend(pack.into_plugins());
+    pub fn plugin_factory(mut self, factory: ConfiguredPluginFactory) -> Self {
+        self.factories.push(factory);
         self
     }
-
+    pub fn capability_pack_arc(mut self, pack: Arc<dyn CapabilityPack>) -> Self {
+        self.capability_packs.push(pack);
+        self
+    }
+    fn bind_scope(&mut self, scope: String) -> Result<(), AgentError> {
+        selected_pack_closure(&self.capability_packs)?;
+        fn bind(
+            pack: &Arc<dyn CapabilityPack>,
+            scope: &str,
+            cache: &mut BTreeMap<String, Arc<dyn CapabilityPack>>,
+        ) -> Arc<dyn CapabilityPack> {
+            if let Some(bound) = cache.get(pack.id()) {
+                return bound.clone();
+            }
+            let original = pack.for_agent_scope(scope).unwrap_or_else(|| pack.clone());
+            let included = original
+                .included_packs()
+                .iter()
+                .map(|child| bind(child, scope, cache))
+                .collect();
+            let bound: Arc<dyn CapabilityPack> =
+                Arc::new(BoundCapabilityPack { original, included });
+            cache.insert(pack.id().to_owned(), bound.clone());
+            bound
+        }
+        let mut cache = BTreeMap::new();
+        self.capability_packs = self
+            .capability_packs
+            .iter()
+            .map(|pack| bind(pack, &scope, &mut cache))
+            .collect();
+        self.scope = scope;
+        Ok(())
+    }
     pub async fn build(mut self) -> Result<Agent, AgentError> {
+        self.bind_scope(RunId::new_v4().to_string())?;
+        self.preflight()?;
+        let blueprint = self.clone();
+        let generation = self.build_generation().await?;
+        Ok(Agent::from_generation(generation, blueprint))
+    }
+    fn all_explicit_plugins(&self) -> Result<Vec<Arc<dyn Plugin>>, AgentError> {
+        let mut plugins = self.plugins.clone();
+        for pack in selected_pack_closure(&self.capability_packs)?.values() {
+            plugins.extend(pack.plugins());
+        }
+        Ok(plugins)
+    }
+    fn retained_plugins(&self) -> Result<Vec<Arc<dyn Plugin>>, AgentError> {
+        let mut plugins = self.plugins.clone();
+        for pack in selected_pack_closure(&self.capability_packs)?.values() {
+            plugins.extend(pack.retained_plugins());
+        }
+        Ok(plugins)
+    }
+    fn preflight(&self) -> Result<(), AgentError> {
+        for pack in selected_pack_closure(&self.capability_packs)?.values() {
+            pack.preflight()?;
+        }
+        let mut plugins = self.plugins.clone();
+        plugins.extend(self.factories.iter().map(ConfiguredPluginFactory::plugin));
+        for pack in selected_pack_closure(&self.capability_packs)?.values() {
+            plugins.extend(pack.plugins());
+        }
+        validate_capability_packs_with_plugins(
+            &self.capability_packs,
+            &plugins,
+            &HashSet::from(["builtin.framework-defaults".into()]),
+        )
+    }
+    async fn build_generation(self) -> Result<AgentGeneration, AgentError> {
+        self.build_generation_reusing(None).await
+    }
+    async fn build_generation_reusing(
+        mut self,
+        retained: Option<&PluginContainer>,
+    ) -> Result<AgentGeneration, AgentError> {
+        self.plugins
+            .extend(self.factories.iter().map(ConfiguredPluginFactory::plugin));
+        for pack in selected_pack_closure(&self.capability_packs)?.values() {
+            self.plugins.extend(pack.plugins());
+        }
         let skill_sources = selected_capability_skill_sources(&self.capability_packs)?;
         let capability_skill_provider =
             selected_capability_requires_skills_runtime(&self.capability_packs)?;
@@ -127,8 +268,8 @@ impl AgentBuilder {
             after,
             default_models: self.default_models,
         }));
-        let mut container = PluginContainer::build(self.plugins).await?;
-        let (agent_loop, services, sinks, outputs) = match (|| -> Result<_, AgentError> {
+        let mut container = PluginContainer::build_reusing(self.plugins, retained).await?;
+        let (agent_loop, mut services, sinks, outputs) = match (|| -> Result<_, AgentError> {
             let registry = container.services();
             let agent_loop = registry
                 .get::<LoopService>()
@@ -217,6 +358,12 @@ impl AgentBuilder {
                 return Err(AgentError::MissingService("ChatModel"));
             }
             let services = AgentServices {
+                extension_router: Some(RemoteExtensionDirectory::new(
+                    registry
+                        .all::<RemoteExtensionService>()
+                        .iter()
+                        .map(|s| s.0.clone()),
+                )),
                 operations: Arc::new(crate::capability_execution::ModelClient::from_registry(
                     registry,
                 )?),
@@ -287,7 +434,7 @@ impl AgentBuilder {
             if agent_loop.requires_state() && services.state.is_none() {
                 return Err(AgentError::MissingService("StateStore"));
             }
-            agent_loop.validate_services(&services)?;
+
             let sinks = registry
                 .all::<EventService>()
                 .iter()
@@ -300,7 +447,7 @@ impl AgentBuilder {
                 .collect();
             let mut types = std::collections::HashSet::new();
             for output in &outputs {
-                if !types.insert(output.output_type()) {
+                if !types.insert(output.output_type()) && !output.aggregates() {
                     return Err(AgentError::InvalidConfiguration(
                         "multiple plugins provide the same run output type".into(),
                     ));
@@ -316,6 +463,36 @@ impl AgentBuilder {
                 return Err(error);
             }
         };
+        let packs: Vec<_> = selected_pack_closure(&self.capability_packs)?
+            .into_values()
+            .collect();
+        let versions: Vec<_> = packs
+            .iter()
+            .flat_map(|pack| pack.version_bindings())
+            .collect();
+        if !versions.is_empty()
+            && let Some(store) = services.state.take()
+        {
+            services.state = Some(Arc::new(crate::capability_state::CapabilityBoundState {
+                store,
+                packs,
+                versions,
+            }));
+        }
+        let validation = async {
+            agent_loop.validate_services_async(&services).await?;
+            if let Some(models) = &services.models {
+                models.validate_async().await?;
+            }
+            Ok::<_, AgentError>(())
+        }
+        .await;
+        if let Err(error) = validation {
+            container
+                .close_async(std::time::Duration::from_secs(5))
+                .await;
+            return Err(error);
+        }
         let operations = services.operations.clone();
         let inner = Arc::new(AgentInner {
             id: RunId::new_v4(),
@@ -343,7 +520,7 @@ impl AgentBuilder {
             threads: inner.threads.clone(),
             operations: operations.clone(),
         });
-        Ok(Agent {
+        Ok(AgentGeneration {
             operations,
             inner,
             collaboration,
@@ -377,22 +554,487 @@ struct AgentInner {
     threads: Arc<ThreadRegistry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssemblyOccupancy {
+    pub kind: String,
+    pub label: String,
+}
+#[derive(Debug, thiserror::Error)]
+pub enum ReconfigureError {
+    #[error("Agent is busy: {0:?}")]
+    Busy(Vec<AssemblyOccupancy>),
+    #[error("invalid reconfiguration: {0}")]
+    Invalid(String),
+    #[error("candidate failed; previous assembly restored: {0}")]
+    Restored(String),
+    #[error(
+        "candidate failed: {candidate}; restoring previous assembly also failed: {restoration}"
+    )]
+    Unavailable {
+        candidate: String,
+        restoration: String,
+    },
+}
+struct AssemblyState {
+    generation: AgentGeneration,
+    blueprint: AgentBuilder,
+    updating: bool,
+    closed: bool,
+    next: u64,
+    occupancy: BTreeMap<u64, AssemblyOccupancy>,
+}
+struct AgentAssembly {
+    state: Mutex<AssemblyState>,
+    transition: AsyncMutex<()>,
+}
+/// Stable Agent identity; all clones observe the same published assembly.
 #[derive(Clone)]
 pub struct Agent {
+    assembly: Arc<AgentAssembly>,
+    options: Option<ModelInvocationOptions>,
+}
+struct AdmissionLease {
+    assembly: Weak<AgentAssembly>,
+    id: u64,
+    released: AtomicBool,
+}
+impl AdmissionLease {
+    fn release(&self) {
+        if !self
+            .released
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+            && let Some(assembly) = self.assembly.upgrade()
+        {
+            assembly
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .occupancy
+                .remove(&self.id);
+        }
+    }
+}
+impl Drop for AdmissionLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+impl Agent {
+    fn from_generation(generation: AgentGeneration, blueprint: AgentBuilder) -> Self {
+        Self {
+            assembly: Arc::new(AgentAssembly {
+                state: Mutex::new(AssemblyState {
+                    generation,
+                    blueprint,
+                    updating: false,
+                    closed: false,
+                    next: 0,
+                    occupancy: BTreeMap::new(),
+                }),
+                transition: AsyncMutex::new(()),
+            }),
+            options: None,
+        }
+    }
+    fn snapshot(&self) -> AgentGeneration {
+        let generation = self
+            .assembly
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generation
+            .clone();
+        self.options.as_ref().map_or(generation.clone(), |options| {
+            generation.with_model_options(options.clone())
+        })
+    }
+    fn admit(
+        &self,
+        kind: &str,
+        label: &str,
+    ) -> Result<(AgentGeneration, Arc<AdmissionLease>), AgentError> {
+        let mut state = self
+            .assembly
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if state.closed || state.generation.is_closed() {
+            return Err(AgentError::Closed);
+        }
+        if state.updating {
+            return Err(AgentError::Run("Agent assembly update in progress".into()));
+        }
+        state.next += 1;
+        let id = state.next;
+        state.occupancy.insert(
+            id,
+            AssemblyOccupancy {
+                kind: kind.into(),
+                label: label.into(),
+            },
+        );
+        let generation = self
+            .options
+            .as_ref()
+            .map_or(state.generation.clone(), |options| {
+                state.generation.with_model_options(options.clone())
+            });
+        Ok((
+            generation,
+            Arc::new(AdmissionLease {
+                assembly: Arc::downgrade(&self.assembly),
+                id,
+                released: AtomicBool::new(false),
+            }),
+        ))
+    }
+    pub fn with_model_options(&self, options: ModelInvocationOptions) -> Self {
+        Self {
+            assembly: self.assembly.clone(),
+            options: Some(options),
+        }
+    }
+    pub fn start(&self, request: RunRequest) -> Result<RunHandle, AgentError> {
+        let (generation, lease) = self.admit("task", &request.session_id)?;
+        let mut handle = generation.start(request)?;
+        handle.occupancy = Some(lease);
+        Ok(handle)
+    }
+    pub fn start_with_output<T: Send + 'static>(
+        &self,
+        request: RunRequest,
+    ) -> Result<(RunHandle, T), AgentError> {
+        let (generation, lease) = self.admit("task", &request.session_id)?;
+        let (mut handle, output) = generation.start_with_output(request)?;
+        handle.occupancy = Some(lease);
+        Ok((handle, output))
+    }
+    pub async fn connect_realtime(
+        &self,
+        request: RealtimeRequest,
+    ) -> Result<RealtimeHandle, AgentError> {
+        let (generation, lease) = self.admit("realtime", "realtime session")?;
+        let mut handle = generation.connect_realtime(request).await?;
+        handle.occupancy = Some(lease);
+        Ok(handle)
+    }
+    pub async fn close_realtime(&self, handle: &RealtimeHandle) -> Result<(), AgentError> {
+        // Closing releases an existing resource and remains valid after Agent shutdown.
+        self.snapshot().close_realtime(handle).await?;
+        if let Some(occupancy) = &handle.occupancy {
+            occupancy.release();
+        }
+        Ok(())
+    }
+    pub fn reconfiguration_blockers(&self) -> Result<Vec<AssemblyOccupancy>, AgentError> {
+        let state = self
+            .assembly
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        Self::blockers(&state)
+    }
+    fn blockers(state: &AssemblyState) -> Result<Vec<AssemblyOccupancy>, AgentError> {
+        let mut blockers: Vec<_> = state.occupancy.values().cloned().collect();
+        let runs = state
+            .generation
+            .inner
+            .runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for id in runs.active.keys() {
+            blockers.push(AssemblyOccupancy {
+                kind: "task".into(),
+                label: id.to_string(),
+            });
+        }
+        for id in runs.operations.keys() {
+            blockers.push(AssemblyOccupancy {
+                kind: "operation".into(),
+                label: id.to_string(),
+            });
+        }
+        drop(runs);
+        let threads = state
+            .generation
+            .inner
+            .threads
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (id, thread) in &threads.records {
+            let thread_state = thread.state.lock().unwrap_or_else(|e| e.into_inner());
+            if thread_state
+                .latest
+                .as_ref()
+                .is_some_and(|run| !run.done.load(std::sync::atomic::Ordering::Acquire))
+            {
+                blockers.push(AssemblyOccupancy {
+                    kind: "thread".into(),
+                    label: id.clone(),
+                });
+            }
+        }
+        for pack in selected_pack_closure(&state.blueprint.capability_packs)?.values() {
+            blockers.extend(pack.reconfiguration_blockers()?.into_iter().map(|label| {
+                AssemblyOccupancy {
+                    kind: "capability".into(),
+                    label,
+                }
+            }));
+        }
+        Ok(blockers)
+    }
+    /// Idle-only complete assembly replacement. Cancellation of the caller does
+    /// not cancel the owned update/restore task or leave admission suspended.
+    pub async fn reconfigure(&self, mut target: AgentBuilder) -> Result<(), ReconfigureError> {
+        let scope = self
+            .assembly
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .blueprint
+            .scope
+            .clone();
+        target
+            .bind_scope(scope)
+            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
+        let retained_plugins = {
+            let state = self
+                .assembly
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state
+                .blueprint
+                .retained_plugins()
+                .map_err(|e| ReconfigureError::Invalid(e.to_string()))?
+        };
+        let target_members = target
+            .all_explicit_plugins()
+            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
+        for plugin in &retained_plugins {
+            if let Some(requested) = target_members
+                .iter()
+                .find(|member| member.id() == plugin.id())
+            {
+                if !Arc::ptr_eq(requested, plugin) {
+                    return Err(ReconfigureError::Invalid(format!(
+                        "retained plugin {} cannot change configuration",
+                        plugin.id()
+                    )));
+                }
+            } else {
+                target.plugins.push(plugin.clone());
+            }
+        }
+        let retained_ids: HashSet<_> = retained_plugins
+            .iter()
+            .map(|plugin| plugin.id().to_owned())
+            .collect();
+        for plugin in &retained_plugins {
+            if plugin
+                .dependencies()
+                .iter()
+                .any(|dependency| !retained_ids.contains(dependency))
+            {
+                return Err(ReconfigureError::Invalid(format!(
+                    "retained plugin {} depends on a replaceable member",
+                    plugin.id()
+                )));
+            }
+        }
+        target
+            .preflight()
+            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
+
+        let transition = self.assembly.clone();
+        let (sender, receiver) = oneshot::channel();
+        let mut package_guards = Vec::new();
+        {
+            let mut state = self
+                .assembly
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if state.closed || state.generation.is_closed() {
+                return Err(ReconfigureError::Invalid(
+                    "Agent is closed or unavailable".into(),
+                ));
+            }
+            if state.updating {
+                return Err(ReconfigureError::Busy(vec![AssemblyOccupancy {
+                    kind: "update".into(),
+                    label: "assembly update in progress".into(),
+                }]));
+            }
+
+            let blockers =
+                Self::blockers(&state).map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
+            if !blockers.is_empty() {
+                return Err(ReconfigureError::Busy(blockers));
+            }
+            for pack in selected_pack_closure(&state.blueprint.capability_packs)
+                .map_err(|e| ReconfigureError::Invalid(e.to_string()))?
+                .values()
+            {
+                match pack.lock_reconfiguration() {
+                    Ok(guard) => package_guards.push(guard),
+                    Err(error) => {
+                        let blockers = Self::blockers(&state)
+                            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
+                        return Err(if blockers.is_empty() {
+                            ReconfigureError::Invalid(error.to_string())
+                        } else {
+                            ReconfigureError::Busy(blockers)
+                        });
+                    }
+                }
+            }
+            state.updating = true;
+        }
+        tokio::spawn(async move {
+            let _package_guards = package_guards;
+            let _transition = transition.transition.lock().await;
+            {
+                let mut state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state.closed {
+                    state.updating = false;
+                    let _ = sender.send(Err(ReconfigureError::Invalid(
+                        "Agent closed before update started".into(),
+                    )));
+                    return;
+                }
+            }
+            let (old, previous) = {
+                let state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
+                (state.generation.clone(), state.blueprint.clone())
+            };
+            let mut retained = {
+                let mut cleanup = old.inner.cleanup.lock().unwrap_or_else(|e| e.into_inner());
+                cleanup
+                    .container
+                    .as_mut()
+                    .expect("live assembly")
+                    .detach_plugins(&retained_ids)
+            };
+            let closed = old.close().await;
+            let candidate = if closed.is_success() {
+                std::panic::AssertUnwindSafe(
+                    target.clone().build_generation_reusing(Some(&retained)),
+                )
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(AgentError::Run("candidate assembly panicked".into())))
+            } else {
+                Err(AgentError::Run(format!(
+                    "old assembly did not shut down cleanly: {closed:?}"
+                )))
+            };
+            let (generation, blueprint, result, unavailable) = match candidate {
+                Ok(generation) => (generation, target, Ok(()), false),
+                Err(error) => {
+                    let candidate = error.to_string();
+                    match std::panic::AssertUnwindSafe(
+                        previous.clone().build_generation_reusing(Some(&retained)),
+                    )
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err(AgentError::Run("restoration panicked".into())))
+                    {
+                        Ok(generation) => (
+                            generation,
+                            previous,
+                            Err(ReconfigureError::Restored(candidate)),
+                            false,
+                        ),
+                        Err(error) => (
+                            old,
+                            previous,
+                            Err(ReconfigureError::Unavailable {
+                                candidate,
+                                restoration: error.to_string(),
+                            }),
+                            true,
+                        ),
+                    }
+                }
+            };
+            if !unavailable {
+                generation
+                    .inner
+                    .cleanup
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .container
+                    .as_mut()
+                    .expect("candidate container")
+                    .adopt_retained(&mut retained);
+            }
+            {
+                let mut state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.generation = generation;
+                state.blueprint = blueprint;
+                state.updating = false;
+                state.closed = unavailable;
+            }
+            let _ = sender.send(result);
+        });
+        receiver.await.unwrap_or_else(|_| {
+            Err(ReconfigureError::Unavailable {
+                candidate: "update task stopped".into(),
+                restoration: "unknown".into(),
+            })
+        })
+    }
+    pub async fn close(&self) -> eliteforge_agent_plugin_kernel::ShutdownReport {
+        self.close_with_timeout(std::time::Duration::from_secs(5))
+            .await
+    }
+    pub async fn close_with_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> eliteforge_agent_plugin_kernel::ShutdownReport {
+        let _transition = self.assembly.transition.lock().await;
+        let generation = {
+            let mut state = self
+                .assembly
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            state.closed = true;
+            state.generation.clone()
+        };
+        generation.close_with_timeout(timeout).await
+    }
+    pub fn is_closed(&self) -> bool {
+        let state = self
+            .assembly
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        state.closed || (!state.updating && state.generation.is_closed())
+    }
+}
+include!("agent_forward.rs");
+
+#[derive(Clone)]
+pub(crate) struct AgentGeneration {
     inner: Arc<AgentInner>,
     operations: Arc<dyn ModelOperations>,
     collaboration: Arc<CollaborationRuntime>,
 }
 
-/// Opaque realtime connection owned by the Agent's model runtime.
+/// Opaque realtime connection owned by the AgentGeneration's model runtime.
 #[derive(Clone)]
 pub struct RealtimeHandle {
     owner: RunId,
     session: Arc<dyn RealtimeSession>,
+    occupancy: Option<Arc<AdmissionLease>>,
 }
 
-impl Agent {
-    /// An Agent view with per-call model options; all views share lifecycle and services.
+impl AgentGeneration {
+    /// An AgentGeneration view with per-call model options; all views share lifecycle and services.
     pub fn with_model_options(&self, options: ModelInvocationOptions) -> Self {
         let operations = self.operations.with_options(options);
         let collaboration = Arc::new(CollaborationRuntime {
@@ -461,12 +1103,13 @@ impl Agent {
         Ok(RealtimeHandle {
             owner: self.inner.id,
             session: self.operations.connect_realtime(request).await?,
+            occupancy: None,
         })
     }
     fn check_realtime_owner(&self, handle: &RealtimeHandle) -> Result<(), AgentError> {
         if handle.owner != self.inner.id {
             return Err(AgentError::InvalidConfiguration(
-                "realtime session belongs to a different Agent".into(),
+                "realtime session belongs to a different AgentGeneration".into(),
             ));
         }
         Ok(())
@@ -491,7 +1134,7 @@ impl Agent {
         Ok(handle.session.close().await?)
     }
 
-    /// Dispatch an extension request using this Agent's installed service.
+    /// Dispatch an extension request using this AgentGeneration's installed service.
     pub async fn execute<O: AgentOperation>(&self, operation: O) -> Result<O::Output, AgentError> {
         let id = RunId::new_v4();
         let cancellation = CancellationToken::new();
@@ -672,13 +1315,13 @@ impl Agent {
     fn check_owner(&self, control: &RunControl) -> Result<(), AgentError> {
         if control.owner != self.inner.id {
             return Err(AgentError::InvalidConfiguration(
-                "run belongs to a different Agent".into(),
+                "run belongs to a different AgentGeneration".into(),
             ));
         }
         Ok(())
     }
 
-    /// Obtain a control token before moving the owning handle into Agent::wait.
+    /// Obtain a control token before moving the owning handle into AgentGeneration::wait.
     pub fn control(&self, handle: &RunHandle) -> Result<RunControl, AgentError> {
         self.check_owner(&handle.control)?;
         Ok(handle.control())
@@ -763,8 +1406,9 @@ impl Agent {
         mut request: RunRequest,
         parent: Option<&RunContext>,
     ) -> Result<RunHandle, AgentError> {
-        let runtime = tokio::runtime::Handle::try_current()
-            .map_err(|_| AgentError::Run("Agent::start requires a Tokio runtime".into()))?;
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
+            AgentError::Run("AgentGeneration::start requires a Tokio runtime".into())
+        })?;
         self.validate_request(&request)?;
         if self.is_closed() {
             return Err(AgentError::Closed);
@@ -867,6 +1511,9 @@ impl Agent {
             events: events.clone(),
             sinks: self.inner.sinks.clone(),
         };
+        context
+            .extensions
+            .insert(ScopedAgentServices(Arc::new(self.inner.services.clone())));
         context.observers = Some(crate::observers::ObserverDispatcher::start(
             context.clone(),
             256,
@@ -945,6 +1592,7 @@ impl Agent {
             initial_events: Some(initial_events),
             result: Some(result),
             outputs,
+            occupancy: None,
         })
     }
 
@@ -952,7 +1600,7 @@ impl Agent {
         self.start(request)?.wait().await
     }
 
-    /// Invoke this Agent as a child of an active run. Each child receives an
+    /// Invoke this AgentGeneration as a child of an active run. Each child receives an
     /// isolated session/ledger with an allowance reserved from its parent before
     /// dispatch. Cancellation, deadline, root identity and delegation limits are
     /// inherited; host extensions are supplied explicitly by the caller.
@@ -1072,7 +1720,7 @@ impl Agent {
     }
 
     /// Reject new runs, cancel existing runs, await their RAII cleanup, and close
-    /// plugins. This is shared across every clone of the Agent handle.
+    /// plugins. This is shared across every clone of the AgentGeneration handle.
     pub async fn close(&self) -> eliteforge_agent_plugin_kernel::ShutdownReport {
         self.close_with_timeout(std::time::Duration::from_secs(5))
             .await
@@ -1373,6 +2021,7 @@ pub struct RunHandle {
     initial_events: Option<broadcast::Receiver<EventEnvelope>>,
     result: Option<oneshot::Receiver<Result<RunResult, AgentError>>>,
     outputs: RunOutputs,
+    occupancy: Option<Arc<AdmissionLease>>,
 }
 
 impl AsRef<RunControl> for RunHandle {
@@ -1547,14 +2196,14 @@ struct CollaborationRuntime {
 }
 
 impl CollaborationRuntime {
-    fn agent(&self) -> Result<Agent, AgentError> {
+    fn agent(&self) -> Result<AgentGeneration, AgentError> {
         let inner = self.agent.upgrade().ok_or(AgentError::Closed)?;
         let collaboration = Arc::new(Self {
             agent: Arc::downgrade(&inner),
             threads: self.threads.clone(),
             operations: self.operations.clone(),
         });
-        Ok(Agent {
+        Ok(AgentGeneration {
             operations: self.operations.clone(),
             inner,
             collaboration,
@@ -1578,7 +2227,7 @@ impl CollaborationRuntime {
 
     fn launch(
         &self,
-        agent: Agent,
+        agent: AgentGeneration,
         record: Arc<ThreadRecord>,
         run: Arc<ThreadRun>,
         handle: RunHandle,
@@ -1624,7 +2273,7 @@ impl CollaborationRuntime {
 
     async fn start_thread_run(
         &self,
-        agent: Agent,
+        agent: AgentGeneration,
         record: Arc<ThreadRecord>,
         request: RunRequest,
         parent: &RunContext,

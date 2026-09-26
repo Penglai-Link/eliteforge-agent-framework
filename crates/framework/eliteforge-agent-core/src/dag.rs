@@ -207,6 +207,9 @@ pub trait WorkflowNode: Send + Sync {
     fn validate(&self, _config: &Value) -> Result<(), AgentError> {
         Ok(())
     }
+    async fn validate_async(&self, config: &Value) -> Result<(), AgentError> {
+        self.validate(config)
+    }
     fn requires_model(&self) -> bool {
         false
     }

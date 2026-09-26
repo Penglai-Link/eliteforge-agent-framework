@@ -116,10 +116,10 @@ impl ModelCompressor {
         let context = input.run;
         validate_messages(messages).map_err(ContextError::from)?;
         context.check_cancelled()?;
-        let fits = |messages: &[Message]| {
-            ensure_context_fits(messages, budget, input.model, input.estimator).is_ok()
-        };
-        if fits(messages) && input.overflow_recoveries == 0 {
+        if (messages.len() <= budget.max_messages
+            && context_tokens(messages, input.model, input.estimator).await? <= budget.max_tokens)
+            && input.overflow_recoveries == 0
+        {
             return Ok(messages.clone());
         }
         let newest = messages
@@ -133,11 +133,14 @@ impl ModelCompressor {
             .collect();
         let prefix_len = preserved.len();
         preserved.extend_from_slice(&messages[newest..]);
-        let reserved = context_tokens(&preserved, input.model, input.estimator).saturating_add(
-            input
-                .estimator
-                .message(input.model, &Message::user(SUMMARY_LABEL)),
-        );
+        let reserved = context_tokens(&preserved, input.model, input.estimator)
+            .await?
+            .saturating_add(
+                input
+                    .estimator
+                    .message(input.model, &Message::user(SUMMARY_LABEL))
+                    .await?,
+            );
         if preserved.len().saturating_add(1) > budget.max_messages || reserved >= budget.max_tokens
         {
             return Err(budget_error(
@@ -230,7 +233,7 @@ impl ModelCompressor {
                     &summary_limits,
                 );
                 let capacity = descriptor.input_capacity(&summary_limits, &candidate.options)?;
-                if estimator.request(&self.model, &candidate) > capacity {
+                if estimator.request(&self.model, &candidate).await? > capacity {
                     break;
                 }
                 end += 1;
@@ -261,9 +264,10 @@ impl ModelCompressor {
             Message::user(format!("{SUMMARY_LABEL}{summary}")),
         );
         validate_messages(&preserved).map_err(ContextError::from)?;
-        if !fits(&preserved)
-            || (context_tokens(&preserved, input.model, input.estimator)
-                >= context_tokens(messages, input.model, input.estimator)
+        if (preserved.len() > budget.max_messages
+            || context_tokens(&preserved, input.model, input.estimator).await? > budget.max_tokens)
+            || (context_tokens(&preserved, input.model, input.estimator).await?
+                >= context_tokens(messages, input.model, input.estimator).await?
                 && preserved.len() >= messages.len())
         {
             return Err(budget_error(

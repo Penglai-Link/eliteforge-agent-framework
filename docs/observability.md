@@ -6,7 +6,7 @@ Framework 本身不依赖 OpenTelemetry 或 SQLite。
 
 ## 装配与链路
 
-`EliteForgeOfficialPluginPack` 已默认安装 `TelemetryPlugin::default()`。它在 `build().await` 时
+`EliteForgeOfficialCapabilityPack` 已默认安装 `TelemetryPlugin::default()`。它在 `build().await` 时
 读取上层应用的全局 tracer/meter provider；上层应用应在 build 前配置 provider 和 exporter。
 没有 exporter 时不导出数据。插件不会修改全局 provider，`agent.close()` 也不会关闭上层应用的 provider。
 使用独立 provider 时，在官方包上调用 `.telemetry(TelemetryPlugin::new(...)?)` 替换默认遥测。

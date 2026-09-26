@@ -146,13 +146,25 @@ impl AgentLoop for DagWorkflowLoop {
         }
         Ok(())
     }
+    async fn validate_services_async(&self, services: &AgentServices) -> Result<(), AgentError> {
+        self.validate_services(services)?;
+        for node in &self.definition.nodes {
+            services
+                .workflow_nodes
+                .get(&node.kind)
+                .ok_or_else(|| invalid("missing node"))?
+                .validate_async(&node.config)
+                .await?;
+        }
+        Ok(())
+    }
     async fn run(
         &self,
         request: &RunRequest,
         context: &RunContext,
         services: &AgentServices,
     ) -> Result<RunResult, AgentError> {
-        self.validate_services(services)?;
+        self.validate_services_async(services).await?;
         let store = services
             .state
             .clone()

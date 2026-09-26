@@ -1,0 +1,13 @@
+[package]
+name = "eliteforge-agent-context-contracts"
+version.workspace = true
+edition.workspace = true
+description = "Storage-neutral summary and artifact extension contracts"
+[dependencies]
+eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio-util.workspace = true
+uuid = { version = "1", features = ["v4", "serde"] }

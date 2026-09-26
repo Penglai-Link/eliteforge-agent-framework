@@ -31,7 +31,7 @@ pub use conversation::*;
 pub use dag::*;
 pub use eliteforge_agent_plugin_kernel::{
     ExtensionMultiplicity, ExtensionPlugin, ExtensionPoint, Plugin, PluginContext, PluginError,
-    PluginPack, PluginPackBuilder, PluginReadyContext,
+    PluginReadyContext,
 };
 pub use errors::*;
 pub use hooks::*;
@@ -61,3 +61,6 @@ pub use eliteforge_agent_capability_macros::{
 
 mod capabilities;
 pub use capabilities::*;
+
+mod configured_factory;
+pub use configured_factory::*;

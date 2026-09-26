@@ -170,7 +170,45 @@ pub enum McpError {
     Shutdown,
 }
 
+struct ChildTree(std::sync::Mutex<Option<u32>>);
+impl ChildTree {
+    async fn terminate(&self) {
+        let pid = self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(pid) = pid {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            {
+                let _ = tokio::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .output()
+                    .await;
+            }
+        }
+    }
+}
+impl Drop for ChildTree {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0.get_mut().unwrap_or_else(|e| e.into_inner()).take() {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(pid as i32), libc::SIGKILL);
+            }
+            #[cfg(windows)]
+            {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn();
+            }
+        }
+    }
+}
 struct ClientInner {
+    child_tree: ChildTree,
     config: McpConfig,
     peer: Peer<RoleClient>,
     running: Mutex<RunningService<RoleClient, ()>>,
@@ -198,6 +236,7 @@ impl fmt::Debug for McpClient {
 impl McpClient {
     pub async fn connect(config: McpConfig) -> Result<Self, McpError> {
         config.validate()?;
+        let mut tree = ChildTree(std::sync::Mutex::new(None));
         let running = match &config.transport {
             McpTransport::Stdio {
                 program,
@@ -208,6 +247,8 @@ impl McpClient {
             } => {
                 let mut cmd = tokio::process::Command::new(program);
                 cmd.args(args).kill_on_drop(true);
+                #[cfg(unix)]
+                cmd.process_group(0);
                 if !inherit_env {
                     cmd.env_clear();
                 }
@@ -220,6 +261,7 @@ impl McpClient {
                     .stderr(Stdio::null())
                     .spawn()
                     .map_err(|_| McpError::Connection)?;
+                *tree.0.get_mut().unwrap_or_else(|e| e.into_inner()) = transport.id();
                 tokio::time::timeout(config.connect_timeout, ().serve(transport))
                     .await
                     .map_err(|_| McpError::Timeout)?
@@ -248,6 +290,7 @@ impl McpClient {
         let peer = running.peer().clone();
         let permits = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_requests));
         Ok(Self(Arc::new(ClientInner {
+            child_tree: tree,
             config,
             peer,
             running: Mutex::new(running),
@@ -284,6 +327,7 @@ impl McpClient {
                         _ => Err(McpError::Shutdown),
                     }
                 };
+                inner.child_tree.terminate().await;
                 *inner
                     .close_outcome
                     .lock()
@@ -590,6 +634,7 @@ fn convert_result(result: rmcp::model::CallToolResult) -> Result<ToolOutput, Too
 
 /// Configures an Agent-owned MCP connection. Connect and close happen during
 /// Agent build and shutdown; applications do not retain a separate client.
+#[derive(Clone)]
 pub struct McpToolsPlugin {
     id: String,
     config: Option<McpConfig>,

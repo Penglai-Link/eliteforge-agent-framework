@@ -49,12 +49,12 @@ flowchart LR
 
 ## 2. 服务组装
 
-`AgentBuilder` 接受单个插件、`PluginPack` 和 `CapabilityPack`。`build().await` 统一处理依赖、
+`AgentBuilder` 接受单个插件、插件工厂和 `CapabilityPack`。`build().await` 统一处理依赖、
 安装、就绪回调和运行时构造。
 
 ```mermaid
 flowchart LR
-    Input[单个插件 / 插件包 / 能力包] --> Resolve[解析依赖图]
+    Input[单个插件 / 插件工厂 / 能力包] --> Resolve[解析依赖图]
     Resolve --> Validate[校验 ID、依赖、环和数量语义]
     Validate --> Install[按稳定拓扑顺序安装]
     Install --> Ready[按安装顺序执行就绪回调]

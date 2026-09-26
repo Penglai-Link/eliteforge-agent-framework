@@ -119,6 +119,7 @@ pub struct ResumeRequest {
     pub response: Option<InteractionResponse>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ToolPolicyDecision {
     Allow,
     Deny(String),
@@ -138,6 +139,8 @@ pub trait ToolPolicy: Send + Sync {
 /// execution strategy. The transcript and event log commit in the same write.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capability_versions: Vec<CapabilityVersionBinding>,
     pub schema_version: u32,
     pub run_id: RunId,
     pub session_id: String,
@@ -159,6 +162,7 @@ impl Checkpoint {
         state: Value,
     ) -> Self {
         Self {
+            capability_versions: Vec::new(),
             schema_version: 1,
             run_id,
             session_id: session_id.into(),
@@ -248,8 +252,10 @@ pub struct ExecutionLease {
     pub expires_at_unix_ms: u64,
 }
 
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum StateError {
+    #[error("operation result is unknown: {0}")]
+    Indeterminate(String),
     #[error("execution state not found")]
     NotFound,
     #[error("execution state revision or predecessor conflict")]

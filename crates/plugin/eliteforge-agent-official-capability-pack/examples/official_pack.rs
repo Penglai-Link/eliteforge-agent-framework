@@ -1,7 +1,9 @@
 //! Offline official-pack example with SQLite and AG-UI output.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_official_plugin_pack::{EliteForgeOfficialPluginPack, agui::AgUiStream};
+use eliteforge_agent_official_capability_pack::{
+    EliteForgeOfficialCapabilityPack, agui::AgUiStream,
+};
 
 struct DemoModel;
 #[async_trait]
@@ -25,8 +27,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .nth(1)
         .unwrap_or_else(|| "agent.sqlite".into());
     let agent = AgentBuilder::new()
-        .plugin_pack(
-            EliteForgeOfficialPluginPack::new(database).model(ChatModelPlugin::new(DemoModel)),
+        .capability_pack(
+            EliteForgeOfficialCapabilityPack::new(database).model(ChatModelPlugin::new(DemoModel)),
         )
         .build()
         .await?;
@@ -36,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         while let Some(frame) = events.recv_sse().await? {
             print!("{frame}");
         }
-        Ok::<(), eliteforge_agent_official_plugin_pack::agui::ag_ui::Error>(())
+        Ok::<(), eliteforge_agent_official_capability_pack::agui::ag_ui::Error>(())
     };
     let (result, delivered) = tokio::join!(agent.wait(handle), consume);
     let shutdown = agent.close().await;

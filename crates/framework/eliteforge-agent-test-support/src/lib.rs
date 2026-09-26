@@ -35,6 +35,11 @@ impl TestBuilder {
     }
 }
 pub struct TestStoragePlugin(tempfile::TempDir);
+impl Default for TestStoragePlugin {
+    fn default() -> Self {
+        Self(tempfile::tempdir().expect("test storage directory"))
+    }
+}
 #[async_trait]
 impl Plugin for TestStoragePlugin {
     fn id(&self) -> &str {

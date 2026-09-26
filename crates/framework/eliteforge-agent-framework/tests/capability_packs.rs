@@ -1421,12 +1421,11 @@ async fn defaults_plugin_id_is_reserved_but_not_a_capability_dependency() {
 }
 
 #[tokio::test]
-async fn old_plugin_and_plugin_pack_participate_in_the_capability_dependency_graph() {
+async fn direct_plugins_and_pack_members_participate_in_the_capability_dependency_graph() {
     let state = Arc::new(fixture::FixtureState::default());
     let agent = builder(UnusedLoop)
-        .plugin_pack(
-            PluginPackBuilder::new()
-                .plugin(RecordedPlugin::new("legacy.dependency", state.clone())),
+        .capability_pack(
+            test_pack().plugin(RecordedPlugin::new("legacy.dependency", state.clone())),
         )
         .plugin(RecordedPlugin::new("legacy.direct", state.clone()))
         .capability_pack(fixture::mixed_pack(fixture::FixtureConfig::new(
@@ -1445,8 +1444,8 @@ async fn old_plugin_and_plugin_pack_participate_in_the_capability_dependency_gra
     assert_eq!(
         installed,
         [
-            "install:legacy.dependency",
             "install:legacy.direct",
+            "install:legacy.dependency",
             "install:mixed",
         ]
     );
@@ -1460,8 +1459,8 @@ async fn old_plugin_and_plugin_pack_participate_in_the_capability_dependency_gra
         closed,
         [
             "close:mixed",
-            "close:legacy.direct",
             "close:legacy.dependency",
+            "close:legacy.direct",
         ]
     );
 }
@@ -1663,4 +1662,15 @@ async fn factory_order_follows_transitive_dependencies_through_ordinary_plugins(
         "z -> ordinary plugin -> a must override alphabetical capability order"
     );
     assert!(agent.close().await.is_success());
+}
+
+fn test_pack() -> CapabilityPackBuilder<()> {
+    static ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    CapabilityPackBuilder::new(
+        format!(
+            "test.pack.{}",
+            ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ),
+        (),
+    )
 }

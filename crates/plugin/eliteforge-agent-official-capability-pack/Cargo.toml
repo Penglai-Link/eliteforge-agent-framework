@@ -1,5 +1,5 @@
 [package]
-name = "eliteforge-agent-official-plugin-pack"
+name = "eliteforge-agent-official-capability-pack"
 description = "Configurable official plugin pack for EliteForge agents"
 version.workspace = true
 edition.workspace = true

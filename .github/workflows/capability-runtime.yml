@@ -1,0 +1,54 @@
+name: Capability runtime
+on:
+  push:
+  pull_request:
+jobs:
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p eliteforge-agent-capability-runtime -p eliteforge-agent-capability-dev-host
+      - run: cargo test -p eliteforge-agent-framework --test reconfigure --no-default-features
+  page-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pnpm --dir sdk/page install --frozen-lockfile
+      - run: pnpm --dir sdk/page build
+      - run: node --check scripts/capability-dev.mjs
+  browser:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cargo build -p eliteforge-agent-capability-dev-host
+      - run: pnpm --dir sdk/page install --frozen-lockfile
+      - run: pnpm --dir sdk/page build
+      - run: pnpm --dir sdk/page exec playwright install --with-deps chromium
+      - run: pnpm --dir sdk/page test:browser

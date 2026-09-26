@@ -7,6 +7,7 @@ pub enum OpenAiChatProtocol {
 }
 
 /// Installs chat and embedding adapters. All credentials stay inside this plugin.
+#[derive(Clone)]
 pub struct GenaiPlugin {
     id: String,
     connection: String,

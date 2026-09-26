@@ -2,7 +2,7 @@
 
 框架提供的默认 Skills 插件遵循 [Agent Skills](https://agentskills.io/specification) 的渐进式加载方式。它只负责发现、选择、上下文提示和按需读取；具体的技能内容、权限和业务流程仍由上层应用决定。
 
-官方插件包默认启用 Skills。上层应用也可以单独注册 SkillsPlugin，或在官方包中替换、关闭它。
+官方能力包默认启用 Skills。上层应用也可以单独注册 SkillsPlugin，或在官方包中替换、关闭它。
 
 ## 默认目录
 
@@ -153,20 +153,20 @@ let agent = AgentBuilder::new()
 
 only_skills 传入空集合时不暴露任何技能。指定的技能在本次执行发现不到时，会在模型调用前返回配置错误。all_skills 可以恢复默认的全部发现结果。
 
-使用官方插件包时，可以替换或关闭默认实现：
+使用官方能力包时，可以替换或关闭默认实现：
 
 ~~~rust
-use eliteforge_agent_official_plugin_pack::EliteForgeOfficialPluginPack;
+use eliteforge_agent_official_capability_pack::EliteForgeOfficialCapabilityPack;
 use eliteforge_agent_official_plugin_skills::{FileSystemSkillsConfig, SkillsPlugin};
 
-let pack = EliteForgeOfficialPluginPack::new("agent.sqlite")
+let pack = EliteForgeOfficialCapabilityPack::new("agent.sqlite")
     .skills(SkillsPlugin::filesystem(
         FileSystemSkillsConfig::new()
             .with_local_directory("./.agents/skills"),
     ));
 
 // 不需要 Skills 的 Agent：
-let without_skills = EliteForgeOfficialPluginPack::new("agent.sqlite")
+let without_skills = EliteForgeOfficialCapabilityPack::new("agent.sqlite")
     .without_skills();
 ~~~
 

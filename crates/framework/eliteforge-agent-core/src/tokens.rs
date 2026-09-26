@@ -4,37 +4,47 @@ use crate::*;
 /// Host/provider supplied token accounting. Implementations may use a tokenizer
 /// and model-specific media costs. Include protocol framing and opaque model
 /// continuation; unknown or unbounded content should return usize::MAX.
+#[async_trait::async_trait]
 pub trait TokenEstimator: Send + Sync {
-    fn message(&self, model: &ModelRef, message: &Message) -> usize;
-    fn tools(&self, _model: &ModelRef, tools: &[ToolDescriptor]) -> usize {
-        tools.iter().fold(0usize, |sum, tool| {
+    async fn message(&self, model: &ModelRef, message: &Message) -> Result<usize, ModelError>;
+    async fn tools(
+        &self,
+        _model: &ModelRef,
+        tools: &[ToolDescriptor],
+    ) -> Result<usize, ModelError> {
+        Ok(tools.iter().fold(0usize, |sum, tool| {
             sum.saturating_add(
                 serde_json::to_vec(tool).map_or(usize::MAX, |v| v.len().saturating_add(16)),
             )
-        })
+        }))
     }
-    fn options(&self, _model: &ModelRef, options: &GenerationOptions) -> usize {
-        options
+    async fn options(
+        &self,
+        _model: &ModelRef,
+        options: &GenerationOptions,
+    ) -> Result<usize, ModelError> {
+        Ok(options
             .output_schema
             .as_ref()
-            .map_or(0, |s| serde_json::to_vec(s).map_or(usize::MAX, |v| v.len()))
+            .map_or(0, |s| serde_json::to_vec(s).map_or(usize::MAX, |v| v.len())))
     }
-    fn request(&self, model: &ModelRef, request: &ChatRequest) -> usize {
-        request
-            .messages
-            .iter()
-            .fold(0usize, |sum, m| sum.saturating_add(self.message(model, m)))
-            .saturating_add(self.tools(model, &request.tools))
-            .saturating_add(self.options(model, &request.options))
+    async fn request(&self, model: &ModelRef, request: &ChatRequest) -> Result<usize, ModelError> {
+        let mut tokens = 0usize;
+        for message in &request.messages {
+            tokens = tokens.saturating_add(self.message(model, message).await?);
+        }
+        Ok(tokens
+            .saturating_add(self.tools(model, &request.tools).await?)
+            .saturating_add(self.options(model, &request.options).await?))
     }
 }
 
-/// Safe default when no tokenizer/media estimator is supplied; bytes are an
-/// intentionally conservative estimate and are not presented as billed tokens.
+/// Conservative byte estimate, distinct from billed tokens.
 pub struct ConservativeTokenEstimator;
+#[async_trait::async_trait]
 impl TokenEstimator for ConservativeTokenEstimator {
-    fn message(&self, _: &ModelRef, message: &Message) -> usize {
-        estimate_message_tokens(message)
+    async fn message(&self, _: &ModelRef, message: &Message) -> Result<usize, ModelError> {
+        Ok(estimate_message_tokens(message))
     }
 }
 

@@ -1,0 +1,223 @@
+// Generated forwards preserve the public execution API.
+impl Agent {
+    pub fn models(&self, operation: ModelOperation) -> Vec<ModelRef> {
+        let generation = self.snapshot();
+        generation.models(operation)
+    }
+    pub async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AgentError> {
+        let (generation, _lease) = self.admit("operation", "embed")?;
+        generation.embed(request).await
+    }
+    pub async fn embed_query(
+        &self,
+        space: &EmbeddingSpace,
+        request: EmbeddingRequest,
+    ) -> Result<EmbeddingResponse, AgentError> {
+        let (generation, _lease) = self.admit("operation", "embed_query")?;
+        generation.embed_query(space, request).await
+    }
+    pub async fn rerank(&self, request: RerankRequest) -> Result<RerankResponse, AgentError> {
+        let (generation, _lease) = self.admit("operation", "rerank")?;
+        generation.rerank(request).await
+    }
+    pub async fn generate_image(
+        &self,
+        request: ImageGenerationRequest,
+    ) -> Result<ImageGenerationResponse, AgentError> {
+        let (generation, _lease) = self.admit("operation", "generate_image")?;
+        generation.generate_image(request).await
+    }
+    pub async fn submit_video(
+        &self,
+        request: VideoGenerationRequest,
+    ) -> Result<VideoJob, AgentError> {
+        let (generation, _lease) = self.admit("operation", "submit_video")?;
+        generation.submit_video(request).await
+    }
+    pub async fn query_video(&self, job: &VideoJob) -> Result<VideoJob, AgentError> {
+        let (generation, _lease) = self.admit("operation", "query_video")?;
+        generation.query_video(job).await
+    }
+    pub async fn cancel_video(&self, job: &VideoJob) -> Result<(), AgentError> {
+        let (generation, _lease) = self.admit("operation", "cancel_video")?;
+        generation.cancel_video(job).await
+    }
+    pub async fn transcribe(
+        &self,
+        request: SpeechRecognitionRequest,
+    ) -> Result<SpeechRecognitionResponse, AgentError> {
+        let (generation, _lease) = self.admit("operation", "transcribe")?;
+        generation.transcribe(request).await
+    }
+    pub async fn synthesize(
+        &self,
+        request: SpeechSynthesisRequest,
+    ) -> Result<SpeechSynthesisResponse, AgentError> {
+        let (generation, _lease) = self.admit("operation", "synthesize")?;
+        generation.synthesize(request).await
+    }
+    pub async fn send_realtime(
+        &self,
+        handle: &RealtimeHandle,
+        input: RealtimeInput,
+    ) -> Result<(), AgentError> {
+        let (generation, _lease) = self.admit("operation", "send_realtime")?;
+        generation.send_realtime(handle, input).await
+    }
+    pub async fn next_realtime(
+        &self,
+        handle: &RealtimeHandle,
+    ) -> Result<Option<RealtimeEvent>, AgentError> {
+        let (generation, _lease) = self.admit("operation", "next_realtime")?;
+        generation.next_realtime(handle).await
+    }
+    pub async fn execute<O: AgentOperation>(&self, operation: O) -> Result<O::Output, AgentError> {
+        let (generation, _lease) = self.admit("operation", "execute")?;
+        generation.execute::<O>(operation).await
+    }
+    pub async fn pending_interactions(
+        &self,
+        session: &str,
+    ) -> Result<Vec<InteractionRecord>, AgentError> {
+        let (generation, _lease) = self.admit("operation", "pending_interactions")?;
+        generation.pending_interactions(session).await
+    }
+    pub async fn interaction(
+        &self,
+        session: &str,
+        interaction_id: RunId,
+    ) -> Result<InteractionRecord, AgentError> {
+        let (generation, _lease) = self.admit("operation", "interaction")?;
+        generation.interaction(session, interaction_id).await
+    }
+    pub async fn checkpoint(&self, run_id: RunId) -> Result<Checkpoint, AgentError> {
+        let (generation, _lease) = self.admit("operation", "checkpoint")?;
+        generation.checkpoint(run_id).await
+    }
+    pub async fn latest_checkpoint(&self, session: &str) -> Result<Option<Checkpoint>, AgentError> {
+        let (generation, _lease) = self.admit("operation", "latest_checkpoint")?;
+        generation.latest_checkpoint(session).await
+    }
+    pub async fn answer(
+        &self,
+        session: &str,
+        interaction_id: RunId,
+        value: serde_json::Value,
+    ) -> Result<RunRequest, AgentError> {
+        let (generation, _lease) = self.admit("operation", "answer")?;
+        generation.answer(session, interaction_id, value).await
+    }
+    pub async fn conversation(
+        &self,
+        key: &ConversationKey,
+    ) -> Result<ConversationSnapshot, AgentError> {
+        let (generation, _lease) = self.admit("operation", "conversation")?;
+        generation.conversation(key).await
+    }
+    pub async fn append_conversation(
+        &self,
+        key: &ConversationKey,
+        revision: u64,
+        messages: Vec<Message>,
+    ) -> Result<(), AgentError> {
+        let (generation, _lease) = self.admit("operation", "append_conversation")?;
+        generation.append_conversation(key, revision, messages).await
+    }
+    pub async fn memory(&self, namespace: &str, id: &str) -> Result<MemoryEntry, AgentError> {
+        let (generation, _lease) = self.admit("operation", "memory")?;
+        generation.memory(namespace, id).await
+    }
+    pub async fn search_memory(
+        &self,
+        namespace: &str,
+        query: MemoryQuery,
+    ) -> Result<Vec<MemoryEntry>, AgentError> {
+        let (generation, _lease) = self.admit("operation", "search_memory")?;
+        generation.search_memory(namespace, query).await
+    }
+    pub async fn save_memory(
+        &self,
+        namespace: &str,
+        value: MemoryWrite,
+        expected: Option<String>,
+    ) -> Result<MemoryEntry, AgentError> {
+        let (generation, _lease) = self.admit("operation", "save_memory")?;
+        generation.save_memory(namespace, value, expected).await
+    }
+    pub async fn delete_memory(
+        &self,
+        namespace: &str,
+        id: &str,
+        expected: &str,
+    ) -> Result<(), AgentError> {
+        let (generation, _lease) = self.admit("operation", "delete_memory")?;
+        generation.delete_memory(namespace, id, expected).await
+    }
+    pub fn output<T: Send + 'static>(&self, handle: &mut RunHandle) -> Result<T, AgentError> {
+        let generation = self.snapshot();
+        generation.output::<T>(handle)
+    }
+    pub fn control(&self, handle: &RunHandle) -> Result<RunControl, AgentError> {
+        let generation = self.snapshot();
+        generation.control(handle)
+    }
+    pub fn cancel(&self, run: &impl AsRef<RunControl>) -> Result<(), AgentError> {
+        let generation = self.snapshot();
+        generation.cancel(run)
+    }
+    pub fn steer(
+        &self,
+        run: &impl AsRef<RunControl>,
+        message: impl Into<String>,
+    ) -> Result<(), AgentError> {
+        let generation = self.snapshot();
+        generation.steer(run, message)
+    }
+    pub fn revoke_tools(
+        &self,
+        run: &impl AsRef<RunControl>,
+        ids: &[String],
+    ) -> Result<(), AgentError> {
+        let generation = self.snapshot();
+        generation.revoke_tools(run, ids)
+    }
+    pub fn budget_usage(&self, run: &impl AsRef<RunControl>) -> Result<Usage, AgentError> {
+        let generation = self.snapshot();
+        generation.budget_usage(run)
+    }
+    pub fn events(
+        &self,
+        handle: &mut RunHandle,
+    ) -> Result<broadcast::Receiver<EventEnvelope>, AgentError> {
+        let generation = self.snapshot();
+        generation.events(handle)
+    }
+    pub fn subscribe(
+        &self,
+        handle: &RunHandle,
+    ) -> Result<broadcast::Receiver<EventEnvelope>, AgentError> {
+        let generation = self.snapshot();
+        generation.subscribe(handle)
+    }
+    pub async fn wait(&self, handle: RunHandle) -> Result<RunResult, AgentError> {
+        let generation = self.snapshot();
+        generation.wait(handle).await
+    }
+    pub fn workflow_node_descriptors(&self) -> Vec<WorkflowNodeDescriptor> {
+        let generation = self.snapshot();
+        generation.workflow_node_descriptors()
+    }
+    pub async fn run(&self, request: RunRequest) -> Result<RunResult, AgentError> {
+        let (generation, _lease) = self.admit("operation", "run")?;
+        generation.run(request).await
+    }
+    pub async fn run_child(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<RunResult, AgentError> {
+        if self.is_closed() { return self.snapshot().run_child(request, parent).await; }
+        let (generation, _lease) = self.admit("operation", "run_child")?;
+        generation.run_child(request, parent).await
+    }
+}

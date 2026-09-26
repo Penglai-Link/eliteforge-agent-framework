@@ -11,18 +11,18 @@ EliteForge Agent Framework 是一个可扩展的 Rust Agent 框架：Framework �
 
 ```rust
 use eliteforge_agent_framework::AgentBuilder;
-use eliteforge_agent_official_plugin_pack::EliteForgeOfficialPluginPack;
+use eliteforge_agent_official_capability_pack::EliteForgeOfficialCapabilityPack;
 
 let agent = AgentBuilder::new()
-    .plugin_pack(EliteForgeOfficialPluginPack::new("agent.sqlite"))
+    .capability_pack(EliteForgeOfficialCapabilityPack::new("agent.sqlite"))
     .build().await?;
 ```
 
 官方包默认包含项目里的全部 8 个官方插件：Genai、SQLite、用户问答、Agent 协作工具、Skills、AGUI、MCP 和 OTel。
 MCP 未配置服务器时工具集为空；OTel 在构建时读取上层应用的全局 provider。
-`PluginPack` 继续用于官方和兼容的插件组合。
+官方和业务插件组合统一使用 `CapabilityPack`；直接 `.plugin(...)` 装配仍然保留。
 
-业务能力包使用另一套入口；只会装配显式选中的包及其 `.include(...)` 子包：
+业务能力、插件组合和外部安装包统一使用 `.capability_pack(...)`；只装配显式选中的包及其 `.include(...)` 子包：
 
 ~~~rust
 use eliteforge_agent_core::CapabilityPackBuilder;
@@ -32,6 +32,8 @@ let agent = AgentBuilder::new()
     .build()
     .await?;
 ~~~
+
+外部能力包支持签名安装、独立进程、双向调用、独立页面和空闲重配，见[动态能力包](docs/dynamic-capability-runtime.md)、[迁移说明](docs/dynamic-capability-migration.md)和[验收矩阵](docs/dynamic-capability-acceptance.md)。
 
 能力声明、配置工厂、共享实例和依赖规则见[能力包与自动装配](docs/capability-packs.md)。
 
@@ -93,10 +95,10 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 | 运行控制 | 追加指令、取消与子执行额度 | ✅ 已支持 | Steering、取消、父子执行身份和预算隔离 |
 | 集成 | MCP 工具与资源 | ✅ 已支持 | 官方 SDK transport、发现、分页、资源和取消传播 |
 | 集成 | AG-UI 事件协议 | ✅ 已支持 | SSE、文本、推理、工具、状态、活动、交互恢复、子 Agent 和 Thread 生命周期事件 |
-| 扩展 | Plugin、PluginPack 与能力包 | ✅ 已支持 | 声明式扩展点、全部 install 后 ready、回滚、异步关闭、Skills 聚合和 `#[capability]` / `#[capability_factory]` 自动装配 |
+| 扩展 | Plugin 与能力包 | ✅ 已支持 | 声明式扩展点、全部 install 后 ready、回滚、异步关闭、Skills 聚合和 `#[capability]` / `#[capability_factory]` 自动装配 |
 | 扩展 | Middleware、Hook 与自定义执行器 | ✅ 已支持 | Run、模型、工具、节点中间件；生命周期 Hook；自定义 `AgentLoop` |
 | 扩展 | Skills 系统 | ✅ 已支持 | 官方文件系统插件兼容 Agent Skills；能力包可内嵌 `skills/`、引用目录或声明 Provider，统一聚合后按需读取资源 |
-| 扩展 | 插件市场与在线安装 | — 未提供 | 当前提供 crate 与插件组合 API，未提供市场或安装器 |
+| 扩展 | 能力包安装与版本管理 | ✅ 已实现 | 本地 ZIP／HTTPS 导入、签名校验、不可变版本、依赖解析与回滚选择；在线商店未提供 |
 | 多 Agent | 子 Agent / 专家 Agent | ✅ 已支持 | 官方 `agent_spawn` 工具；继承父运行取消、deadline、lineage、预算和深度 |
 | 多 Agent | 独立 Threads 与会话协作 | ✅ 已支持 | 官方 `thread_create/send/answer/wait/read/list/close` 工具；默认进程内 bounded registry，跨进程持久化由上层 runtime 提供 |
 | 多 Agent | 后台执行、队列与 Worktree 隔离 | 🏠 上层应用负责 | 需要部署队列、进程管理和 Git 工作树管理 |
@@ -122,7 +124,7 @@ cargo run -p eliteforge-agent-integration-tests --features live-model --bin defa
 | `eliteforge-agent-official-plugin-skills` | Agent Skills 标准文件系统发现、渐进式加载和可替换 Provider |
 | `eliteforge-agent-official-plugin-tools-agents` | 子 Agent 委派与独立 Thread 协作工具 |
 | `eliteforge-agent-plugin-kernel` | 服务注册、依赖排序和资源关闭 |
-| `eliteforge-agent-official-plugin-pack` | 官方插件组合，一次配置到 Agent |
+| `eliteforge-agent-official-capability-pack` | 官方插件组合，一次配置到 Agent |
 | `eliteforge-agent-official-plugin-*` | Genai、SQLite、MCP、AG-UI、OTel 等官方实现 |
 
 ## 文档

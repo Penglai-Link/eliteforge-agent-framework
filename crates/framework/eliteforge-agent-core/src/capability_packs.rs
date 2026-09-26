@@ -237,12 +237,78 @@ inventory::collect!(CapabilityDescriptor);
 /// Packs contain configuration and explicit child packs, but do not create
 /// business objects themselves.  The latter happens in
 /// [`resolve_capability_packs`], separately for each Agent build.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CapabilityVersionBinding {
+    pub package: String,
+    pub version: String,
+    pub digest: String,
+}
+
 pub trait CapabilityPack: Send + Sync {
     /// Stable pack ID used by descriptors and explicit child-pack selection.
     fn id(&self) -> &str;
 
     /// Type-erased configuration consumed by descriptor factories in this pack.
     fn configuration(&self) -> &CapabilityConfig;
+
+    /// Validate inert selection/configuration before any member acquires resources.
+    fn preflight(&self) -> Result<(), crate::AgentError> {
+        Ok(())
+    }
+
+    /// External manifests can declare SkillProviders without static inventory entries.
+    fn requires_skills_runtime(&self) -> bool {
+        false
+    }
+
+    /// Explicit configured plugins. Returned values must not acquire resources.
+    fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
+        Vec::new()
+    }
+
+    /// Whether all members may be recreated for idle reconfiguration.
+    fn rebuildable(&self) -> bool {
+        self.plugins().is_empty()
+    }
+    /// Non-rebuildable members stay installed with their original configuration.
+    fn retained_plugins(&self) -> Vec<Arc<dyn Plugin>> {
+        if self.rebuildable() {
+            Vec::new()
+        } else {
+            self.plugins()
+        }
+    }
+
+    /// Bind an external selection to the stable Agent scope before assembly.
+    fn for_agent_scope(&self, _scope: &str) -> Option<Arc<dyn CapabilityPack>> {
+        None
+    }
+
+    /// Atomically suspend page/resource admission for this bound selection.
+    fn lock_reconfiguration(&self) -> Result<Box<dyn Send>, crate::AgentError> {
+        Ok(Box::new(()))
+    }
+
+    /// Persistent or external resources that prevent rebuilding this selection.
+    fn reconfiguration_blockers(&self) -> Result<Vec<String>, crate::AgentError> {
+        Ok(Vec::new())
+    }
+
+    fn version_bindings(&self) -> Vec<CapabilityVersionBinding> {
+        Vec::new()
+    }
+    fn protect_task(
+        &self,
+        _run: crate::RunId,
+    ) -> futures::future::BoxFuture<'_, Result<(), crate::AgentError>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn release_task(
+        &self,
+        _run: crate::RunId,
+    ) -> futures::future::BoxFuture<'_, Result<(), crate::AgentError>> {
+        Box::pin(async { Ok(()) })
+    }
 
     /// Child packs explicitly included in this pack.
     ///
@@ -268,6 +334,8 @@ pub struct CapabilityPackBuilder<C> {
     configuration: C,
     included_packs: Vec<Arc<dyn CapabilityPack>>,
     skill_sources: Vec<CapabilitySkillSource>,
+    plugins: Vec<Arc<dyn Plugin>>,
+    factories: Vec<crate::ConfiguredPluginFactory>,
 }
 
 impl<C> CapabilityPackBuilder<C>
@@ -280,6 +348,8 @@ where
             configuration,
             included_packs: Vec::new(),
             skill_sources: Vec::new(),
+            plugins: Vec::new(),
+            factories: Vec::new(),
         }
     }
 
@@ -310,6 +380,20 @@ where
         self.skills(CapabilitySkillSource::directory(directory))
     }
 
+    /// Include an already configured plugin. This member is not rebuildable.
+    pub fn plugin(self, plugin: impl Plugin + 'static) -> Self {
+        self.plugin_arc(Arc::new(plugin))
+    }
+    pub fn plugin_arc(mut self, plugin: Arc<dyn Plugin>) -> Self {
+        self.plugins.push(plugin);
+        self
+    }
+    /// Declare metadata before acquiring resources; create a fresh instance during install.
+    pub fn plugin_factory(mut self, factory: crate::ConfiguredPluginFactory) -> Self {
+        self.factories.push(factory);
+        self
+    }
+
     /// Finish this declaration.  The returned value still implements
     /// [`CapabilityPack`] and does not construct any business resource.
     pub fn build(self) -> Self {
@@ -329,12 +413,25 @@ where
         &self.configuration
     }
 
+    fn retained_plugins(&self) -> Vec<Arc<dyn Plugin>> {
+        self.plugins.clone()
+    }
     fn included_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
         self.included_packs.clone()
     }
 
     fn skill_sources(&self) -> Vec<CapabilitySkillSource> {
         self.skill_sources.clone()
+    }
+    fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
+        self.plugins
+            .iter()
+            .cloned()
+            .chain(self.factories.iter().map(|f| f.plugin()))
+            .collect()
+    }
+    fn rebuildable(&self) -> bool {
+        self.plugins.is_empty() && self.included_packs.iter().all(|p| p.rebuildable())
     }
 }
 
@@ -366,11 +463,12 @@ pub fn selected_capability_requires_skills_runtime(
     packs: &[Arc<dyn CapabilityPack>],
 ) -> Result<bool, CapabilityError> {
     let selected = selected_pack_closure(packs)?;
-    Ok(inventory::iter::<CapabilityDescriptor>
-        .into_iter()
-        .any(|descriptor| {
-            descriptor.requires_skills_runtime && selected.contains_key(descriptor.pack)
-        }))
+    Ok(selected.values().any(|pack| pack.requires_skills_runtime())
+        || inventory::iter::<CapabilityDescriptor>
+            .into_iter()
+            .any(|descriptor| {
+                descriptor.requires_skills_runtime && selected.contains_key(descriptor.pack)
+            }))
 }
 
 /// Whether selected factories already provide the aggregate Skills runtime.
@@ -509,6 +607,26 @@ pub fn resolve_capability_packs_with_plugins(
     plugins: &[Arc<dyn Plugin>],
     reserved_plugin_ids: &HashSet<String>,
 ) -> Result<Vec<Arc<dyn Plugin>>, crate::AgentError> {
+    materialize_capabilities(prepare_combined_capabilities(
+        packs,
+        plugins,
+        reserved_plugin_ids,
+    )?)
+    .map_err(Into::into)
+}
+/// Validate the full declared dependency graph without calling any member factory.
+pub fn validate_capability_packs_with_plugins(
+    packs: &[Arc<dyn CapabilityPack>],
+    plugins: &[Arc<dyn Plugin>],
+    reserved_plugin_ids: &HashSet<String>,
+) -> Result<(), crate::AgentError> {
+    prepare_combined_capabilities(packs, plugins, reserved_plugin_ids).map(|_| ())
+}
+fn prepare_combined_capabilities(
+    packs: &[Arc<dyn CapabilityPack>],
+    plugins: &[Arc<dyn Plugin>],
+    reserved_plugin_ids: &HashSet<String>,
+) -> Result<PreparedCapabilities, crate::AgentError> {
     let occupied = plugins
         .iter()
         .map(|plugin| plugin.id().to_owned())
@@ -537,7 +655,7 @@ pub fn resolve_capability_packs_with_plugins(
                 .map(|index| prepared.ordered[index])
         })
         .collect();
-    materialize_capabilities(prepared).map_err(Into::into)
+    Ok(prepared)
 }
 
 struct PreparedCapabilities {
@@ -601,7 +719,7 @@ fn materialize_capabilities(
     Ok(plugins)
 }
 
-fn selected_pack_closure(
+pub fn selected_pack_closure(
     roots: &[Arc<dyn CapabilityPack>],
 ) -> Result<BTreeMap<String, Arc<dyn CapabilityPack>>, CapabilityError> {
     let mut selected = BTreeMap::new();

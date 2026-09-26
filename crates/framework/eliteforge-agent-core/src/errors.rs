@@ -102,6 +102,7 @@ impl ErrorReport {
 impl ModelError {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Indeterminate(_) => "model_indeterminate",
             Self::State(_) => "state",
             Self::Transient(_) => "transient",
             Self::ContextOverflow(_) => "context_overflow",
@@ -113,6 +114,7 @@ impl ModelError {
 impl AgentError {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Indeterminate(_) => "indeterminate",
             Self::Plugin(_) => "plugin",
             Self::Capability(_) => "capability",
             Self::MissingService(_) => "missing_service",

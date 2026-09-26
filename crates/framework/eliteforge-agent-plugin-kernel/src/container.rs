@@ -195,18 +195,54 @@ impl PluginContainer {
     /// Among ready plugins, original input order is the deterministic tie-break.
     /// Any failure rolls back even partially installed plugins.
     pub async fn build(plugins: Vec<Arc<dyn Plugin>>) -> Result<Self, PluginError> {
+        Self::build_reusing(plugins, None).await
+    }
+    /// Build a candidate registry over retained static plugins, without reinstalling them.
+    /// The retained container keeps cleanup ownership until adopt_retained succeeds.
+    pub async fn build_reusing(
+        plugins: Vec<Arc<dyn Plugin>>,
+        retained: Option<&Self>,
+    ) -> Result<Self, PluginError> {
         let (ids, order) = installation_order(&plugins)?;
+        let retained_ids: HashSet<_> = retained
+            .map(|container| container.plugin_ids.iter().cloned().collect())
+            .unwrap_or_default();
         // This RAII guard exists across every await in plugin installation.
         let mut container = Self {
-            services: ServiceRegistry::default(),
+            services: retained
+                .map(|container| container.services.clone())
+                .unwrap_or_default(),
             cleanups: Mutex::new(ResourceScope::default()),
-            plugins: Vec::new(),
-            plugin_ids: Vec::new(),
+            plugins: retained
+                .map(|container| container.plugins.clone())
+                .unwrap_or_default(),
+            plugin_ids: retained
+                .map(|container| container.plugin_ids.clone())
+                .unwrap_or_default(),
             closed: false,
             cleanup_panic_count: 0,
         };
 
         for index in order {
+            if retained_ids.contains(&ids[index]) {
+                let original = retained
+                    .expect("retained IDs")
+                    .plugins
+                    .iter()
+                    .find(|plugin| plugin.id() == ids[index])
+                    .expect("retained plugin");
+                if !Arc::ptr_eq(original, &plugins[index]) {
+                    return Err(PluginError::message(
+                        "retained plugin configuration cannot change",
+                    ));
+                }
+                continue;
+            }
+            container
+                .cleanups
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_owner(&ids[index]);
             let mut context = PluginContext {
                 plugin: &ids[index],
                 services: &mut container.services,
@@ -228,6 +264,14 @@ impl PluginContainer {
         for index in 0..container.plugins.len() {
             let plugin = container.plugins[index].clone();
             let plugin_id = container.plugin_ids[index].clone();
+            if retained_ids.contains(&plugin_id) {
+                continue;
+            }
+            container
+                .cleanups
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_owner(&plugin_id);
             let result = {
                 let mut context = PluginReadyContext {
                     plugin: &plugin_id,
@@ -250,6 +294,46 @@ impl PluginContainer {
         Ok(container)
     }
 
+    /// Detach unchanged static resources before stopping a replaceable assembly.
+    pub fn detach_plugins(&mut self, ids: &HashSet<String>) -> Self {
+        let services = self.services.detach(ids);
+        let cleanups = self
+            .cleanups
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .detach(ids);
+        let (plugins, remaining): (Vec<_>, Vec<_>) = std::mem::take(&mut self.plugins)
+            .into_iter()
+            .partition(|plugin| ids.contains(plugin.id()));
+        self.plugins = remaining;
+        let (plugin_ids, remaining): (Vec<_>, Vec<_>) = std::mem::take(&mut self.plugin_ids)
+            .into_iter()
+            .partition(|id| ids.contains(id));
+        self.plugin_ids = remaining;
+        Self {
+            services,
+            cleanups: Mutex::new(cleanups),
+            plugins,
+            plugin_ids,
+            closed: false,
+            cleanup_panic_count: 0,
+        }
+    }
+    pub fn adopt_retained(&mut self, retained: &mut Self) {
+        let scope = std::mem::take(
+            retained
+                .cleanups
+                .get_mut()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        self.cleanups
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .prepend(scope);
+        retained.services.clear();
+        retained.plugins.clear();
+        retained.closed = true;
+    }
     pub fn services(&self) -> &ServiceRegistry {
         &self.services
     }

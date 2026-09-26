@@ -24,9 +24,27 @@ impl ExecutionCounters {
 pub struct UsageLedger {
     pub usage: Usage,
     reserved: u64,
+    host_model_calls: usize,
+    host_tool_calls: usize,
 }
 
 impl UsageLedger {
+    /// Shared across every callback scope and nested extension in this execution.
+    pub fn admit_host_model_call(&mut self, limit: usize) -> bool {
+        if self.host_model_calls >= limit {
+            return false;
+        }
+        self.host_model_calls += 1;
+        true
+    }
+    pub fn admit_host_tool_call(&mut self, limit: usize) -> bool {
+        if self.host_tool_calls >= limit {
+            return false;
+        }
+        self.host_tool_calls += 1;
+        true
+    }
+
     pub fn including_reservations(&self) -> Usage {
         Usage {
             input_tokens: self.usage.input_tokens.saturating_add(self.reserved),

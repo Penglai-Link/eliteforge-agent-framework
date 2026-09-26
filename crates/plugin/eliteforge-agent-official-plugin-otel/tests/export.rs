@@ -1148,9 +1148,11 @@ async fn telemetry_distinguishes_assembly_from_final_dispatch_after_middleware_w
         .iter()
         .find(|span| span.name == "agent.model")
         .unwrap();
-    let requests = capture.0.lock().unwrap();
-    let estimate =
-        ConservativeTokenEstimator.request(&ModelRef::new("default", "default"), &requests[0]);
+    let request = capture.0.lock().unwrap()[0].clone();
+    let estimate = ConservativeTokenEstimator
+        .request(&ModelRef::new("default", "default"), &request)
+        .await
+        .unwrap();
     let attribute = |name: &str| {
         model
             .attributes
@@ -1182,7 +1184,6 @@ async fn telemetry_distinguishes_assembly_from_final_dispatch_after_middleware_w
     assert!(assembled < estimate);
     assert_eq!(model.parent_span_id, run.span_context.span_id());
     assert!(!format!("{spans:?}").contains("private-"));
-    drop(requests);
     traces.shutdown().unwrap();
     metrics.shutdown().unwrap();
 }

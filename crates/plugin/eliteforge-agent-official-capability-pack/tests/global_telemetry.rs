@@ -1,8 +1,8 @@
 //! A separate test process isolates mutations of OpenTelemetry's global providers.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_official_plugin_pack::{
-    EliteForgeOfficialPluginPack,
+use eliteforge_agent_official_capability_pack::{
+    EliteForgeOfficialCapabilityPack,
     telemetry::{TelemetryConfig, TelemetryPlugin},
 };
 use opentelemetry::{
@@ -31,8 +31,8 @@ impl ChatModel for Reply {
 async fn default_pack_resolves_global_providers_at_build_and_explicit_telemetry_replaces_them() {
     let directory = tempfile::tempdir().unwrap();
     // Providers are configured after the pack has been added to the builder.
-    let builder = AgentBuilder::new().plugin_pack(
-        EliteForgeOfficialPluginPack::new(directory.path().join("global.sqlite"))
+    let builder = AgentBuilder::new().capability_pack(
+        EliteForgeOfficialCapabilityPack::new(directory.path().join("global.sqlite"))
             .model(ChatModelPlugin::new(Reply)),
     );
     let exporter = InMemorySpanExporter::default();
@@ -80,8 +80,8 @@ async fn default_pack_resolves_global_providers_at_build_and_explicit_telemetry_
         .with_simple_exporter(explicit_exporter.clone())
         .build();
     let agent = AgentBuilder::new()
-        .plugin_pack(
-            EliteForgeOfficialPluginPack::new(directory.path().join("explicit.sqlite"))
+        .capability_pack(
+            EliteForgeOfficialCapabilityPack::new(directory.path().join("explicit.sqlite"))
                 .model(ChatModelPlugin::new(Reply))
                 .telemetry(
                     TelemetryPlugin::new(

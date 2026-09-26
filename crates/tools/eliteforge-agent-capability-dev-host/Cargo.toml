@@ -1,0 +1,29 @@
+[package]
+name = "eliteforge-agent-capability-dev-host"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+eliteforge-agent-official-plugin-skills = { path = "../../plugin/eliteforge-agent-official-plugin-skills" }
+eliteforge-agent-context = { path = "../../framework/eliteforge-agent-context" }
+eliteforge-agent-context-contracts = { path = "../../framework/eliteforge-agent-context-contracts" }
+eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
+eliteforge-agent-state-sqlite = { path = "../../framework/eliteforge-agent-state-sqlite" }
+eliteforge-agent-memory = { path = "../../framework/eliteforge-agent-memory" }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-tools-mcp = {path="../../plugin/eliteforge-agent-official-plugin-tools-mcp"}
+async-trait.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net", "signal"] }
+tokio-util.workspace = true
+axum = "0.8.9"
+semver = "1"
+ed25519-dalek = "2"
+rmcp = { version = "=3.2.0",default-features=false,features=["server","transport-io"] }
+
+[dev-dependencies]
+tempfile = "3"
+libc = "0.2"

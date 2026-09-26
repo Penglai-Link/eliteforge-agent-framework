@@ -87,6 +87,7 @@ impl std::error::Error for TelemetryConfigError {}
 /// A reference plugin using the host's OpenTelemetry tracer and meter providers.
 /// Every installation owns a distinct bounded registry, including when this
 /// plugin instance is installed in several agents that share SDK providers.
+#[derive(Clone)]
 pub struct TelemetryPlugin {
     id: String,
     config: TelemetryConfig,
@@ -587,7 +588,7 @@ impl RunMiddleware for Observation {
 impl ModelMiddleware for Observation {
     async fn intercept(
         &self,
-        request: ChatRequest,
+        mut request: ChatRequest,
         invocation: &ModelInvocationContext<'_>,
         next: ModelNext<'_>,
     ) -> Result<ChatResponse, ModelError> {
@@ -615,6 +616,20 @@ impl ModelMiddleware for Observation {
         );
         self.identifier(&mut attributes, "agent.model.stage", invocation.stage);
         let span = self.span("model", invocation.run, &parent, attributes, Vec::new());
+        let span_context = span.context.span().span_context().clone();
+        if span_context.is_valid() {
+            request
+                .extensions
+                .insert(eliteforge_agent_core::TraceContext {
+                    traceparent: format!(
+                        "00-{}-{}-{:02x}",
+                        span_context.trace_id(),
+                        span_context.span_id(),
+                        span_context.trace_flags().to_u8()
+                    ),
+                    tracestate: span_context.trace_state().header(),
+                });
+        }
         let result = next
             .run(request, invocation)
             .with_context(span.context.clone())

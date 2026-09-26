@@ -26,7 +26,7 @@ pub struct ModelMessageContext {
     pub data: serde_json::Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelDescriptor {
     pub id: String,
     /// Total input + output capacity. None leaves the configured input limit authoritative.
@@ -294,6 +294,9 @@ pub trait ModelSelectionStrategy: Send + Sync {
     fn validate(&self, _catalog: &ModelCatalog) -> Result<(), AgentError> {
         Ok(())
     }
+    async fn validate_async(&self, catalog: &ModelCatalog) -> Result<(), AgentError> {
+        self.validate(catalog)
+    }
     async fn select(
         &self,
         context: &ModelSelectionContext<'_>,
@@ -415,6 +418,12 @@ impl ModelSelectionStrategy for StageModelStrategy {
         }
         Ok(())
     }
+    async fn validate_async(&self, catalog: &ModelCatalog) -> Result<(), AgentError> {
+        for strategy in self.stages.values().chain(self.fallback.iter()) {
+            strategy.validate_async(catalog).await?;
+        }
+        Ok(())
+    }
     async fn select(
         &self,
         context: &ModelSelectionContext<'_>,
@@ -503,6 +512,9 @@ pub struct ModelCall<'a> {
 
 #[async_trait]
 pub trait ChatExecutor: Send + Sync {
+    async fn validate_async(&self) -> Result<(), AgentError> {
+        Ok(())
+    }
     fn catalog(&self) -> &ModelCatalog;
     async fn invoke(
         &self,

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 description = "Model-backed context reduction and bounded artifact offload for eliteforge-agent-framework"
 [dependencies]
+eliteforge-agent-context-contracts = { path = "../eliteforge-agent-context-contracts", version = "0.1.0" }
 eliteforge-agent-sqlite-extensions = { path = "../eliteforge-agent-sqlite-extensions" }
 eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
 async-trait.workspace = true

@@ -3,21 +3,21 @@
 这篇指南回答三个问题：**业务能力实现哪个接口、项目需要什么依赖、写好的实现怎样在 Agent 中生效。**
 
 下面先介绍如何给客服 Agent 添加商店说明，再扩展到订单工具、执行拦截和应用主动查询。
-示例以文档中的代码片段展示。只想使用现成官方插件，可以直接阅读[插件包](#插件包)。
+示例以文档中的代码片段展示。只想使用现成官方插件，可以直接阅读[能力包组合](#能力包组合)。
 
 普通业务能力优先使用 `#[extension_point]` + `#[capability(...)]` + `CapabilityPack` 声明并自动装配；
 需要工具描述、模型绑定或配置值时使用 `#[capability_factory]`。
-`Plugin` 和 `PluginPack` 仍是完整、兼容的 API：前者处理复杂安装和生命周期，后者继续组合官方插件或已有插件。
+`Plugin` 管理服务注册和资源生命周期；`CapabilityPack` 统一组合官方和业务插件、扩展实现及资源。
 
 ## 阅读路线
 
 | 你现在要做什么 | 从哪里开始 |
 |---|---|
 | 第一次添加业务能力，不知道从哪里开始 | [引入依赖](#引入依赖) → [用能力包提供系统上下文](#用能力包提供系统上下文) |
-| 不明白 Provider、Plugin 和插件包的关系 | [基本概念](#基本概念) |
+| 不明白 Provider、Plugin 和能力包的关系 | [基本概念](#基本概念) |
 | 知道业务需求，不知道该实现哪个接口 | [按场景选择扩展点](#按场景选择扩展点) |
 | 想理解插件怎样注册、生效和关闭 | [基本概念](#基本概念) → [依赖与生命周期](#依赖与生命周期) |
-| 想一次配置业务能力、官方插件或已有组合 | [能力包](#能力包) → [插件包](#插件包) |
+| 想一次配置业务能力、官方插件或已有组合 | [能力包](#能力包) → [能力包组合](#能力包组合) |
 | 想启用框架提供的文件、搜索、补丁或系统命令工具 | [能力包](#能力包) → [能力包说明](capability-packs.md) |
 | 想启用或替换默认 Skills | [Skills](skills.md) |
 | 想知道多个 Provider 怎样进入 Agent | [构建时如何收集能力](#构建时如何收集能力) |
@@ -35,13 +35,12 @@
 |---|---|---|
 | 能力接口 | 定义一个业务扩展点，由框架在对应时机调用 | `ContextProvider` 提供系统或开发者指令 |
 | 能力实现 | 保存业务配置，实现接口中的方法 | `ShopContext` 生成商店说明 |
-| `CapabilityPack` | 选择一组宏声明的业务能力，并为当前 Agent 提供配置 | Shop、订单、审计等业务能力 |
+| `CapabilityPack` | 统一分发、配置、版本选择和装配插件与扩展实现 | Shop、订单、审计及官方组合 |
 | 注册封装 | 手工将一个能力实现接入 Plugin 安装流程 | `ContextPlugin` 注册传入的 Provider |
 | `Plugin` | 定义安装过程，可创建资源、解析依赖并注册多种能力 | `OrdersPlugin` 注册订单服务和查询工具 |
-| `PluginPack` | 组合已有 Plugin 安装配置，供应用一次引入 | 官方插件，或兼容的业务注册封装 |
 
 应用通过 `AgentBuilder` 的 `.capability_pack(...)`、`.plugin(...)` 或
-`.plugin_pack(...)` 配置能力；`build().await` 才创建实例并安装插件。运行和关闭等操作统一由
+`.plugin_factory(...)` 配置能力；`build().await` 才创建实例并安装插件。运行和关闭等操作统一由
 Agent 实例完成。添加 Cargo 依赖只让宏声明可发现，**只有选中能力包或手工注册 Plugin 才会生效**。
 Provider 本身不要求实现 `Plugin`。简单业务能力使用能力包；需要组织复杂安装过程时，再阅读
 [什么时候需要自己实现 Plugin](#什么时候需要自己实现-plugin)。
@@ -88,7 +87,7 @@ resolver = "2"
 [workspace.dependencies]
 eliteforge-agent-core = "0.1.0"
 eliteforge-agent-framework = { version = "0.1.0", default-features = false }
-eliteforge-agent-official-plugin-pack = "0.1.0"
+eliteforge-agent-official-capability-pack = "0.1.0"
 ```
 
 这里假设使用的 Cargo 源已提供上述 crate 的 `0.1.0` 版本，仅用于演示依赖声明，
@@ -132,7 +131,7 @@ publish = false
 [dependencies]
 shop-plugin = { path = "../shop-plugin" }
 eliteforge-agent-framework = { workspace = true }
-eliteforge-agent-official-plugin-pack = { workspace = true }
+eliteforge-agent-official-capability-pack = { workspace = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -270,11 +269,11 @@ let provider = FixedContext::new("你是星河商店的客服，请使用中文�
 ```rust
 use eliteforge_agent_core::ContextPlugin;
 use eliteforge_agent_framework::AgentBuilder;
-use eliteforge_agent_official_plugin_pack::EliteForgeOfficialPluginPack;
+use eliteforge_agent_official_capability_pack::EliteForgeOfficialCapabilityPack;
 use shop_plugin::ShopContext;
 
 let agent = AgentBuilder::new()
-    .plugin_pack(EliteForgeOfficialPluginPack::new("agent.sqlite"))
+    .capability_pack(EliteForgeOfficialCapabilityPack::new("agent.sqlite"))
     .plugin(ContextPlugin::new(
         "shop.context",
         ShopContext::new("星河商店"),
@@ -289,7 +288,7 @@ let agent = AgentBuilder::new()
 应用使用 `agent.run(...)` 发起运行，结束使用后调用 `agent.close().await` 关闭资源，错误路径也应执行关闭逻辑。
 
 多个应用需要按配置自动装配同一组业务能力时，使用上面的 `CapabilityPack` 声明。
-若只是复用已经创建好的 Provider，再使用兼容的[仅组合 Provider 的插件包](#仅组合-provider-的包)。
+若只是复用已经创建好的 Provider，再使用兼容的[能力包组合](#能力包组合)。
 
 ### ContextPlugin 具体做了什么
 
@@ -326,7 +325,7 @@ context.contribute(ContextService(self.implementation.clone()))
 | 添加按配置创建的业务上下文 | `ContextProvider` impl + `#[capability]`；应用选择 `CapabilityPack` |
 | 手工添加已有系统上下文 | `ContextProvider` 实现；使用 `ContextPlugin` 注册 |
 | 添加一段固定指令 | 使用 `FixedContext` 和 `ContextPlugin` |
-| 复用一组已经创建好的 Provider | 用注册封装组成兼容的 `PluginPack`，应用只安装包 |
+| 复用一组已经创建好的 Provider | 用注册封装组成兼容的 `CapabilityPack`，应用只安装包 |
 | 安装时创建并管理业务资源 | `Plugin::install`，并登记适用的关闭回调 |
 | 一次安装工具、上下文等多种能力 | 自定义 `Plugin`，或将独立注册配置组成包 |
 
@@ -659,7 +658,7 @@ Embedding、重排序、图片、视频、语音和实时会话各有独立接�
 
 每种角色在同一个 Agent 内只有一个实现。官方包的 SQLite 插件已经注册了上面全部角色。
 换 SQLite 路径或参数时，修改包的 `.storage(...)`。
-**要改用另一套存储实现，应单独装配插件或建立自己的插件包**：当前官方包的 `storage` 参数只接受 `SqliteStoragePlugin`。
+**要改用另一套存储实现，应单独装配插件或建立自己的能力包**：当前官方包的 `storage` 参数只接受 `SqliteStoragePlugin`。
 
 例如，会话存储可换成你自己的实现，执行状态和交互存储继续使用其他已实现的插件；
 不要再同时安装覆盖这些角色的整套 SQLite 存储插件。
@@ -701,7 +700,7 @@ let agent = AgentBuilder::new()
 不会运行。factory 始终同步且只读取包配置；连接、后台任务和服务绑定放进返回插件的
 `install`，完整服务集合在 `ready` 中读取。
 
-这不是 `PluginPack` 的新名字。能力包解决“发现什么业务能力、何时按哪个配置创建”的问题；
+能力包统一负责业务发现、配置、组合和版本选择；
 普通 Plugin 仍解决复杂安装和资源生命周期。完整宏字段和错误边界见
 [能力包与自动装配](capability-packs.md)。
 
@@ -709,45 +708,23 @@ let agent = AgentBuilder::new()
 业务资源语义。目录范围、可选程序限制、跨平台调用方式和安全边界见
 [能力包说明](capability-packs.md)。
 
-## 插件包
+## 能力包组合
 
-`PluginPack` 接口返回 `Vec<Arc<dyn Plugin>>`，用于组合已有安装配置。它保持兼容，官方插件包
-继续使用它；不要把 `PluginPack` 当作自动发现的 `CapabilityPack`。
-包内可以全部是 Provider 的注册封装，也可以包含管理连接的插件，包作者不必为每个 Provider 自己实现 `Plugin`。
-应用只调用 `.plugin_pack(pack)`，包内成员会随 `build()` 一起安装。
-
-### 仅组合 Provider 的包
-
-下面这个业务包只提供两项上下文能力。`ShopContext` 和 `FixedContext` 都是 Provider 实现，
-包作者用兼容 API 所需的 `ContextPlugin` 完成注册声明：
+能力包通过 `plugins()` 提供直接成员，通过 `included_packs()` 提供子包。构建器同时支持普通插件和可重建工厂；元数据收集阶段不连接数据库、不启动后端。
 
 ```rust
-use eliteforge_agent_core::{ContextPlugin, FixedContext, Plugin, PluginPack, PluginPackBuilder};
-use shop_plugin::ShopContext;
-use std::sync::Arc;
+use eliteforge_agent_core::{CapabilityPackBuilder, ContextPlugin, FixedContext};
 
-pub struct ShopContextPack;
-
-impl PluginPack for ShopContextPack {
-    fn into_plugins(self) -> Vec<Arc<dyn Plugin>> {
-        PluginPackBuilder::new()
-            .plugin(ContextPlugin::new("shop.context", ShopContext::new("星河商店")))
-            .plugin(ContextPlugin::new(
-                "shop.rules",
-                FixedContext::new("查询订单状态时以订单工具返回的结果为准。"),
-            ))
-            .into_plugins()
-    }
-}
+let context_pack = CapabilityPackBuilder::new("shop.context-pack", ())
+    .plugin(ContextPlugin::new("shop.rules", FixedContext::new("以订单工具返回的结果为准。")));
+// AgentBuilder::new().capability_pack(context_pack).build().await
 ```
 
-应用在已有的模型和存储配置上添加 `.plugin_pack(ShopContextPack)` 即可，两个 Provider 都会生效。
-这里没有自定义 `impl Plugin`，但当前包接口仍要求通过注册封装容纳 Provider，
-不能直接把 `ShopContext` 放进 `into_plugins` 的返回列表。
+直接提供的插件在重配时保留原实例和配置。需要切换配置的插件改用 `ConfiguredPluginFactory`；工厂在依赖图通过预检之后执行。
 
-### 官方插件包
+### 官方能力包
 
-`EliteForgeOfficialPluginPack` 默认安装当前全部 8 个官方插件：
+`EliteForgeOfficialCapabilityPack` 默认安装当前全部 8 个官方插件：
 
 | 插件 | 默认行为 | 修改配置 |
 |---|---|---|
@@ -761,34 +738,12 @@ impl PluginPack for ShopContextPack {
 | OTel | 构建时读取上层应用全局 tracer/meter provider | `.telemetry(plugin)` 替换默认 provider；没有 exporter 时不导出 |
 
 `model`、`storage`、`human`、`agents`、`skills`、`agui`、`mcp`、`telemetry` 模块从官方包重新导出相应插件类型。
-具体配置例子见[快速上手](quickstart.md#使用官方插件包)；模型环境变量见[模型插件](model-plugins.md#默认装配)。
+具体配置例子见[快速上手](quickstart.md#使用官方能力包)；模型环境变量见[模型插件](model-plugins.md#默认装配)。
 `.without_model()` 只移除包内模型；Framework 的自动补充开关仍由 `.default_models(false)` 控制。
 
 ### 组合多种能力
 
-可以把上下文包、订单插件和耗时中间件继续组合成业务包：
-
-```rust
-use eliteforge_agent_core::{Plugin, PluginPack, PluginPackBuilder, RunMiddlewarePlugin};
-use shop_plugin::{orders::OrdersPlugin, timing::TimingMiddleware};
-use std::sync::Arc;
-
-struct ShopPluginPack;
-
-impl PluginPack for ShopPluginPack {
-    fn into_plugins(self) -> Vec<Arc<dyn Plugin>> {
-        PluginPackBuilder::new()
-            .plugin_pack(ShopContextPack)
-            .plugin(OrdersPlugin)
-            .plugin(RunMiddlewarePlugin::new("shop.timing", TimingMiddleware))
-            .into_plugins()
-    }
-}
-```
-
-应用再调用 `.plugin_pack(ShopPluginPack)`。包只负责展开配置；包内插件、单独插件和嵌套包最终进入同一个依赖图。
-展开时不连接数据库、不启动业务任务；资源在插件 `install` 中创建。
-官方包的成员由[展开实现](../crates/plugin/eliteforge-agent-official-plugin-pack/src/lib.rs)显式维护，新增官方插件时要同步更新。
+能力包可以通过 `CapabilityPackBuilder::include(child)` 嵌套，并通过 `.plugin(...)` 或 `.plugin_factory(...)` 添加成员。插件、扩展实现和子包统一参与依赖排序。官方组合由[实现](../crates/plugin/eliteforge-agent-official-capability-pack/src/lib.rs)维护。
 
 ## 构建时如何收集能力
 
@@ -801,7 +756,7 @@ impl PluginPack for ShopPluginPack {
              ▼                                          ▼
 静态 CapabilityDescriptor                     install 时注册服务
              │                                          │
-capability_pack + include 筛选                 plugin / plugin_pack 配置
+capability_pack + include 筛选                 plugin / capability_pack 配置
              │                                          │
 预校验 → factory → 适配 Plugin ────────────────┘
                          │
@@ -821,7 +776,7 @@ all::<ContextService>() → Agent 的 ContextProvider 列表
 | 仅在依赖 crate 中写 `impl ContextProvider` | 不会 |
 | 标记 `#[capability]`，但不选择对应包 | 不会，factory 也不运行 |
 | 标记 `#[capability]` 并选择对应 `CapabilityPack` | 会 |
-| 把 Provider 交给 `ContextPlugin`，再直接或通过 `PluginPack` 安装 | 会 |
+| 把 Provider 交给 `ContextPlugin`，再直接或通过 `CapabilityPack` 安装 | 会 |
 | 在自定义 Plugin 中调用 `contribute(ContextService(...))` | 会 |
 | 仅把业务对象作为自身类型注册 | 不会，业务对象类型与 `ContextService` 是不同注册键 |
 
@@ -850,7 +805,7 @@ all::<ContextService>() → Agent 的 ContextProvider 列表
 正确的配置替换发生在包展开之前：
 
 ```rust
-let pack = EliteForgeOfficialPluginPack::new("agent.sqlite")
+let pack = EliteForgeOfficialCapabilityPack::new("agent.sqlite")
     .storage(SqliteStoragePlugin::new("other.sqlite"));
 ```
 
@@ -897,7 +852,7 @@ let catalog = context.services()
 | `CapabilityPackBuilder::new / include` | 保存当前 Agent 配置和显式子包；不调用 factory |
 | 能力包解析 | 先预校验，再按稳定依赖顺序调用同步 factory 并适配为 Plugin |
 | `new`、各配置方法 | 保存普通 Plugin 配置，校验同步参数 |
-| `PluginPack::into_plugins` | 组合插件配置 |
+| `CapabilityPack::plugins` | 组合插件配置 |
 | `Plugin::install` | 创建连接或后台任务，立即注册清理回调，再注册服务或扩展 |
 | `Plugin::ready` | 全部安装完成后读取完整服务/扩展集合、绑定消费者和校验配置；不能再注册服务 |
 | 扩展点回调 | 执行业务，遵守传入的取消信号和限额 |
@@ -918,7 +873,7 @@ let catalog = context.services()
 
 | 现象 | 原因与处理 |
 |---|---|
-| 只引入依赖，能力没有生效 | 还没有选择 `.capability_pack(...)`，或没有调用 `.plugin(...)` / `.plugin_pack(...)` 注册 |
+| 只引入依赖，能力没有生效 | 还没有选择 `.capability_pack(...)`，或没有调用 `.plugin(...)` / `.capability_pack(...)` 注册 |
 | 实现了接口，框架仍没调用 | 能力包路径核对 trait impl 是否标记 `#[capability]` 且包已选中；第三方接口核对是否有 `#[extension_point]`，手工路径核对服务或扩展是否已注册 |
 | 未选的业务包仍创建了资源 | factory、连接或后台任务写进了静态注册/构造路径；factory 只接收配置，资源初始化移到 Plugin 安装期 |
 | 加上第二个存储插件就构建失败 | 重复插件 ID 或唯一存储角色冲突；修改现有配置，或重新组合存储插件 |

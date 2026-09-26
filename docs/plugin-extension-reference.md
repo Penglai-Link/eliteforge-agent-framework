@@ -6,7 +6,7 @@
 业务能力由接口实现提供。`ContextPlugin`、`ToolProviderPlugin` 等仍是可用的手工注册封装，
 但能力包不再要求业务方了解它们。用 Core 导出的 `#[extension_point]` 声明接口，再用
 `#[capability(...)]` 标记实现；应用选择 `CapabilityPack` 后，框架创建、注册并管理生命周期。
-手工注册封装和 `PluginPack` 仍完全兼容。
+手工注册封装仍然可用，组合入口统一为 `CapabilityPack`。
 
 ## 能力包自动装配
 
@@ -103,7 +103,7 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 | `CapabilityPackBuilder::skills(source)` | 内嵌 `capability_skills!()`、目录或其他 `CapabilitySkillSource` | 仅已选包在构建时加入 Skills 聚合 | 内嵌来源需 `AgentBuilder::capability_skills_root`；目录直接读取 |
 | `CapabilityPack` | 自定义包 ID、配置和显式子包闭包 | Agent build 前解析 | 每个选中 Agent 独立创建业务对象 |
 | `Plugin` | `id()`、`install(&mut PluginContext)`；可选 `ready(&mut PluginReadyContext)`；需要前置插件时实现 `dependencies()` | 先全部 install，再全部 ready | ID 在一个 Agent 内唯一；ready 不能注册服务 |
-| `PluginPack` | `into_plugins(self)` 返回已有 Plugin 安装配置；可全部是 Provider 的注册封装 | `.plugin_pack(pack)` 时展开 | 兼容 API；可以多个、可以嵌套；官方包继续使用 |
+| `CapabilityPack` | `plugins()` 返回直接成员，`included_packs()` 返回子包；支持工厂和声明式实现 | `.capability_pack(pack)` 时展开 | 统一组合 API；支持多个、嵌套及外部版本选择 |
 | `PluginContext::provide<T>` | 唯一角色的服务对象 | 安装期间写入容器 | 同类型一个 |
 | `PluginContext::contribute<T>` | 某类能力的一个贡献 | 安装期间写入容器 | 同类型多个，保留注册顺序 |
 | `PluginContext::contribute_extension<T>` | `#[extension_point]` trait 的实现 | 安装期间写入扩展注册表 | 多实现或 `single` 由 trait 声明决定 |

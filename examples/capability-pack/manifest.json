@@ -1,0 +1,355 @@
+{
+  "manifest_version": 1,
+  "id": "demo.pack",
+  "name": "Offline SDK demo",
+  "version": "1.0.0",
+  "framework": "^0.1",
+  "backend": {
+    "executables": {
+      "aarch64-macos": "bin/backend",
+      "x86_64-macos": "bin/backend",
+      "x86_64-linux": "bin/backend",
+      "aarch64-linux": "bin/backend",
+      "x86_64-windows": "bin/backend.exe"
+    }
+  },
+  "plugins": [
+    "demo.plugin"
+  ],
+  "extension_points": [
+    {
+      "id": "demo.contract",
+      "owner": "demo.plugin",
+      "version": "1.0.0",
+      "category": "custom",
+      "multiplicity": "multiple"
+    }
+  ],
+  "implementations": [
+    {
+      "id": "demo.chat",
+      "extension": "framework.chat-model",
+      "contract": "^1",
+      "metadata": {
+        "connection": "demo",
+        "models": [
+          {
+            "id": "offline",
+            "context_window_tokens": null,
+            "max_input_tokens": null,
+            "supports_tools": true,
+            "input_modalities": [
+              "text"
+            ],
+            "output_modalities": [
+              "text"
+            ],
+            "supports_structured_output": false,
+            "metadata": {}
+          }
+        ],
+        "discovery": "demo.discovery",
+        "token_estimator": "demo.estimator"
+      },
+      "dependencies": [
+        "demo.discovery",
+        "demo.estimator",
+        "demo.custom"
+      ]
+    },
+    {
+      "id": "demo.state",
+      "extension": "framework.state-store",
+      "contract": "^1"
+    },
+    {
+      "id": "demo.interactions",
+      "extension": "framework.interaction-store",
+      "contract": "^1"
+    },
+    {
+      "id": "demo.conversations",
+      "extension": "framework.conversation-store",
+      "contract": "^1"
+    },
+    {
+      "id": "demo.middleware",
+      "extension": "framework.run-middleware",
+      "contract": "^1"
+    },
+    {
+      "id": "demo.loop",
+      "extension": "framework.agent-loop",
+      "contract": "^1",
+      "metadata": {
+        "requires_model": true,
+        "supports_resume": true,
+        "requires_state": true,
+        "requires_interactions": true
+      },
+      "dependencies": [
+        "demo.custom"
+      ]
+    },
+    {
+      "id": "demo.custom",
+      "extension": "demo.contract",
+      "contract": "^1"
+    },
+    {
+      "id": "demo.embedding",
+      "extension": "framework.embedding",
+      "contract": "^1",
+      "metadata": {
+        "model": {
+          "connection": "demo",
+          "model": "media"
+        }
+      }
+    },
+    {
+      "id": "demo.rerank",
+      "extension": "framework.rerank",
+      "contract": "^1",
+      "metadata": {
+        "model": {
+          "connection": "demo",
+          "model": "media"
+        }
+      }
+    },
+    {
+      "id": "demo.image",
+      "extension": "framework.image",
+      "contract": "^1",
+      "metadata": {
+        "model": {
+          "connection": "demo",
+          "model": "media"
+        }
+      }
+    },
+    {
+      "id": "demo.video",
+      "extension": "framework.video",
+      "contract": "^1",
+      "metadata": {
+        "model": {
+          "connection": "demo",
+          "model": "media"
+        },
+        "protocol": "demo/video",
+        "capabilities": {
+          "input": [
+            "text"
+          ],
+          "output": [
+            "video"
+          ],
+          "streaming": false,
+          "cancellation": true
+        }
+      }
+    },
+    {
+      "id": "demo.recognition",
+      "extension": "framework.speech-recognition",
+      "contract": "^1",
+      "metadata": {
+        "model": {
+          "connection": "demo",
+          "model": "media"
+        }
+      }
+    },
+    {
+      "id": "demo.synthesis",
+      "extension": "framework.speech-synthesis",
+      "contract": "^1",
+      "metadata": {
+        "model": {
+          "connection": "demo",
+          "model": "media"
+        }
+      }
+    },
+    {
+      "id": "demo.realtime",
+      "extension": "framework.realtime",
+      "contract": "^1",
+      "metadata": {
+        "model": {
+          "connection": "demo",
+          "model": "media"
+        },
+        "capabilities": {
+          "input": [
+            "audio"
+          ],
+          "output": [
+            "text"
+          ],
+          "streaming": true,
+          "cancellation": true
+        }
+      }
+    },
+    {
+      "id": "demo.estimator",
+      "extension": "framework.token-estimator",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.memory",
+      "extension": "framework.long-term-memory",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.discovery",
+      "extension": "framework.model-discovery",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.selection",
+      "extension": "framework.model-selection",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.context",
+      "extension": "framework.context-provider",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.contributor",
+      "extension": "framework.context-contributor",
+      "contract": "^1",
+      "metadata": {
+        "block_id": "remote"
+      }
+    },
+    {
+      "id": "demo.reducer",
+      "extension": "framework.context-reducer",
+      "contract": "^1",
+      "metadata": {
+        "global_history": false
+      }
+    },
+    {
+      "id": "demo.budget",
+      "extension": "framework.context-budget",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.assembler",
+      "extension": "framework.context-assembler",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.model-middleware",
+      "extension": "framework.model-middleware",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.node",
+      "extension": "framework.workflow-node",
+      "contract": "^1",
+      "metadata": {
+        "kind": "remote.echo"
+      }
+    },
+    {
+      "id": "demo.node-middleware",
+      "extension": "framework.node-middleware",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.lifecycle",
+      "extension": "framework.lifecycle-hook",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.observation",
+      "extension": "framework.event-sink",
+      "contract": "^1",
+      "metadata": {
+        "subscriptions": [
+          "RunStarted"
+        ]
+      }
+    },
+    {
+      "id": "demo.output",
+      "extension": "framework.run-output",
+      "contract": "^1",
+      "metadata": {}
+    },
+    {
+      "id": "demo.tools",
+      "extension": "framework.tool-provider",
+      "contract": "^1.0",
+      "metadata": {}
+    },
+    {
+      "id": "demo.tool-policy",
+      "extension": "framework.tool-policy",
+      "contract": "^1.0",
+      "metadata": {}
+    },
+    {
+      "id": "demo.tool-middleware",
+      "extension": "framework.tool-middleware",
+      "contract": "^1.0",
+      "metadata": {}
+    },
+    {
+      "id": "demo.skills",
+      "extension": "framework.skills",
+      "contract": "^1.0",
+      "metadata": {}
+    },
+    {
+      "id": "demo.summaries",
+      "extension": "context.summary-store",
+      "contract": "^1"
+    },
+    {
+      "id": "demo.artifacts",
+      "extension": "context.artifact-store",
+      "contract": "^1",
+      "metadata": {
+        "max_artifact_bytes": 33554432,
+        "max_read_bytes": 65536
+      }
+    }
+  ],
+  "pages": [
+    {
+      "id": "demo.page",
+      "title": "Plugin page",
+      "plugin": "demo.plugin",
+      "entry": "ui/index.html",
+      "topics": [
+        "chart"
+      ]
+    }
+  ],
+  "permissions": [
+    "model.invoke",
+    "extension.invoke",
+    "context.identity",
+    "state.*",
+    "interaction.*",
+    "node.*"
+  ]
+}

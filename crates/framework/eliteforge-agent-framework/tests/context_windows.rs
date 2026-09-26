@@ -50,8 +50,8 @@ impl EventSink for Reports {
     }
 }
 
-#[test]
-fn independent_quotas_reject_overcommit_and_preserve_unused_capacity() {
+#[tokio::test]
+async fn independent_quotas_reject_overcommit_and_preserve_unused_capacity() {
     let blocks = vec![
         ContextBlockConfig::new("a", BlockBudget::tokens(20)),
         ContextBlockConfig::new(
@@ -70,6 +70,7 @@ fn independent_quotas_reject_overcommit_and_preserve_unused_capacity() {
                 max_messages: 10,
             },
         )
+        .await
         .unwrap();
     assert_eq!(
         allocations.iter().map(|b| b.max_tokens).collect::<Vec<_>>(),
@@ -84,6 +85,7 @@ fn independent_quotas_reject_overcommit_and_preserve_unused_capacity() {
                     max_messages: 10
                 }
             )
+            .await
             .is_err()
     );
     let invalid = vec![ContextBlockConfig::new("bad", BlockBudget::ratio(10_001))];
@@ -96,6 +98,7 @@ fn independent_quotas_reject_overcommit_and_preserve_unused_capacity() {
                     max_messages: 10
                 }
             )
+            .await
             .is_err()
     );
 }
@@ -304,8 +307,9 @@ async fn structured_assistant_output_is_saved_and_old_messages_still_decode() {
 }
 
 struct InvalidAllocation;
+#[async_trait]
 impl ContextBudgetPolicy for InvalidAllocation {
-    fn allocate(
+    async fn allocate(
         &self,
         _: &[ContextBlockConfig],
         _: ContextBudget,
