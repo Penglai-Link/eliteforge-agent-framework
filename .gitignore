@@ -4,3 +4,29 @@ sdk/page/dist/
 output/
 .playwright-cli/
 .capability-dev/
+
+# Operating systems
+.DS_Store
+._*
+.Spotlight-V100/
+.Trashes/
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.directory
+
+# IDEs and editors
+.idea/
+.vscode/
+*.iml
+.project
+.classpath
+.settings/
+.metadata/
+nbproject/private/
+*.sublime-workspace
+.history/
+*.swp
+*.swo
+*~
