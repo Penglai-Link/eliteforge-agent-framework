@@ -3,7 +3,53 @@
 能力包是应用选择业务能力的入口。一个能力包可以同时带上接口实现、普通插件、工具、模型绑定和
 Skills 资源。业务开发通常只需要做三件事：**声明接口、实现接口、让应用选择能力包**。
 
-`CapabilityPack` 同时支持声明式成员、插件工厂与已创建插件。独立的插件包概念已经移除；所有成员进入同一个依赖图和生命周期。动态安装、进程与页面见[动态能力包](dynamic-capability-packs.md)。
+`CapabilityPack` 同时支持声明式成员、插件工厂与已创建插件。独立的插件包概念已经移除；所有成员进入同一个依赖图和生命周期。动态安装、进程与页面见[动态能力包](dynamic-capability-runtime.md)。
+
+## 能力包包含什么
+
+能力包把完成一类业务所需的代码和资料放在一起，供应用统一启用。例如，一个“订单能力包”可以
+同时提供查询订单的工具、订单处理规则和审核操作指南。
+
+| 可以放什么 | 在订单能力包中的例子 |
+|---|---|
+| 工具 | 查询订单状态、修改订单备注，供 Agent 调用 |
+| MCP 服务 | 启动本地订单 MCP 子进程，或连接远程 MCP，让 Agent 使用服务提供的工具 |
+| 上下文和业务规则 | 向 Agent 提供订单背景，或实现支付校验等业务逻辑 |
+| 模型接入与选择规则 | 配置这个业务使用的模型，以及如何选择模型 |
+| 插件 | 接入已有功能，管理连接、后台任务等运行资源 |
+| Skills 和配套资料 | 用 `SKILL.md` 说明审核步骤，附带参考文档、脚本和模板 |
+
+这些内容按需提供，不必全部具备。比如，只提供订单查询工具，也可以做成一个能力包。
+工具负责“执行操作”，Skill 负责“说明怎么做”；附带脚本不会因启用能力包而自动执行。
+
+## 文件怎么组织
+
+下面以一个 Rust 包为例，按业务用途拆分代码。文件名只是示例，可以按项目习惯调整：
+
+~~~text
+shop-capabilities/
+├── Cargo.toml                 # 声明 Rust 依赖
+├── build.rs                   # 内嵌 Skills 时，通知构建系统跟踪资源变化
+├── src/
+│   ├── lib.rs                 # 对外提供 shop_pack(config)，供应用选用
+│   ├── config.rs              # 订单服务地址等配置
+│   ├── tools.rs               # 查询订单、修改备注等工具
+│   ├── mcp.rs                 # MCP 启动命令、参数和连接配置（需要时添加）
+│   ├── context.rs             # 提供订单背景和处理规则
+│   └── models.rs              # 模型接入与选择规则（需要时添加）
+└── skills/                    # 技能说明和配套资料（需要时添加）
+    └── order-review/
+        ├── SKILL.md           # 订单审核的适用场景和操作步骤
+        ├── scripts/           # 辅助脚本（可选）
+        ├── references/        # 审核规则等参考文档（可选）
+        └── assets/            # 报告模板等素材（可选）
+~~~
+
+代码通过 `#[capability(pack = "shop")]` 或 `#[capability_factory(pack = "shop")]` 声明
+自己属于哪个包；放进某个目录并不会自动加入能力包。`shop_pack(config)` 用
+`CapabilityPackBuilder` 指定包 ID、配置和 Skills 来源，也可以用 `.include(...)` 组合其他能力包。
+
+应用选择这个包后，框架才会创建其中的工具、插件等实例，并准备 Skills 资源。具体声明和接入方式见下文。
 
 ## 最小扩展点
 
@@ -164,6 +210,55 @@ factory 直接返回 `SkillsPlugin` 时，框架会把它识别为唯一的 Skil
 `SkillProvider` 与第三方 `#[extension_point]` 也可直接声明。摘要和附件接口属于
 `eliteforge-agent-context`，引入该 crate 后同样可直接声明；SQLite 存储插件继续重新导出它们的
 服务和插件类型。
+
+## MCP 也是能力包成员
+
+能力包可以预先配置 MCP 服务。应用启用包后，框架会在安装插件时启动本地 MCP 子进程，或连接
+远程 MCP 服务，并把它接入 Agent 的工具来源。业务代码无需为每个 MCP 工具再写一层 Rust 工具实现。
+
+例如，在 `mcp.rs` 中声明订单 MCP，使用现有的 `#[capability_factory]` 返回 `McpToolsPlugin`：
+
+~~~rust
+use eliteforge_agent_core::capability_factory;
+use eliteforge_agent_official_plugin_tools_mcp::{McpConfig, McpToolsPlugin, McpTransport};
+
+#[capability_factory(pack = "shop")]
+fn order_mcp() -> McpToolsPlugin {
+    McpToolsPlugin::new(
+        "shop.mcp.orders",
+        McpConfig::new(
+            "orders",
+            McpTransport::Stdio {
+                program: "/opt/shop/bin/order-mcp".into(),
+                args: vec!["--stdio".into()],
+                env: Default::default(),
+                current_dir: None,
+                inherit_env: true,
+            },
+        ),
+    )
+}
+~~~
+
+能力包 crate 需要依赖 `eliteforge-agent-official-plugin-tools-mcp`，并在 `lib.rs` 中声明
+`mod mcp;`。这里的可执行文件路径和参数只是示例，需替换为实际服务的启动方式；如需由应用传入，
+可使用前文的 `config = ShopConfig` 工厂参数。
+
+~~~text
+应用选择 shop 能力包
+  → 工厂创建 MCP 插件配置
+  → 插件安装：启动 MCP 子进程并完成连接
+  → 注册工具来源：发现 MCP 工具，交给 Agent 调用
+  → Agent 关闭：关闭连接并清理子进程
+~~~
+
+`Stdio` 会启动新进程，支持指定命令、参数、环境变量和工作目录；`StreamableHttp` 连接已有的远程
+服务，不启动本地进程。工厂只创建配置，实际启动发生在 `AgentBuilder::build().await` 的插件安装阶段。
+连接失败会使构建失败；工具清单通过工具来源发现，并非在工厂中写死。
+
+同一能力包可以声明多个 MCP 插件，为它们设置不同的插件 ID 和工具命名空间即可。每个 Agent
+独立建立连接；使用 stdio 时，也会分别启动子进程。应用需提前准备可执行文件及其运行环境，
+能力包不会自动安装这些依赖。MCP 工具调用仍受 Agent 的工具策略控制。
 
 ## Skills 是能力包成员
 
