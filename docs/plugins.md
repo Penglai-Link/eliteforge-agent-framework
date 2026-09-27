@@ -9,6 +9,19 @@
 需要工具描述、模型绑定或配置值时使用 `#[capability_factory]`。
 `Plugin` 管理服务注册和资源生命周期；`CapabilityPack` 统一组合官方和业务插件、扩展实现及资源。
 
+本页的 Rust Plugin 和声明式能力包编译进宿主，运行在宿主进程内。
+宿主通过 Cargo 依赖、features 和代码依赖选择编译内容，再通过 AgentBuilder 选择启用内容。
+官方默认插件和第三方 Rust 插件使用相同的原生装配链；未选中的声明式能力不执行工厂。
+
+独立安装的扩展使用[动态能力包](dynamic-capability-runtime.md)。清单声明 `backend`，
+且选中了扩展实现、插件或页面时，运行时启动独立后端；官方发布的安装包也遵循这条规则。
+未声明后端的静态包不启动能力包后端。来源验签不改变加载方式，
+MCP stdio 与系统命令进程则由相应插件管理。
+
+仓库中的具体实现按职责放在 `crates/plugin/<分类>`，Rust 能力包装配入口放在 `crates/capability`。
+这些目录不承担官方身份认证或进程隔离判断；外部安装包由管理器保存和选择。
+来源、交付方式、执行方式及默认能力见 [Crates 组织](../crates/README.md)。
+
 ## 阅读路线
 
 | 你现在要做什么 | 从哪里开始 |
@@ -19,6 +32,7 @@
 | 想理解插件怎样注册、生效和关闭 | [基本概念](#基本概念) → [依赖与生命周期](#依赖与生命周期) |
 | 想一次配置业务能力、官方插件或已有组合 | [能力包](#能力包) → [能力包组合](#能力包组合) |
 | 想启用框架提供的文件、搜索、补丁或系统命令工具 | [能力包](#能力包) → [能力包说明](capability-packs.md) |
+| 想对照主流 Agent 工具，判断已有能力和待补齐项 | [工具能力核查](tool-capability-audit.md) |
 | 想启用或替换默认 Skills | [Skills](skills.md) |
 | 想知道多个 Provider 怎样进入 Agent | [构建时如何收集能力](#构建时如何收集能力) |
 | 想判断多个插件能不能共存 | [多个插件与配置替换](#多个插件与配置替换) |
@@ -587,7 +601,7 @@ A 前置 → B 前置 → 业务执行 → B 后置 → A 后置
 自定义输出时，在同步的 `prepare` 中创建每次执行独立的通道，把接收端写入 `RunOutputs`，
 把发送端放入该次运行的 `Extensions`；再由 `EventSink` 转换并发送事件。
 `prepare` 在首个运行事件前执行，同一接收端只能通过 `agent.output::<T>` 取一次。
-完整实现可参考[AGUI 插件](../crates/plugin/eliteforge-agent-official-plugin-agui/src/lib.rs)，前端接法见[AGUI 文档](agui.md)。
+完整实现可参考[AGUI 插件](../crates/plugin/protocol/eliteforge-agent-official-plugin-agui/src/lib.rs)，前端接法见[AGUI 文档](agui.md)。
 
 ### 让应用主动调用插件能力
 
@@ -743,7 +757,7 @@ let context_pack = CapabilityPackBuilder::new("shop.context-pack", ())
 
 ### 组合多种能力
 
-能力包可以通过 `CapabilityPackBuilder::include(child)` 嵌套，并通过 `.plugin(...)` 或 `.plugin_factory(...)` 添加成员。插件、扩展实现和子包统一参与依赖排序。官方组合由[实现](../crates/plugin/eliteforge-agent-official-capability-pack/src/lib.rs)维护。
+能力包可以通过 `CapabilityPackBuilder::include(child)` 嵌套，并通过 `.plugin(...)` 或 `.plugin_factory(...)` 添加成员。插件、扩展实现和子包统一参与依赖排序。官方组合由[实现](../crates/capability/eliteforge-agent-official-capability-pack/src/lib.rs)维护。
 
 ## 构建时如何收集能力
 
@@ -866,8 +880,8 @@ let catalog = context.services()
 
 插件内部任务用插件生命周期管理；一次运行内的工具连接或临时会话分别使用 `ToolLease`、
 `ConversationSession` 等对应作用域。`RunLifecycleHook::on_finished` 是通知，不是必达的资源释放点。
-真实连接和清理注册可参考[MCP 插件](../crates/plugin/eliteforge-agent-official-plugin-tools-mcp/src/lib.rs)
-与[SQLite 插件](../crates/plugin/eliteforge-agent-official-plugin-storage-sqlite/src/lib.rs)。
+真实连接和清理注册可参考[MCP 插件](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-mcp/src/lib.rs)
+与[SQLite 插件](../crates/plugin/storage/eliteforge-agent-official-plugin-storage-sqlite/src/lib.rs)。
 
 ## 常见问题
 

@@ -87,7 +87,7 @@ let agent = AgentBuilder::new()
     .await?;
 ```
 
-完整示例见 [context_blocks.rs](../crates/plugin/eliteforge-agent-official-plugin-model-genai/examples/context_blocks.rs)。
+完整示例见 [context_blocks.rs](../crates/plugin/model/eliteforge-agent-official-plugin-model-genai/examples/context_blocks.rs)。
 它使用现成实现，只有手工运行时才调用真实模型。
 
 ```text
@@ -289,7 +289,7 @@ let matches = agent.search_memory("authorized-scope", MemoryQuery::new("Rust")).
 ```
 
 示例还配置了工具大结果转存和附件读取：
-[memory_context.rs](../crates/framework/eliteforge-agent-memory/examples/memory_context.rs)。
+[memory_context.rs](../crates/plugin/memory/eliteforge-agent-memory/examples/memory_context.rs)。
 
 ```sh
 cargo run -p eliteforge-agent-memory --example memory_context -- Rust

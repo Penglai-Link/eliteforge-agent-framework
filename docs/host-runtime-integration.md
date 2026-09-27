@@ -1,0 +1,88 @@
+# 宿主运行扩展
+
+产品宿主通过公共扩展参与循环，不需要把另一个 Agent 循环放在 `ChatModel` 内。
+模型适配器每次只负责一次模型请求；外部 Agent 代理作为一次受管模型阶段时，
+远端内部循环和权限仍由对应运行时负责，宿主必须保留它的取消和会话恢复协议。
+
+- `LiveInputSourceService`：在持久化边界注入宿主排队的用户输入；`seal_if_empty` 返回空时必须原子关闭接收，避免结束与 steer 竞争。
+- `ToolCallIdentity`：工具执行扩展中的调用标识，供宿主关联原调用、审计和进度。
+- `ToolResultProcessorService`：工具批次按调用顺序提交前处理结果，包括公共工具和错误结果；宿主可审计、保存观察及外置大结果。
+- `ToolEffect::SetExposedTools`：执行后更新模型可见的 schema；工具授权与 schema 可见性分别处理。
+- `RunLimits::allow_unexposed_tools`：默认关闭。只有宿主已提供独立授权目录、需要领域发现策略时才开启；不能绕过工具租约/撤销检查。
+- `ToolBatchBudgetPolicy::ExecuteAvailable`：宿主可选择执行剩余额度内的调用，再对超出的部分返回预算结果，兼容逐项计数语义。
+
+工具租约管理真实资源。宿主准备阶段先持有清理 guard，移交租约后由 Framework 的运行生命周期关闭；
+取消 future 的 Drop 路径也必须释放资源。跨轮后台命令归属 Agent 服务，关闭 Agent 时统一清理。
+后台命令 ID 不是跨进程重启的持久化任务承诺。
+
+HTTP 普通发送、流式发送、回答恢复和任务入口应复用应用级 Agent 装配句柄及命令/PTY 服务。
+不要在每次请求中创建临时 Framework 存储：产品聊天历史可能仍能回放，但交互 ID、
+框架续传检查点和后台命令会失去连续性。进程重启后通过明确配置的持久化存储恢复对话与交互。
+
+模型 opaque continuation checkpoint 必须与宿主模型/会话权限和输入语义关联。
+恢复前比较作用域及有效消息摘要，可信指令或历史变化时废弃旧 continuation。
+宿主自行提供压缩/上下文装配时，应同步更新预算、系统前缀和产品记录，避免将用户消息升级为可信指令。
+
+测试入口：`host_local_grants`、`async_lifecycle`、`model_and_tool_controls`。
+
+## 桌面终端与 Agent PTY
+
+`eliteforge-agent-capability-tools::pty_pack(service)` 显式选择 `framework.pty` 能力包。
+实现属于官方 local 工具插件，native PTY 只存在于公共 `pty_process` 模块；普通命令的 TTY 模式也使用它。
+宿主可以先创建 `PtyService`，把同一实例交给 Agent 能力包和桌面终端适配器。
+
+- `start` 接收宿主授权的 owner、cwd、程序和参数，返回终端 ID；同一 invocation 重试不会重复启动。
+- `read` 使用字节游标，输出有界，保留未完整收到的 UTF-8 后缀；`list` 只列当前 owner。
+- `start_stream` 提供原始输出字节和退出事件，支持 OSC 与全屏终端；丢弃订阅不停止进程。
+- `write`、`resize`、`stop` 都校验 owner；`release` 删除已授权会话；`close` 关闭整个服务并拒绝新会话。
+- Agent 关闭与 Drop 清理都会释放 PTY。宿主延迟创建 Agent 时，仍需在自身关闭时调用公共服务的 `close`。
+
+owner 不是鉴权令牌，模型不能自行指定 owner；目录与 executable 授权由宿主在调用前确认。
+服务最多保留 64 个会话，每个 owner 8 个；容量紧张时回收已退出会话，保留 invocation 防重复记录。
+终端输出缓存 256 KiB、每页 32 KiB、单次输入 64 KiB。进程不跨宿主重启续存。
+产品 shell hooks、WebSocket 票据、主题和终端展示协议仍由宿主提供，不应复制 PTY 进程管理。
+
+测试：local 插件的 `pty_service` 真实进程测试，以及 capability-tools 的 `capability_packs` 生命周期、TTY 和命令清理回归。
+
+需要模型调用终端时，选择 `scoped_local_tools_pack(scope_provider, service)`。
+此包包括 `framework.pty` 与 scoped local 插件，公开 `terminal_start/read/write/stop/list`；
+只把 `LocalToolGrant.tool_ids` 选中的 ID 加入授权目录。`terminal_owner` 可由可信宿主指定，
+使产品 HTTP 接口与 Agent 使用同一会话归属；未指定时使用 Framework session ID。
+输入 schema 和参数解释来自公共 `terminal_tool_catalog` / `PtyTools`，宿主只做显示名与业务配置映射。
+`terminal_start` 省略 args 时使用宿主选定的非登录 shell，显式 args 保留 literal argv；
+裸 shell 只能通过 `interactive:true` 显式启动。跨轮会话与重复 invocation 防护由共享服务负责。
+
+
+## 外部 Agent 能力包
+
+`eliteforge-agent-capability-external::external_agent_pack()` 注册
+`framework.external/agent` 模型连接。外部 Agent 的内部工具循环由其自身管理；
+本地 Framework 统一管理运行准入、取消、持久化、模型阶段和原生会话恢复。
+
+- 官方 `model-external` 插件提供 Codex/OpenCode CLI 参数、JSON 行解析、流式输出、
+  使用量、进程树和取消清理。CLI 必须配置存在的绝对工作目录，禁止沿用后端进程目录。
+- `JsonAgentBridge` 负责既有 JSON 桥接服务的 start/resume/cancel HTTP 请求。
+  宿主传入配置好的 HTTP client 和业务 JSON；这是配置的桥接协议，不表示直接实现
+  Codex app-server 或 OpenCode ACP 原生协议。
+- 宿主在 RunRequest 扩展中提供 `ExternalStage`：授权范围指纹、显式原生会话 ID、
+  是否要求续传以及 `ExternalAgentInvocation` 业务投影。
+- 插件只恢复相同模型连接、相同授权范围的原生会话。显式会话优先；要求续传却没有
+  有效会话时在执行前失败。会话检查点随 Framework 对话持久化。
+- 宿主保留敏感信息授权、提示词与业务 DTO 映射；不得复制进程管理或会话恢复循环。
+
+
+## 上下文准备与调用预算
+
+`PreparingContextAssembler` 接受 `ContextPreparationPolicy`。每次宿主返回已准备的窗口，
+或一个 `ContextReductionJob`（源版本、模型、请求、限制和提交回调）。公共框架通过
+`ChatExecutor::invoke_auxiliary` 调用压缩模型，再通知宿主持久化，然后重新读取投影。
+这使取消、模型超时、usage 和持久化调用预留与普通模型请求走同一条控制链。
+
+同一轮内不允许反复压缩同一个源版本；超过配置次数或压缩失败则终止。
+失败记录回调即使返回成功，也不能吞掉模型失败后继续回答。
+`RunLimits.max_model_calls_per_step` 可同时限制主调用与辅助调用；辅助调用始终为最终
+回答预留一次模型调用。默认 `None` 保持原调用次数行为。
+
+宿主单次模型适配器返回 `Transient`、`ContextOverflow` 或 `Fatal`；重试计数和
+已输出文本后的禁重试由 ModelInvoker 执行。产品模型路由在重新组装前选择回退配置，
+不得在模型适配器内嵌套重试循环，也不得因模型错误重新执行整个工具链。

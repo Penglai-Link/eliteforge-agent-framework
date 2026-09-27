@@ -22,7 +22,7 @@ _WORKSPACE_VERSION := $(if $(findstring $(_HASH),$(_PACKAGE_ID)),$(lastword $(su
 _CARGO_FLAGS := --locked --target-dir target
 _WORKSPACE_FLAGS := $(strip --workspace $(if $(filter true,$(ALL_FEATURES)),--all-features))
 _RUSTDOCFLAGS := $(RUSTDOCFLAGS)
-_TEST_TARGETS := $(sort $(basename $(notdir $(wildcard crates/*/tests/*.rs))))
+_TEST_TARGETS := $(sort $(basename $(notdir $(wildcard crates/*/*/tests/*.rs crates/*/*/*/tests/*.rs))))
 
 ifneq ($(SKIP_TESTS),true)
 ifneq ($(SKIP_TESTS),false)
@@ -45,7 +45,7 @@ ifneq ($(words $(TEST)),1)
 $(error 错误：TEST 必须是一个集成测试文件名，不含 .rs)
 endif
 ifneq ($(filter-out $(_TEST_TARGETS),$(TEST)),)
-$(error 错误：TEST 必须对应 crates/*/tests 下已有的 .rs 文件，不含扩展名)
+$(error 错误：TEST 必须对应 workspace crate 的 tests 目录下已有的 .rs 文件，不含扩展名)
 endif
 endif
 

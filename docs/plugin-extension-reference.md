@@ -111,8 +111,8 @@ context.contribute(ContextService(Arc::new(implementation)))?;
 | `PluginReadyContext::extensions<T>` / `extension<T>` | 读取完整扩展集合或唯一扩展 | `ready` 中 | 不可再注册服务；可登记关闭回调 |
 | `on_shutdown` / `on_cleanup` | 异步关闭 / 同步兜底回调 | Agent 关闭或安装失败、取消、Drop | 按资源回调注册的逆序处理 |
 
-来源：[Plugin 与容器](../crates/framework/eliteforge-agent-plugin-kernel/src/container.rs)、
-[服务注册表](../crates/framework/eliteforge-agent-plugin-kernel/src/services.rs)。
+来源：[Plugin 与容器](../crates/framework/eliteforge-agent-plugin-core/src/container.rs)、
+[服务注册表](../crates/framework/eliteforge-agent-plugin-core/src/services.rs)。
 
 ## 上下文
 
@@ -222,7 +222,7 @@ SQLite 官方存储插件一次注册这些唯一角色。官方包的 `.storage
 
 来源：[会话](../crates/framework/eliteforge-agent-core/src/conversation.rs)、[执行状态](../crates/framework/eliteforge-agent-core/src/state.rs)、
 [交互](../crates/framework/eliteforge-agent-core/src/interaction.rs)、[长期记忆](../crates/framework/eliteforge-agent-core/src/long_term.rs)、
-[摘要](../crates/framework/eliteforge-agent-context/src/summary.rs)、[附件](../crates/framework/eliteforge-agent-context/src/artifact.rs)。
+[摘要](../crates/plugin/context/eliteforge-agent-context/src/summary.rs)、[附件](../crates/plugin/context/eliteforge-agent-context/src/artifact.rs)。
 
 ## 工作流与应用主动操作
 

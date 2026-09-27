@@ -2,6 +2,12 @@
 
 能力包是安装、配置和版本管理单位。插件负责生命周期和服务注册；扩展点定义契约；扩展实现提供行为；页面由宿主挂载。能力包可以只包含其中一部分，也可以包含 Skills、MCP 和资源。没有独立的插件包层。
 
+本文描述由 `CapabilityPackManager` 安装、选择的能力包，发布者可以是官方或第三方。
+宿主编译、链接的 Rust 插件使用进程内 `Plugin::install`；管理器返回的 `ManagedCapabilityPack`
+根据清单和贡献选择加载安装包，需要后端时使用独立进程和 RPC。
+未声明后端的 Skills、静态页面或资源包不启动能力包后端。两条路径都由 Agent 管理装配与关闭。
+目录、默认能力和进程边界见 [Crates 组织](../crates/README.md)。
+
 ```mermaid
 flowchart TB
     H[宿主应用]
@@ -21,6 +27,11 @@ flowchart TB
 
 `eliteforge-agent-capability-runtime` 提供 `CapabilityPackManager`、安装器、版本仓库、实例管理、协议和 Rust 后端 SDK；Framework 重导出公共 API。
 
+它是可嵌入宿主或后端的 Rust 库，负责动态安装包基础设施。
+`eliteforge-agent-capability-macros` 则在编译时生成原生能力声明；
+原生包的发现和工厂调用位于 `agent-core`，插件安装与资源生命周期位于 `plugin-core`。
+这些基础库都放在 `crates/framework/`，具体插件实现放在 `crates/plugin/<分类>/`。
+
 ```rust,ignore
 use eliteforge_agent_framework::*;
 use serde_json::json;
@@ -38,7 +49,23 @@ let agent = AgentBuilder::new().default_models(false)
 
 导入接口包括文件、字节和 HTTPS URL。安装先校验 ZIP 路径、解压容量、每个文件的 SHA-256、Ed25519 签名和清单，再写暂存目录并原子发布。正式导入必须签名；未签名包只允许显式 `InstallPolicy::Development`。读取安装内容时重新校验摘要和已有签名。版本目录不可原地覆盖。
 
+### 发布来源与信任
+
+包 ID、名称、目录和 `official` 字样都不是来源认证。宿主通过 `trust_key(key_id, public_key)`
+维护受信密钥，安装器用 `signature.json` 中的 `key_id` 找到公钥并验签。
+宿主要区分官方和第三方发布者，应将受信公钥与发布者身份对应。
+当前运行时提供通用信任密钥和验签能力，没有自动识别官方身份的分类逻辑。
+
+验签验证包内容是否由对应密钥签署，不改变加载路径，也不授予进程内执行资格。
+官方和第三方安装包采用相同的后端启动规则；安装器不会临时编译或链接包内代码到宿主。
+原生 Rust 插件的编译范围由宿主 Cargo 依赖、features 和代码依赖决定。
+
+### 安装位置与选择
+
 目录布局为 `packs/<id>/versions/<version>`、`data/<id>/<作用域摘要>`、`locks/`、`pins.json` 和 `trusted-keys.json`。包文件与业务数据分离，删除和代码回滚不会修改业务数据。版本选择采用完整依赖图求解，校验循环、契约兼容范围及契约定义包依赖。
+
+这里的根目录由 `CapabilityPackManager::new(root)` 指定，独立于仓库 `crates/capability/`。
+后者保存随仓库提供的 Rust 能力包装配入口。
 
 `installed()` 返回能力包视图，`extension_catalog()` 返回按分类、契约版本和定义方组织的扩展点视图；`running_selections()` 返回具体实例的实际实现选择。内部适配器不属于清单的插件列表，宿主无需把它们当插件展示。
 
@@ -50,9 +77,16 @@ let agent = AgentBuilder::new().default_models(false)
 
 ## 进程与装配
 
+`RuntimePlugin::ready` 先检查 `manifest.backend`，再检查是否选中了扩展实现、插件或页面。
+两者都满足时，调用 `BackendInstance::peer()`，按当前平台的入口启动包内可执行文件并建立 RPC。
+仅声明后端但没有选中这些贡献时，ready 不启动后端；后续远程调用也通过 `peer()` 获取连接。
+有后端的包只要选中了页面，也会触发启动，不能仅按包是否含工具或模型判断。
+源码见[启动判断](../crates/framework/eliteforge-agent-capability-runtime/src/selection.rs)和
+[进程创建](../crates/framework/eliteforge-agent-capability-runtime/src/process.rs)。
+
 清单最多声明一个后端入口，可以按平台选择包内可执行文件。同一包、版本、Agent 作用域和配置版本中的实现共享实例。每次创建 Agent 会分配独立的物理作用域，逻辑命名空间用于业务数据和重启恢复。宿主必须为独立配置的业务实例选择独立逻辑命名空间。
 
-纯静态能力包不启动后端。所选 stdio MCP 由所属实例的生命周期管理，但使用自己的子进程；HTTP MCP 不启动本地进程。插件进程和 MCP 子进程使用进程组／Windows 进程树终止，并由异步监督任务等待退出。进程崩溃后不会偷偷重启或重放调用，必须显式重建。
+未声明后端的静态能力包不启动能力包后端。所选 stdio MCP 由所属实例的生命周期管理，但使用自己的子进程；HTTP MCP 不启动本地进程。插件进程和 MCP 子进程使用进程组／Windows 进程树终止，并由异步监督任务等待退出。进程崩溃后不会偷偷重启或重放调用，必须显式重建。
 
 ```rust,ignore
 let target = manager.select("example.pack", &"=2.0.0".parse()?,
@@ -98,6 +132,19 @@ Rust SDK 的入口是 `BackendServer`、`CapabilityBackend`、`TypedBackend` 和
 插件内部日志、指标和追踪默认留在插件。观测实现只有显式声明 `metadata.subscriptions` 才接收 Framework 事件，其同步发布钩子只做有界入队；拥塞可丢弃观测样本并计数。输出实现使用单独队列：正文不能静默丢弃，溢出明确失败。控制、交互和最终状态以执行结果及持久化记录为准。
 
 ## 示例与开发宿主
+
+`crates/tools/eliteforge-agent-capability-dev-host` 是插件开发用的调试应用，设置了 `publish = false`。
+它帮助开发者先验证安装、后端调用、页面与空闲重配，再接入实际业务宿主。
+正常应用直接使用 Framework／runtime API，不需要依赖或启动这个开发宿主。
+
+| 可执行文件 | 用途 |
+| --- | --- |
+| `capability-host` | 本地 HTTP 调试宿主；提供安装、目录视图、Agent 构建／重配、调用和页面挂载，也提供打包与签名命令 |
+| `capability-backend` | 离线 SDK 示例后端，用于验证跨进程模型、存储和回调链 |
+| `capability-mcp` | 示例 MCP stdio 服务，用于验证 MCP 进程与能力包后端的独立生命周期 |
+
+`crates/tools/` 按开发程序分类；`crates/plugin/tool/` 按 Agent 可调用的工具插件分类。
+开发宿主是使用 Framework 的应用，所以不放进插件实现目录或核心基础库目录。
 
 ```sh
 cargo build -p eliteforge-agent-capability-dev-host

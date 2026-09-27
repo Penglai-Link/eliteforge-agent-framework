@@ -400,11 +400,12 @@ async fn context_discovery_budget_estimation_reduction_memory_and_output_are_rem
         .build()
         .await
         .unwrap();
-    // The observation backend deliberately sleeps longer than the whole task.
+    // The observation backend never returns. This verifies non-blocking delivery
+    // without treating a busy machine's execution speed as a correctness rule.
     let (handle, mut outputs) = agent
         .start_with_output::<RemoteOutputs>(RunRequest::new("context", "first"))
         .unwrap();
-    let result = tokio::time::timeout(std::time::Duration::from_secs(20), agent.wait(handle))
+    let result = tokio::time::timeout(std::time::Duration::from_secs(60), agent.wait(handle))
         .await
         .unwrap()
         .unwrap();

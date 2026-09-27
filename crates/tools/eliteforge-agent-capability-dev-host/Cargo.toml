@@ -5,14 +5,14 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-eliteforge-agent-official-plugin-skills = { path = "../../plugin/eliteforge-agent-official-plugin-skills" }
-eliteforge-agent-context = { path = "../../framework/eliteforge-agent-context" }
+eliteforge-agent-official-plugin-skills = { path = "../../plugin/skill/eliteforge-agent-official-plugin-skills" }
+eliteforge-agent-context = { path = "../../plugin/context/eliteforge-agent-context" }
 eliteforge-agent-context-contracts = { path = "../../framework/eliteforge-agent-context-contracts" }
 eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
-eliteforge-agent-state-sqlite = { path = "../../framework/eliteforge-agent-state-sqlite" }
-eliteforge-agent-memory = { path = "../../framework/eliteforge-agent-memory" }
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/eliteforge-agent-official-plugin-storage-sqlite" }
-eliteforge-agent-official-plugin-tools-mcp = {path="../../plugin/eliteforge-agent-official-plugin-tools-mcp"}
+eliteforge-agent-state-sqlite = { path = "../../plugin/storage/eliteforge-agent-state-sqlite" }
+eliteforge-agent-memory = { path = "../../plugin/memory/eliteforge-agent-memory" }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/storage/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-tools-mcp = {path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-mcp"}
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true

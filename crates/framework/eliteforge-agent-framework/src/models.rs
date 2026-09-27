@@ -139,6 +139,11 @@ impl ModelInvoker {
             .chain(&snapshot.messages)
             .cloned()
             .collect();
+        let models = crate::model_call_budget::StepModels {
+            inner: self,
+            limit: call.limits.max_model_calls_per_step,
+            used: std::sync::atomic::AtomicUsize::new(0),
+        };
         let mut overflow: Option<(String, Vec<Message>)> = None;
         loop {
             context.check_cancelled()?;
@@ -197,7 +202,7 @@ impl ModelInvoker {
                     tools: call.tools,
                     options: call.options,
                     run: context,
-                    models: self,
+                    models: &models,
                     limits: call.limits,
                     overflow_recoveries: recoveries,
                 })
@@ -244,6 +249,7 @@ impl ModelInvoker {
             context
                 .emit(AgentEvent::ContextAssembled(window.report))
                 .await;
+            models.reserve(false)?;
             let attempted_messages = messages.clone();
             context
                 .emit(AgentEvent::ModelSelected {

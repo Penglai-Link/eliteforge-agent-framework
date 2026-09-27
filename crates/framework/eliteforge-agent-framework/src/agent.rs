@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use eliteforge_agent_plugin_kernel::{Plugin, PluginContainer};
+use eliteforge_agent_plugin_core::{Plugin, PluginContainer};
 use futures::FutureExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -500,7 +500,7 @@ impl AgentBuilder {
                 container: Some(container),
                 started: false,
                 complete: false,
-                report: eliteforge_agent_plugin_kernel::ShutdownReport::default(),
+                report: eliteforge_agent_plugin_core::ShutdownReport::default(),
             }),
             agent_loop,
             services,
@@ -538,7 +538,7 @@ struct CleanupState {
     container: Option<PluginContainer>,
     started: bool,
     complete: bool,
-    report: eliteforge_agent_plugin_kernel::ShutdownReport,
+    report: eliteforge_agent_plugin_core::ShutdownReport,
 }
 
 struct AgentInner {
@@ -987,14 +987,14 @@ impl Agent {
             })
         })
     }
-    pub async fn close(&self) -> eliteforge_agent_plugin_kernel::ShutdownReport {
+    pub async fn close(&self) -> eliteforge_agent_plugin_core::ShutdownReport {
         self.close_with_timeout(std::time::Duration::from_secs(5))
             .await
     }
     pub async fn close_with_timeout(
         &self,
         timeout: std::time::Duration,
-    ) -> eliteforge_agent_plugin_kernel::ShutdownReport {
+    ) -> eliteforge_agent_plugin_core::ShutdownReport {
         let _transition = self.assembly.transition.lock().await;
         let generation = {
             let mut state = self
@@ -1338,6 +1338,15 @@ impl AgentGeneration {
     ) -> Result<(), AgentError> {
         self.check_owner(run.as_ref())?;
         run.as_ref().steer(message)
+    }
+    /// Queue typed content without flattening media or host data into text.
+    pub fn steer_content(
+        &self,
+        run: &impl AsRef<RunControl>,
+        content: Content,
+    ) -> Result<(), AgentError> {
+        self.check_owner(run.as_ref())?;
+        run.as_ref().steer_content(content)
     }
     pub fn revoke_tools(
         &self,
@@ -1684,7 +1693,7 @@ impl AgentGeneration {
         let completion = handle.completion.clone();
         let cancel = handle.control.cancellation.clone();
         let fallback = cancel.clone();
-        let mut scope = eliteforge_agent_plugin_kernel::ResourceScope::default();
+        let mut scope = eliteforge_agent_plugin_core::ResourceScope::default();
         scope.on_cleanup(move || fallback.cancel());
         scope.on_shutdown(move || async move {
             cancel.cancel();
@@ -1721,7 +1730,7 @@ impl AgentGeneration {
 
     /// Reject new runs, cancel existing runs, await their RAII cleanup, and close
     /// plugins. This is shared across every clone of the AgentGeneration handle.
-    pub async fn close(&self) -> eliteforge_agent_plugin_kernel::ShutdownReport {
+    pub async fn close(&self) -> eliteforge_agent_plugin_core::ShutdownReport {
         self.close_with_timeout(std::time::Duration::from_secs(5))
             .await
     }
@@ -1732,7 +1741,7 @@ impl AgentGeneration {
     pub async fn close_with_timeout(
         &self,
         timeout: std::time::Duration,
-    ) -> eliteforge_agent_plugin_kernel::ShutdownReport {
+    ) -> eliteforge_agent_plugin_core::ShutdownReport {
         {
             let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
             runs.closed = true;
@@ -1779,13 +1788,13 @@ impl AgentGeneration {
                 let report = std::panic::AssertUnwindSafe(async {
                     match container {
                         Some(mut container) => container.close_async(timeout).await,
-                        None => eliteforge_agent_plugin_kernel::ShutdownReport::default(),
+                        None => eliteforge_agent_plugin_core::ShutdownReport::default(),
                     }
                 })
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| {
-                    eliteforge_agent_plugin_kernel::ShutdownReport {
+                    eliteforge_agent_plugin_core::ShutdownReport {
                         panics: 1,
                         ..Default::default()
                     }
@@ -2001,13 +2010,16 @@ impl RunControl {
     /// in-memory admission, not persistence or model processing. Closed,
     /// cancelled and unsupported executions reject steering.
     fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
+        self.steer_content(message.into().into())
+    }
+    fn steer_content(&self, content: Content) -> Result<(), AgentError> {
         let mut state = self.steering.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed || self.cancellation.is_cancelled() {
             return Err(AgentError::Run(
                 "run does not accept unaddressed live steering".into(),
             ));
         }
-        state.pending.push_back(message.into());
+        state.pending.push_back(content);
         Ok(())
     }
 }

@@ -1,0 +1,36 @@
+[package]
+name = "eliteforge-agent-official-capability-pack"
+description = "Official in-process defaults and opt-in local capability packs"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+web = ["dep:eliteforge-agent-official-plugin-tools-web"]
+media = ["dep:eliteforge-agent-official-plugin-tools-media"]
+discovery = ["dep:eliteforge-agent-official-plugin-tools-discovery"]
+
+[dependencies]
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core" }
+eliteforge-agent-capability-tools = { path = "../eliteforge-agent-capability-tools" }
+eliteforge-agent-official-plugin-model-genai = { path = "../../plugin/model/eliteforge-agent-official-plugin-model-genai" }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/storage/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-tools-human = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-human" }
+eliteforge-agent-official-plugin-skills = { path = "../../plugin/skill/eliteforge-agent-official-plugin-skills" }
+eliteforge-agent-official-plugin-agui = { path = "../../plugin/protocol/eliteforge-agent-official-plugin-agui" }
+eliteforge-agent-official-plugin-tools-mcp = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-mcp" }
+eliteforge-agent-official-plugin-tools-agents = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-agents" }
+eliteforge-agent-official-plugin-otel = { path = "../../plugin/observe/eliteforge-agent-official-plugin-otel" }
+
+eliteforge-agent-official-plugin-tools-web = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-web", optional = true }
+eliteforge-agent-official-plugin-tools-media = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-media", optional = true }
+eliteforge-agent-official-plugin-tools-discovery = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-discovery", optional = true }
+
+[dev-dependencies]
+eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
+async-trait.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tempfile = "3"
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "=0.32.0", default-features = false, features = ["trace", "metrics", "testing"] }

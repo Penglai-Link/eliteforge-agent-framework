@@ -5,6 +5,8 @@ EliteForge Agent Framework 是可组装、可恢复的 Agent 运行时。它管�
 
 本文使用中文解释概念。反引号内的英文是源码中的类型、方法、字段或枚举值。
 
+宿主接入时的动态工具、上下文、实时输入与结果审计接口见 [宿主运行扩展](host-runtime-integration.md)。
+
 ## 1. 系统边界
 
 框架只实现通用运行语义。模型协议、存储、MCP、技能、AG-UI 和遥测由插件提供。
@@ -42,10 +44,49 @@ flowchart LR
 | 模块 | 职责 |
 |---|---|
 | `eliteforge-agent-core` | 定义模型、工具、状态、交互、协作和事件契约 |
-| `eliteforge-agent-plugin-kernel` | 排序插件依赖，注册服务，回滚安装，关闭资源 |
+| `eliteforge-agent-plugin-core` | 排序插件依赖，注册服务，回滚安装，关闭资源 |
+| `eliteforge-agent-capability-macros` | 编译时生成能力声明、工厂及适配代码；不获取运行资源 |
+| `eliteforge-agent-capability-runtime` | 管理动态安装包、后端实例与 RPC，提供远程适配和后端 SDK |
 | `eliteforge-agent-framework` | 组装 Agent，执行运行循环，管理预算、恢复、协作和关闭 |
 | 配套插件 | 实现模型、存储、工具、AG-UI 和遥测 |
 | 上层应用 | 实现业务权限、配额、路由、凭据和交互界面 |
+
+`plugin-core` 是通用插件基础库，`agent-core` 在它之上定义 Agent 契约和原生能力装配。
+`capability-macros` 在编译时生成声明，`capability-runtime` 在运行时管理安装包。
+`crates/tools/eliteforge-agent-capability-dev-host` 则是开发者主动启动的调试应用，
+不属于应用必须运行的 Framework 服务，详见[基础 Crate 与开发工具](../crates/README.md#基础-crate-与开发工具)。
+
+### 插件来源、加载与进程
+
+官方／第三方表示发布来源，内置／安装包表示交付方式，进程内／独立进程表示执行方式。
+宿主选择的依赖与安装路径决定加载行为。包名、源码目录和可信签名都不会自动切换执行方式。
+
+```mermaid
+flowchart TB
+    Host[宿主选择加载路径] --> Cargo[Cargo 依赖、features 与代码依赖]
+    Host --> Manager[CapabilityPackManager 安装与选择]
+    Cargo --> Native[编译、链接进宿主]
+    Native --> Enable[运行时显式选择 Plugin 或 CapabilityPack]
+    Enable --> Install[PluginContainer 直接安装和调用]
+    Manager --> Check{声明 backend 且选中<br/>扩展实现、插件或页面？}
+    Check -->|是| Peer[ready 获取后端连接]
+    Peer --> Process[启动独立进程，通过 RPC 调用]
+    Check -->|否| Static[ready 不启动后端<br/>加载选中的静态内容]
+```
+
+官方默认 Rust 插件和宿主编译进去的第三方 Rust 插件使用同一条原生装配链。
+`PluginContainer` 直接调用 `Plugin::install`，运行时直接调用注册的 trait。
+编译决定可用实现，运行时选择决定实际装配；未选中的声明式能力不执行工厂。
+
+通过管理器选择的安装包由 `eliteforge-agent-capability-runtime` 适配，满足上述条件时启动后端。
+官方发布的安装包使用相同规则。未声明后端的 Skills、静态页面或资源包不启动能力包后端。
+`RuntimePlugin::ready` 执行启动判断，`BackendInstance::peer()` 创建进程和 RPC 连接；
+后续远程调用也通过 `peer()` 获取连接。
+
+MCP stdio 与 `system_exec` 启动服务或命令进程，但负责它们的 Plugin 仍在宿主内。
+源码按职责分为 `framework`、`plugin/<分类>` 和 `capability`；后者存放随仓库提供的 Rust 装配入口，
+安装包则保存在管理器根目录下的 `packs/<id>/versions/<version>`。
+来源验证、两条装配链和默认／可选能力见 [Crates 组织](../crates/README.md)。
 
 ## 2. 服务组装
 
@@ -569,4 +610,4 @@ flowchart LR
 | 交互契约 | [interaction.rs](../crates/framework/eliteforge-agent-core/src/interaction.rs) | [用户交互](interactions.md) |
 | 协作契约 | [collaboration.rs](../crates/framework/eliteforge-agent-core/src/collaboration.rs) | [Agent 协作](collaboration.md) |
 | 事件发布与观测 | [types.rs](../crates/framework/eliteforge-agent-core/src/types.rs)、[observers.rs](../crates/framework/eliteforge-agent-core/src/observers.rs) | [可观测](observability.md) |
-| AG-UI 转换 | [adapter.rs](../crates/plugin/eliteforge-agent-official-plugin-agui/src/adapter.rs) | [AG-UI](agui.md) |
+| AG-UI 转换 | [adapter.rs](../crates/plugin/protocol/eliteforge-agent-official-plugin-agui/src/adapter.rs) | [AG-UI](agui.md) |

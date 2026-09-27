@@ -13,7 +13,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use eliteforge_agent_plugin_kernel::{
+use eliteforge_agent_plugin_core::{
     ExtensionPoint, Plugin, PluginContext, PluginError, PluginReadyContext, plugin_dependency_order,
 };
 use thiserror::Error;

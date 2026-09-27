@@ -1,0 +1,92 @@
+# 文件编辑与搜索
+
+文件工具在宿主进程内运行，路径必须相对 `FileSystemToolsConfig::new(root)` 指定目录。
+绝对路径、`..` 和符号链接（包括悬空链接）均被拒绝。读取／搜索和写入需分别启用对应能力包。
+
+## 文件版本与补丁
+
+`fs_read_text` 返回读取快照的 `version`，格式为 `sha256:<摘要>`。
+原有 `fs_write_text`、`fs_apply_patch` 增加可选 `expectedVersion`；不传时保留原有调用方式，
+传入时校验内容版本。写入结果的 `change` 包含前后版本、diff 和 `diffTruncated`。
+`fs_apply_patch` 仍是单文件字符串替换／插入／删除；删除文本不等于删除文件。
+
+新增 `fs_apply_unified_patch` 支持多文件创建、修改、删除、移动，所有受影响路径都必须提供版本：
+
+```json
+{
+  "patch": "--- a.txt\n+++ a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+  "expectedVersions": {"a.txt": "sha256:从读取结果取得的摘要"},
+  "dryRun": true
+}
+```
+
+`dryRun` 校验并返回 diff，不修改目录或文件。正式提交使用同一参数并设 `dryRun: false`。
+新建文件或移动目标使用 `"absent"`；移动同时校验源和目标，目标必须不存在。
+`format` 默认为 `unified`、`strip` 默认为 0；Git diff 使用 `format: "git"`，普通文件头默认去掉 `a/`、`b/`。
+Git 的 `rename from/to` 已经是相对路径，不再去掉前缀。
+二进制、复制头、文件模式修改和子模块补丁会明确报错。
+
+先解析和校验全部文件，再在目标目录写临时文件，最后逐个替换。写入前再次比对快照；
+后续失败时回滚已改文件。回滚发现外部新修改时保留它并返回 `Indeterminate`，列出未能回滚的路径。
+新建目录只在正式提交时创建，失败后清理本次创建的空目录；原文件权限被保留，移动继承源文件权限。
+
+这些操作通过进程内锁协调本插件的写入。跨文件替换不具备数据库事务的整体可见性，
+也没有断电／崩溃恢复日志。版本检查与替换之间仍有外部写入竞争窗口；目录约束不是抵抗并发恶意文件系统修改的 OS 沙箱。
+
+| 限额 | 默认／上限 |
+| --- | --- |
+| 单个文本快照 | 默认 8 MiB，可用 `with_max_edit_bytes` 配置；超限拒绝，不读取无限长行 |
+| 补丁输入 | 2 MiB |
+| 一次补丁受影响路径 | 32，移动计两个路径 |
+| 补丁前后内容合计 | 32 MiB |
+| 每个文件返回的 diff | 16 KiB，超出标记截断 |
+| 读取返回正文 | 默认 64 KiB，受 `with_max_read_bytes` 限制 |
+
+## 搜索
+
+`search_grep`、`search_glob`、`search_path` 保留名称和原有基本参数，并支持：
+
+- 完整 glob：`**/*.rs`、`**/*.{rs,toml}`、字符范围；`*` 不跨目录分隔符。
+- `exclude` 排除匹配路径；模式相对配置的文件根目录。
+- 默认遵守搜索目录内的 `.gitignore`、`.ignore` 和 `.git/info/exclude`，即使目录不是 Git 仓库。
+  `respectGitIgnore: false` 关闭这些规则；不读取搜索目录外的父级规则或全局 Git ignore。
+- `search_grep` 的 `fixedStrings`、`caseSensitive`、`word` 和 `contextLines`。
+  `mode` 为 `content`／`files`／`count`，结果字段分别为 `matches`／`paths`／`counts`；计数单位是匹配行。
+- `search_path` 用 `entryType` 选择文件或目录；符号链接不参与搜索。
+
+`maxResults` 是每页条数，受宿主配置约束。续读重复相同查询并附带 `nextCursor`，可改变每页条数。
+结果来自第一次扫描的快照：后续文件变化不会导致分页跳项，但续读内容可能已经过时。
+快照绑定当前 Agent 安装实例和会话，保留 120 秒，最多 8 份；过期或被淘汰后需重新搜索。
+这不是文件系统在某一时刻的原子快照。
+
+扫描最多 5 秒、10000 个目录项、32 MiB 文件内容；单个文件默认最多 256 KiB。
+保留结果最多 10000 行或 2 MiB 序列化内容，单行正文最多 8 KiB。
+检查 `complete`、`limitReason`、`skipped`、`textTruncated` 和 `truncated`，不要把受限扫描当成无遗漏结果。
+`nextCursor` 只续读已保留的结果，不会继续超限扫描；`complete` 描述本次根目录、深度和过滤条件内的扫描。
+搜索循环检查运行取消；进程内同步文件系统调用本身不能被强制中断。
+
+行为测试见 [capability_packs](../crates/capability/eliteforge-agent-capability-tools/tests/capability_packs.rs)
+和 [编辑回滚测试](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-local/src/edits.rs)。
+
+## 宿主读取工具目录
+
+`eliteforge_agent_official_plugin_tools_local::local_tool_catalog()` 返回本插件文件、搜索、编辑与系统命令工具的真实 `ToolDescriptor`。
+目录使用与执行绑定相同的描述定义，供宿主显示、策略迁移和重复工具检查使用；不会打开文件、启动命令或安装插件。
+描述不表示授权，宿主仍须显式选择对应能力包，并由执行阶段实施目录和命令策略。
+
+Tron 的 harness 能力包用此接口拒绝重新定义本地公共工具。其他公共插件的目录由宿主按实际选包另行提供。
+## 每次运行的目录授权
+
+`ScopedLocalToolsPlugin` 调用宿主的 `LocalToolScopeProvider::grant` 获取 `LocalToolGrant`。
+授权包括 `FileSystemToolsConfig`、命令策略、可调用工具 ID、调用名映射和初始可见工具集合。
+宿主可以更新当前执行上下文，后续工具调用会重新获取 scope；模型参数不能扩展授权根目录。
+`with_authorized_roots` 支持多个根目录，绝对路径仍须落在这些目录内。
+`with_authorized_symlinks(true)` 显式允许解析后仍处于授权范围内的别名。
+配置的 cwd 或根目录消失时返回错误，不回退到宿主进程目录。
+
+`FileReferenceReaderService` 让宿主解析产品附件引用，公共工具传递输入大小上限，
+宿主负责会话/用户归属校验和有界读取。普通文件路径继续走公共目录检查。
+补丁 envelope 支持 dry-run、统一 diff 和移动；拒绝把符号链接路径当成待删除的普通文件。
+无斜杠的 glob 按 basename 在各层目录匹配，带路径的 glob 保留根目录相对语义。
+
+集成用例见 `eliteforge-agent-framework/tests/host_local_grants.rs`。

@@ -265,7 +265,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend.method("demo.lifecycle", operation, |_: Value, _| async { Ok(()) })?;
     }
     backend.method("demo.observation", "on_event", |_: Value, _| async {
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        // The fixture deliberately never acknowledges observation. A run must
+        // still finish, and closing the Agent must cancel this observer.
+        std::future::pending::<()>().await;
         Ok(())
     })?;
     backend.method("demo.output", "output", |params: Value, _| async move {

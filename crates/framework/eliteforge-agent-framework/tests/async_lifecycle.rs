@@ -151,7 +151,7 @@ impl AgentLoop for FailedCleanupLoop {
         context: &RunContext,
         _: &AgentServices,
     ) -> Result<RunResult, AgentError> {
-        let mut scope = eliteforge_agent_plugin_kernel::ResourceScope::default();
+        let mut scope = eliteforge_agent_plugin_core::ResourceScope::default();
         scope.on_shutdown(|| async { Err("resource cleanup failed".into()) });
         context.own_resources(scope);
         if self.0 {

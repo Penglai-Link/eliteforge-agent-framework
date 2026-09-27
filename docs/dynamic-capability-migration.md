@@ -1,5 +1,9 @@
 # 动态能力包迁移
 
+通用插件基础 crate 由 `eliteforge-agent-plugin-kernel` 改名为 `eliteforge-agent-plugin-core`。
+直接依赖它的应用需更新 Cargo 包名、path 和 Rust import：`eliteforge_agent_plugin_core`。
+`eliteforge-agent-core` 和 Framework 的现有插件类型重导出继续保留。
+
 这次重构合并能力包组合与插件组合，只保留 `CapabilityPack`。
 
 | 原 API | 当前 API |
@@ -11,6 +15,11 @@
 | `into_plugins()` 组合展开 | `plugins()` 和 `included_packs()` 分别声明直接成员与子包 |
 
 `.plugin(...)` 保留直接装配。要参与动态重配，使用 `ConfiguredPluginFactory`；已有直接实例只保留原配置。工厂负责创建新配置实例，install/ready 仍由内核执行，不在工厂中获取运行资源。
+
+统一使用 `CapabilityPack` 不会改变加载方式。通过 Cargo 依赖编译进宿主的 Rust 能力继续在进程内装配；
+管理器安装、选择的包声明后端并选用扩展实现、插件或页面时，启动独立后端进程。
+官方／第三方表示发布来源，不决定运行位置；可信签名也不会把安装包转换为原生插件。
+编译、启用和进程规则见[Crates 组织](../crates/README.md#进程边界)。
 
 ```rust,ignore
 let pack = CapabilityPackBuilder::new("application", configuration)

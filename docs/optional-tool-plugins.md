@@ -1,0 +1,101 @@
+# 工具发现、Web 与媒体插件
+
+三个插件位于 `crates/plugin/tool/`，都是宿主进程内实现。直接依赖插件 crate 时，用 `.plugin(...)` 安装；
+通过官方能力包组合时，先选择 Cargo feature，再选择运行时配置。编译依赖不等于自动启用工具。
+
+```toml
+[dependencies]
+eliteforge-agent-official-capability-pack = { version = "0.1.0", features = ["web", "media", "discovery"] }
+```
+
+```rust,ignore
+use eliteforge_agent_official_capability_pack::{
+    EliteForgeOfficialCapabilityPack,
+    web::{BraveSearch, WebToolsPlugin, WebFetchConfig},
+    media::MediaToolsConfig,
+};
+
+let pack = EliteForgeOfficialCapabilityPack::new("agent.sqlite")
+    .web(WebToolsPlugin::new()
+        .search(BraveSearch::new(api_key)?)
+        .fetch(WebFetchConfig::restricted(["example.com", "docs.rs"])))
+    .media(MediaToolsConfig::new("workspace"));
+let agent = AgentBuilder::new().capability_pack(pack).build().await?;
+```
+
+默认仍是原来的 8 个插件。Web 后端和发现目录可包含宿主提供的实例，官方包装配会保留它们，
+不会把这些实例伪装成可重新创建的配置工厂；媒体配置可以通过正常配置工厂重建。
+
+## 通用工具发现
+
+`ToolDiscoveryPlugin` 包装宿主显式提供的 `ToolProvider`。多个来源合并成一个目录，只先公开 `tool_search`：
+
+```rust,ignore
+use eliteforge_agent_official_capability_pack::discovery::ToolDiscoveryPlugin;
+
+let discovery = ToolDiscoveryPlugin::new()
+    .provider(application_tools)
+    .shared_provider(other_authorized_provider);
+let pack = EliteForgeOfficialCapabilityPack::new("agent.sqlite")
+    .tool_discovery(discovery);
+```
+
+这些 Provider 不应再次单独注册，否则工具 ID／调用名会冲突。
+`tool_search` 按 ID、名称和描述做大小写不敏感的多词 AND 匹配，返回完整 Schema，
+并通过现有 `ExposeTools` 效果使命中工具在当前 run 可见。默认返回 5 个，最多 20 个、64 KiB Schema。
+返回 `matched` 和 `truncated`；结果太多时使用更具体的名称。
+
+目录只包含原本由这些 Provider 授权公开的工具；原来就 `hidden()` 的绑定保留其原有激活流程。
+未租赁和已撤销的工具不能通过搜索获得。发现后调用仍使用原执行器，经过参数校验、ToolPolicy、预算、取消和中间件。
+可见性不跨新 run 继承；恢复执行使用 Framework 已有的可见性检查点。
+Provider 租约资源转交当前 run，正常结束或失败时按原生命周期关闭。
+
+每次 run 建立目录时仍会调用 Provider 的 `lease`，因此这是模型上下文中的 Schema 按需公开，
+不推迟 Provider 连接或 MCP `tools/list` 的网络成本。MCP client 可以作为 Provider 接入，
+但连接的创建、安装和关闭仍由对应宿主生命周期负责，不能重复安装同一组工具。
+目录上限为 64 个 Provider、1024 个工具、2 MiB Schema。
+
+## Web 搜索与抓取
+
+`WebToolsPlugin::new()` 不注册网络工具；配置 `.search(...)` 后提供 `web_search`，
+配置 `.fetch(...)` 后提供 `web_fetch`。宿主可以实现 `WebSearchBackend` 接入其他搜索服务。
+内置 `BraveSearch` 按 [Brave 官方 API](https://api-dashboard.search.brave.com/app/documentation/web-search)
+发送查询与数量，使用 `X-Subscription-Token` 请求头。Key 由宿主传入，不放入工具参数或结果。
+搜索服务重定向被禁用；可信网关或测试服务可以用 `with_endpoint` 配置。
+
+抓取只接受无用户名／密码的 HTTP(S) URL。`restricted` 精确匹配域名，并对每次重定向重新检查；
+最多 5 次重定向。`unrestricted()` 是宿主显式授权所有可达 HTTP(S) 主机的入口。
+域名策略不提供 DNS／代理／内网隔离，网络沙箱由宿主负责。
+
+默认整次调用最多 15 秒，可在 1 毫秒至 60 秒内配置。网络等待和响应读取响应取消。
+默认响应最多 2 MiB、正文最多 64 KiB，超大响应拒绝，正文截断会标明。
+HTML 提取标题和正文，排除脚本、样式、head、noscript、template；不会执行 JavaScript、登录或操作浏览器。
+返回 `requestedUrl`、最终 `sourceUrl`、MIME、标题、正文和截断信息；只解码 UTF-8 文本。
+搜索返回来源 URL、标题和摘要，最多 20 条／64 KiB。外部内容是资料，不是宿主指令。
+
+## 图片与 PDF
+
+`MediaToolsConfig::new(root)` 复用 Local 的路径约束，提供：
+
+| 工具 | 输出 |
+| --- | --- |
+| `media_read_image` | PNG／JPEG／WebP／GIF 的原始内联媒体块，以及 MIME、宽高、大小和相对路径 |
+| `media_read_pdf` | 指定页范围的文本、页码、总页数、空文本标记、截断信息及后续页号 |
+
+图片按实际文件格式检查并解码验证，默认最多 8 MiB、1600 万像素；不生成或修改图片。
+模型适配器必须支持对应 MIME。启用模型预算时，宿主通过 `with_image_token_estimate` 提供供应商对应的估计；
+未配置则保留核心对未知媒体 token 成本的拒绝行为。
+
+PDF 默认每次最多 10 页、正文合计 64 KiB，单文档最多 1000 页。页码从 1 开始；
+`startPage`、`endPage` 指定范围，`nextPage` 只在本次页内容完整时给出。
+页内截断不能靠下一页游标补齐，应缩小范围或由宿主提高文本上限。
+不做 PDF 渲染、OCR、表格结构还原或密码解密；扫描页可能只有 `hasText: false`。
+
+媒体整次调用（含等待名额）最多等待 10 秒；取消或超时返回错误，不取消同一 run 的其他工作。
+解码在最多两个阻塞工作线程中进行，取消后正在解析的任务仍占用名额直到结束。
+图片尺寸和输入／输出字节有界；PDF 在页间和文字写出时检查取消及 10 秒提取限时。
+PDF 解析库内部的解压内存和不可中断计算不受上述限时硬隔离，不能当作不可信文档的进程沙箱。
+这些工具不启动独立插件进程。
+
+测试使用本地 HTTP 协议样例、生成的 PNG 和三页 PDF；未使用真实付费搜索账号，
+不把协议测试视作生产搜索可用性或复杂 PDF／扫描件识别验证。

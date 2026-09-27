@@ -21,10 +21,21 @@ use syn::{
 ///
 /// The attribute belongs outside `#[async_trait]`:
 ///
-/// ```ignore
+/// ```
+/// use async_trait::async_trait;
+/// use eliteforge_agent_capability_macros::capability;
+/// use eliteforge_agent_core::{AgentError, ContextProvider, Message, RunContext};
+///
+/// #[derive(Default)]
+/// struct ShopContext;
+///
 /// #[capability(pack = "shop")]
 /// #[async_trait]
-/// impl ContextProvider for ShopContext { /* ... */ }
+/// impl ContextProvider for ShopContext {
+///     async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
+///         Ok(vec![Message::system("You assist the shop's support team.")])
+///     }
+/// }
 /// ```
 #[proc_macro_attribute]
 pub fn capability(attribute: TokenStream, item: TokenStream) -> TokenStream {

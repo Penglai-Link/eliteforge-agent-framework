@@ -116,6 +116,7 @@ impl AgentLoop for ModelExecutionLoop {
                 stage: 0,
                 steps: 0,
                 tool_calls: 0,
+                tool_batch_limit_reached: false,
                 cursor: WorkflowCursor::Model,
                 visible_tools: initial_tools
                     .as_ref()
@@ -464,6 +465,17 @@ fn apply_resume(
                                         );
                                     }
                                 }
+                                ToolEffect::SetExposedTools(ids) => {
+                                    if ids.iter().all(|id| {
+                                        tools.by_name.values().any(|b| &b.descriptor.id == id)
+                                    }) {
+                                        state.visible_tools = ids.iter().cloned().collect();
+                                    } else {
+                                        output = ToolOutput::error(
+                                            "Tool exposure contains an unauthorized ID",
+                                        );
+                                    }
+                                }
                                 ToolEffect::RevokeTools(ids) => {
                                     state.revoked_tools.extend(ids.iter().cloned())
                                 }
@@ -604,12 +616,15 @@ impl ModelExecutionRuntime<'_> {
         }
         Ok(())
     }
-    async fn record_steering(&mut self, pending: Vec<String>) -> Result<(), AgentError> {
+    async fn record_steering(&mut self, pending: Vec<Content>) -> Result<(), AgentError> {
         for input in pending {
-            self.checkpoint.transcript.push(Message::user(&input));
+            self.checkpoint
+                .transcript
+                .push(Message::user(input.clone()));
             // Persist the message and its journal event together before
             // publishing the live event, including at the final reply boundary.
-            self.save(Some(AgentEvent::Steered(input))).await?;
+            self.save(Some(AgentEvent::Steered(input.protocol_text())))
+                .await?;
         }
         Ok(())
     }
@@ -670,7 +685,11 @@ impl ModelExecutionRuntime<'_> {
                             .stop(RunStatus::StepLimit, ExecutionStatus::Completed)
                             .await;
                     }
-                    self.record_steering(self.context.take_steering()).await?;
+                    let mut steering = self.context.take_steering_content();
+                    if let Some(source) = self.context.extensions.get::<LiveInputSourceService>() {
+                        steering.extend(source.0.drain(self.context, false).await?);
+                    }
+                    self.record_steering(steering).await?;
                     let stage = &self.state.definition.stages[self.state.stage];
                     let mut instructions = stage.instructions.clone();
                     for provider in &self.services.context {
@@ -756,7 +775,17 @@ impl ModelExecutionRuntime<'_> {
                         }
                         self.checkpoint.transcript.push(assistant);
                         if self.state.stage + 1 == self.state.definition.stages.len() {
-                            let steering = self.context.pending_or_seal();
+                            let mut steering = self.context.take_steering_content();
+                            if let Some(source) =
+                                self.context.extensions.get::<LiveInputSourceService>()
+                            {
+                                steering.extend(
+                                    source.0.drain(self.context, steering.is_empty()).await?,
+                                );
+                            }
+                            if steering.is_empty() {
+                                steering = self.context.pending_content_or_seal();
+                            }
                             if steering.is_empty() {
                                 return self
                                     .stop(RunStatus::Completed, ExecutionStatus::Completed)
@@ -768,38 +797,51 @@ impl ModelExecutionRuntime<'_> {
                             self.save(None).await?;
                         }
                     } else {
-                        if assistant.tool_calls.len()
-                            > self
-                                .state
-                                .request
-                                .limits
-                                .max_tool_calls
-                                .saturating_sub(self.state.tool_calls)
-                            || self.context.execution_counters.as_ref().is_some_and(|c| {
-                                !crate::budget::ExecutionCounters::admit(
-                                    &c.tools,
-                                    assistant.tool_calls.len(),
-                                    self.state.request.limits.max_tool_calls,
-                                )
-                            })
+                        let remaining = self
+                            .state
+                            .request
+                            .limits
+                            .max_tool_calls
+                            .saturating_sub(self.state.tool_calls);
+                        let overflow = assistant.tool_calls.len() > remaining;
+                        if overflow
+                            && (remaining == 0
+                                || self.state.request.limits.tool_batch_budget_policy
+                                    == ToolBatchBudgetPolicy::RejectBatch)
                         {
                             return self
                                 .stop(RunStatus::ToolCallLimit, ExecutionStatus::Completed)
                                 .await;
                         }
+                        let admitted = assistant.tool_calls.len().min(remaining);
+                        if self.context.execution_counters.as_ref().is_some_and(|c| {
+                            !crate::budget::ExecutionCounters::admit(
+                                &c.tools,
+                                admitted,
+                                self.state.request.limits.max_tool_calls,
+                            )
+                        }) {
+                            return self
+                                .stop(RunStatus::ToolCallLimit, ExecutionStatus::Completed)
+                                .await;
+                        }
+                        self.state.tool_batch_limit_reached = overflow;
                         let mut ids = HashSet::new();
                         let mut executions = Vec::new();
-                        for call in &assistant.tool_calls {
+                        for (index, call) in assistant.tool_calls.iter().enumerate() {
                             if call.id.is_empty() || !ids.insert(&call.id) {
                                 return Err(AgentError::Run(
                                     "model returned invalid tool call IDs".into(),
                                 ));
                             }
-                            let binding = self
-                                .tools
-                                .by_name
-                                .get(&call.call_name)
-                                .filter(|b| descriptors.contains(&b.descriptor));
+                            let binding = self.tools.by_name.get(&call.call_name).filter(|b| {
+                                descriptors.contains(&b.descriptor)
+                                    || (self.state.request.limits.allow_unexposed_tools
+                                        && !self.context.is_tool_revoked(&b.descriptor.id)
+                                        && stage.tools.as_ref().is_none_or(|allowed| {
+                                            allowed.contains(&b.descriptor.id)
+                                        }))
+                            });
                             let (descriptor, state) = match binding {
                                 Some(binding) => {
                                     (binding.descriptor.clone(), ToolExecutionState::Planned)
@@ -816,6 +858,13 @@ impl ModelExecutionRuntime<'_> {
                                     )),
                                 ),
                             };
+                            let state = if index >= admitted {
+                                ToolExecutionState::Finished(ToolOutput::error(
+                                    "Tool not executed: tool-call budget exhausted",
+                                ))
+                            } else {
+                                state
+                            };
                             executions.push(ToolExecution {
                                 invocation_id: call.invocation_id,
                                 tool_id: descriptor.id.clone(),
@@ -824,7 +873,7 @@ impl ModelExecutionRuntime<'_> {
                                 state,
                             });
                         }
-                        self.state.tool_calls += executions.len();
+                        self.state.tool_calls += admitted;
                         self.state.cursor = WorkflowCursor::Tools {
                             assistant: Box::new(assistant),
                             executions,
@@ -868,7 +917,11 @@ impl ModelExecutionRuntime<'_> {
                 .tools
                 .by_name
                 .get(&execution.call.call_name)
-                .filter(|b| b.exposed && b.descriptor == execution.descriptor)
+                .filter(|b| {
+                    (b.exposed || self.state.request.limits.allow_unexposed_tools)
+                        && !self.context.is_tool_revoked(&b.descriptor.id)
+                        && b.descriptor == execution.descriptor
+                })
                 .ok_or_else(|| {
                     AgentError::InvalidConfiguration(
                         "pending tool contract is no longer available".into(),
@@ -1046,6 +1099,12 @@ impl ModelExecutionRuntime<'_> {
             ));
         }
         self.complete_tool_batch().await?;
+        if self.state.tool_batch_limit_reached {
+            return self
+                .stop(RunStatus::ToolCallLimit, ExecutionStatus::Completed)
+                .await
+                .map(Some);
+        }
         if !self.state.interactions.is_empty() {
             return self
                 .stop(RunStatus::AwaitingInput, ExecutionStatus::Waiting)
@@ -1130,12 +1189,39 @@ impl ModelExecutionRuntime<'_> {
             let ToolExecutionState::Finished(mut output) = execution.state else {
                 return Err(AgentError::Run("unfinished tool in completed batch".into()));
             };
+            if let Some(processor) = self.context.extensions.get::<ToolResultProcessorService>() {
+                let was_error = output.is_error;
+                output = processor
+                    .0
+                    .process(
+                        &ToolInvocationContext {
+                            invocation_id: &execution.invocation_id.to_string(),
+                            call: &execution.call,
+                            descriptor: &execution.descriptor,
+                            run: self.context,
+                        },
+                        output,
+                    )
+                    .await?;
+                if was_error && !output.is_error {
+                    return Err(AgentError::Run(
+                        "tool result processor converted a failure to success".into(),
+                    ));
+                }
+            }
             match &output.effect {
                 ToolEffect::ExposeTools(ids) => {
                     if let Err(error) = self.tools.apply_exposure(ids) {
                         output = ToolOutput::error(error);
                     } else {
                         self.state.visible_tools.extend(ids.iter().cloned());
+                    }
+                }
+                ToolEffect::SetExposedTools(ids) => {
+                    if let Err(error) = self.tools.set_exposure(ids) {
+                        output = ToolOutput::error(error);
+                    } else {
+                        self.state.visible_tools = ids.iter().cloned().collect();
                     }
                 }
                 ToolEffect::RequestInput(_) | ToolEffect::AwaitInput => {}

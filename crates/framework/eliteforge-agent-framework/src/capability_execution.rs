@@ -1,6 +1,6 @@
 use crate::*;
 use async_trait::async_trait;
-use eliteforge_agent_plugin_kernel::ServiceRegistry;
+use eliteforge_agent_plugin_core::ServiceRegistry;
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;

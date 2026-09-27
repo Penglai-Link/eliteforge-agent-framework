@@ -116,6 +116,21 @@ impl ToolSet {
         tools
     }
 
+    pub(crate) fn set_exposure(&mut self, ids: &[String]) -> Result<(), String> {
+        // Validate the whole update before mutating any visible binding.
+        if ids.iter().any(|id| {
+            !self
+                .by_name
+                .values()
+                .any(|binding| &binding.descriptor.id == id)
+        }) {
+            return Err("Tool exposure contains an unauthorized ID".into());
+        }
+        for binding in self.by_name.values_mut() {
+            binding.exposed = ids.contains(&binding.descriptor.id);
+        }
+        Ok(())
+    }
     pub(crate) fn apply_exposure(&mut self, ids: &[String]) -> Result<(), String> {
         for id in ids {
             if !self.id_to_name.contains_key(id) {

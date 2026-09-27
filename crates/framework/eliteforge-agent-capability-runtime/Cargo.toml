@@ -7,8 +7,8 @@ edition.workspace = true
 [dependencies]
 eliteforge-agent-context-contracts = { path = "../eliteforge-agent-context-contracts", version = "0.1.0" }
 jsonschema = { version = "0.52.1", default-features = false }
-eliteforge-agent-official-plugin-tools-mcp = { path = "../../plugin/eliteforge-agent-official-plugin-tools-mcp" }
-eliteforge-agent-plugin-kernel = { path = "../eliteforge-agent-plugin-kernel" }
+eliteforge-agent-official-plugin-tools-mcp = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-mcp" }
+eliteforge-agent-plugin-core = { path = "../eliteforge-agent-plugin-core" }
 eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
 async-trait.workspace = true
 futures.workspace = true

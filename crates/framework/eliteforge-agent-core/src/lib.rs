@@ -6,6 +6,7 @@ pub mod capability_packs;
 pub mod collaboration;
 pub mod content;
 pub mod context;
+pub mod context_preparation;
 pub mod conversation;
 pub mod dag;
 pub mod errors;
@@ -27,9 +28,10 @@ pub use capability_packs::*;
 pub use collaboration::*;
 pub use content::*;
 pub use context::*;
+pub use context_preparation::*;
 pub use conversation::*;
 pub use dag::*;
-pub use eliteforge_agent_plugin_kernel::{
+pub use eliteforge_agent_plugin_core::{
     ExtensionMultiplicity, ExtensionPlugin, ExtensionPoint, Plugin, PluginContext, PluginError,
     PluginReadyContext,
 };

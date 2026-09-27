@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use eliteforge_agent_plugin_kernel::{Plugin, PluginContext, PluginError};
+use eliteforge_agent_plugin_core::{Plugin, PluginContext, PluginError};
 
 use crate::*;
 

@@ -1,0 +1,18 @@
+[package]
+name = "eliteforge-agent-official-plugin-otel"
+description = "Privacy-preserving OpenTelemetry middleware for eliteforge-agent-framework"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
+async-trait.workspace = true
+serde_json.workspace = true
+opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace", "metrics"] }
+[dev-dependencies]
+eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
+eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }
+tempfile = "3"
+futures.workspace = true
+tokio.workspace = true
+eliteforge-agent-state-sqlite = { path = "../../storage/eliteforge-agent-state-sqlite" }
+opentelemetry_sdk = { version = "=0.32.0", default-features = false, features = ["trace", "metrics", "testing"] }

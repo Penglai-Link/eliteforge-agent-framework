@@ -79,6 +79,8 @@ pub struct WorkflowState {
     pub stage: usize,
     pub steps: usize,
     pub tool_calls: usize,
+    #[serde(default)]
+    pub tool_batch_limit_reached: bool,
     pub cursor: WorkflowCursor,
     pub visible_tools: BTreeSet<String>,
     #[serde(default)]

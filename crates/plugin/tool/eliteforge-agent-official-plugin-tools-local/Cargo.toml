@@ -1,0 +1,27 @@
+[package]
+name = "eliteforge-agent-official-plugin-tools-local"
+version.workspace = true
+edition.workspace = true
+description = "In-process filesystem and asynchronous system-command plugins"
+
+[dependencies]
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "process"] }
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+portable-pty = "0.9"
+shell-words = "1"
+diffy = "0.5.2"
+globset = "0.4"
+ignore = "0.4"
+sha2 = "0.10"
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

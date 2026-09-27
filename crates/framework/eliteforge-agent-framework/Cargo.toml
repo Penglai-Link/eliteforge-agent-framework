@@ -11,9 +11,9 @@ genai = ["dep:eliteforge-agent-official-plugin-model-genai"]
 [dependencies]
 eliteforge-agent-capability-runtime = { path = "../eliteforge-agent-capability-runtime", version = "0.1.0" }
 eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
-eliteforge-agent-official-plugin-skills = { path = "../../plugin/eliteforge-agent-official-plugin-skills", version = "0.1.0" }
-eliteforge-agent-official-plugin-model-genai = { path = "../../plugin/eliteforge-agent-official-plugin-model-genai", version = "0.1.0", optional = true }
-eliteforge-agent-plugin-kernel = { version = "0.1.0", path = "../eliteforge-agent-plugin-kernel" }
+eliteforge-agent-official-plugin-skills = { path = "../../plugin/skill/eliteforge-agent-official-plugin-skills", version = "0.1.0" }
+eliteforge-agent-official-plugin-model-genai = { path = "../../plugin/model/eliteforge-agent-official-plugin-model-genai", version = "0.1.0", optional = true }
+eliteforge-agent-plugin-core = { version = "0.1.0", path = "../eliteforge-agent-plugin-core" }
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true
@@ -26,7 +26,10 @@ jsonschema = { version = "0.52.1", default-features = false }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-eliteforge-agent-capability-test-fixture = { path = "../eliteforge-agent-capability-test-fixture" }
-eliteforge-agent-context = { path = "../eliteforge-agent-context" }
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/eliteforge-agent-official-plugin-storage-sqlite" }
-eliteforge-agent-test-support = { path = "../eliteforge-agent-test-support" }
+eliteforge-agent-capability-test-fixture = { path = "../../testing/eliteforge-agent-capability-test-fixture" }
+eliteforge-agent-context = { path = "../../plugin/context/eliteforge-agent-context" }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/storage/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-test-support = { path = "../../testing/eliteforge-agent-test-support" }
+
+eliteforge-agent-official-plugin-tools-local = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-local" }
+tempfile = "3"

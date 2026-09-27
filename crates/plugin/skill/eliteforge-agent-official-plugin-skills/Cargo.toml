@@ -1,0 +1,20 @@
+[package]
+name = "eliteforge-agent-official-plugin-skills"
+description = "Standard progressive-disclosure Agent Skills plugin for EliteForge agents"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_norway = "0.9.42"
+sha2 = "0.10"
+tokio.workspace = true
+
+[dev-dependencies]
+eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
+eliteforge-agent-official-plugin-storage-sqlite = { path = "../../storage/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }
+tempfile = "3"

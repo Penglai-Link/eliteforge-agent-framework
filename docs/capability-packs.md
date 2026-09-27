@@ -5,6 +5,40 @@ Skills 资源。业务开发通常只需要做三件事：**声明接口、实�
 
 `CapabilityPack` 同时支持声明式成员、插件工厂与已创建插件。独立的插件包概念已经移除；所有成员进入同一个依赖图和生命周期。动态安装、进程与页面见[动态能力包](dynamic-capability-runtime.md)。
 
+能力包是组合与选择入口。宿主编译、链接的 Rust 能力包在进程内装配；
+安装包声明 `backend`，且选中了扩展实现、插件或页面时，才在 ready 阶段启动后端进程。
+这两条路径都可由官方或第三方提供，签名和作者身份不决定运行位置。
+框架自带的 Rust 默认组合和文件／命令装配入口在 `crates/capability`，
+具体插件实现在 `crates/plugin/<分类>`，清单与使用方式见 [Crates 组织](../crates/README.md)。
+
+## 编译、启用与动态安装
+
+`eliteforge-agent-capability-macros` 在编译时处理 `#[extension_point]`、`#[capability]` 和
+`#[capability_factory]`，生成扩展点、能力注册描述、工厂及适配代码。
+`capability_skills!` 嵌入 Skills 文件，`capability_skills_build!` 让构建脚本跟踪资源变化。
+它是独立的过程宏 crate，通常通过 `eliteforge-agent-core` 的重导出使用。
+
+宏展开只产生代码和声明；`agent-core` 在构建 Agent 时发现选中的声明、调用工厂，
+再交给 `plugin-core` 安装。`eliteforge-agent-capability-runtime` 负责安装包的加载与远程适配，
+不负责执行这些编译期宏，也不是原生能力装配的总入口。
+
+| 阶段 | 由谁选择 | 实际行为 |
+| --- | --- | --- |
+| 宿主编译 | 应用的 Cargo 依赖、features 和 Rust 代码依赖 | 将所需 Rust 实现编译、链接到宿主 |
+| 原生能力启用 | `.capability_pack(...)`、`.include(...)` 或直接注册 Plugin | 构建 Agent 时创建并安装选中的成员；未选中的声明式工厂不执行 |
+| 安装包启用 | `CapabilityPackManager::select(...)` 返回 `ManagedCapabilityPack` | 根据安装清单和贡献选择创建适配器，需要后端时启动独立进程 |
+
+`EliteForgeOfficialCapabilityPack` 和 `CapabilityPackBuilder` 提供原生组合。
+管理器返回的 `ManagedCapabilityPack` 提供安装包的加载行为。
+它们都实现 `CapabilityPack`，统一进入 Agent 的依赖校验和生命周期，但保留各自的加载路径。
+
+运行时选择能力不会临时编译新 crate，也不会因为安装包签名可信就将它链接进宿主。
+第三方 Rust 能力可以由宿主主动添加依赖并重新构建；官方发布的安装包仍使用动态加载规则。
+未声明后端的 Skills、静态页面或资源包无需能力包后端；MCP stdio 仍按其声明启动自己的进程。
+
+`crates/capability/` 是 Rust 源码组织目录，外部安装包保存在管理器指定根目录下的
+`packs/<id>/versions/<version>`，详见[安装和选择](dynamic-capability-runtime.md#安装和选择)。
+
 ## 能力包包含什么
 
 能力包把完成一类业务所需的代码和资料放在一起，供应用统一启用。例如，一个“订单能力包”可以

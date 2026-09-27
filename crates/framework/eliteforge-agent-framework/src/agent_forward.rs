@@ -121,7 +121,9 @@ impl Agent {
         messages: Vec<Message>,
     ) -> Result<(), AgentError> {
         let (generation, _lease) = self.admit("operation", "append_conversation")?;
-        generation.append_conversation(key, revision, messages).await
+        generation
+            .append_conversation(key, revision, messages)
+            .await
     }
     pub async fn memory(&self, namespace: &str, id: &str) -> Result<MemoryEntry, AgentError> {
         let (generation, _lease) = self.admit("operation", "memory")?;
@@ -173,6 +175,13 @@ impl Agent {
         let generation = self.snapshot();
         generation.steer(run, message)
     }
+    pub fn steer_content(
+        &self,
+        run: &impl AsRef<RunControl>,
+        content: Content,
+    ) -> Result<(), AgentError> {
+        self.snapshot().steer_content(run, content)
+    }
     pub fn revoke_tools(
         &self,
         run: &impl AsRef<RunControl>,
@@ -216,7 +225,9 @@ impl Agent {
         request: RunRequest,
         parent: &RunContext,
     ) -> Result<RunResult, AgentError> {
-        if self.is_closed() { return self.snapshot().run_child(request, parent).await; }
+        if self.is_closed() {
+            return self.snapshot().run_child(request, parent).await;
+        }
         let (generation, _lease) = self.admit("operation", "run_child")?;
         generation.run_child(request, parent).await
     }

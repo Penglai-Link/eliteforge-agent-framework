@@ -1,7 +1,7 @@
 use crate::*;
 use async_trait::async_trait;
 use eliteforge_agent_core::*;
-use eliteforge_agent_plugin_kernel::ResourceScope;
+use eliteforge_agent_plugin_core::ResourceScope;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;

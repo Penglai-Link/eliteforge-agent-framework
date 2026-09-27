@@ -253,7 +253,7 @@ pub enum AgentError {
     #[error("operation result is unknown: {0}")]
     Indeterminate(String),
     #[error(transparent)]
-    Plugin(#[from] eliteforge_agent_plugin_kernel::PluginError),
+    Plugin(#[from] eliteforge_agent_plugin_core::PluginError),
     #[error(transparent)]
     Capability(#[from] crate::CapabilityError),
     #[error("required service is missing: {0}")]
@@ -354,12 +354,30 @@ pub struct RunResult {
     pub tool_calls: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ToolBatchBudgetPolicy {
+    #[default]
+    RejectBatch,
+    /// Execute the ordered prefix that fits, record non-execution for the rest,
+    /// then end the run with ToolCallLimit.
+    ExecuteAvailable,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunLimits {
     pub max_steps: usize,
     pub max_tool_calls: usize,
+    #[serde(default)]
+    pub tool_batch_budget_policy: ToolBatchBudgetPolicy,
+    /// Permit calls to authorized but currently hidden tools. Stage restrictions,
+    /// revocations, schema validation and approval policies still apply.
+    #[serde(default)]
+    pub allow_unexposed_tools: bool,
     pub max_parallel_tools: usize,
     pub max_model_retries: usize,
+    /// Combined main/auxiliary dispatch limit per model step. None is unlimited.
+    /// Auxiliary calls reserve one remaining dispatch for the main answer.
+    #[serde(default)]
+    pub max_model_calls_per_step: Option<usize>,
     pub max_overflow_recoveries: usize,
     pub max_context_messages: usize,
     /// Conservative built-in estimate, not a model-specific tokenizer.
@@ -383,8 +401,11 @@ impl Default for RunLimits {
         Self {
             max_steps: 20,
             max_tool_calls: 50,
+            tool_batch_budget_policy: ToolBatchBudgetPolicy::default(),
+            allow_unexposed_tools: false,
             max_parallel_tools: 1,
             max_model_retries: 2,
+            max_model_calls_per_step: None,
             max_overflow_recoveries: 1,
             max_context_messages: 256,
             max_context_tokens: 32_000,
@@ -423,7 +444,8 @@ impl RunLimits {
                 "runtime duration exceeds the supported clock range".into(),
             ));
         }
-        if self.max_model_output_tokens == 0
+        if self.max_model_calls_per_step == Some(0)
+            || self.max_model_output_tokens == 0
             || self.cleanup_timeout.is_zero()
             || self.model_timeout.is_zero()
             || self.tool_timeout.is_zero()
@@ -652,6 +674,9 @@ pub enum ToolEffect {
     RequestInput(Box<crate::InteractionRequest>),
     /// Expose a subset of the tools authorized by providers for this run.
     ExposeTools(Vec<String>),
+    /// Replace the visible subset without granting or revoking authority. Useful
+    /// for temporary discovery expansion. IDs must already belong to this run.
+    SetExposedTools(Vec<String>),
     /// Permanently revoke these tool IDs for this run. Already dispatched calls
     /// may finish; queued/future calls are checked again before executor entry.
     RevokeTools(Vec<String>),
@@ -736,13 +761,13 @@ impl ToolBinding {
 pub struct ToolLease {
     pub tools: Vec<ToolBinding>,
     #[doc(hidden)]
-    pub resources: eliteforge_agent_plugin_kernel::ResourceScope,
+    pub resources: eliteforge_agent_plugin_core::ResourceScope,
 }
 impl ToolLease {
     pub fn new(tools: Vec<ToolBinding>) -> Self {
         Self {
             tools,
-            resources: eliteforge_agent_plugin_kernel::ResourceScope::default(),
+            resources: eliteforge_agent_plugin_core::ResourceScope::default(),
         }
     }
     pub fn with_cleanup(mut self, cleanup: impl FnOnce() + Send + Sync + 'static) -> Self {
@@ -761,7 +786,7 @@ impl ToolLease {
     pub async fn close(
         &mut self,
         timeout: std::time::Duration,
-    ) -> eliteforge_agent_plugin_kernel::ShutdownReport {
+    ) -> eliteforge_agent_plugin_core::ShutdownReport {
         self.resources.close_async(timeout).await
     }
 }
@@ -842,7 +867,7 @@ pub struct RunContext {
     #[doc(hidden)]
     pub token_ceiling: u64,
     #[doc(hidden)]
-    pub resources: Arc<Mutex<Vec<eliteforge_agent_plugin_kernel::ResourceScope>>>,
+    pub resources: Arc<Mutex<Vec<eliteforge_agent_plugin_core::ResourceScope>>>,
     #[doc(hidden)]
     pub revoked_tools: Arc<Mutex<std::collections::BTreeSet<String>>>,
     #[doc(hidden)]
@@ -875,10 +900,24 @@ pub struct RunContext {
     pub sinks: Vec<Arc<dyn EventSink>>,
 }
 
+/// Host-owned live input queue, consumed at the same durable boundaries as
+/// Agent::steer. `seal_if_empty` must atomically reject future admission when
+/// returning no inputs. Return full typed user content, never instructions.
+#[async_trait]
+pub trait LiveInputSource: Send + Sync {
+    async fn drain(
+        &self,
+        run: &RunContext,
+        seal_if_empty: bool,
+    ) -> Result<Vec<crate::Content>, AgentError>;
+}
+#[derive(Clone)]
+pub struct LiveInputSourceService(pub Arc<dyn LiveInputSource>);
+
 #[derive(Default)]
 #[doc(hidden)]
 pub struct SteeringState {
-    pub pending: VecDeque<String>,
+    pub pending: VecDeque<crate::Content>,
     pub closed: bool,
 }
 
@@ -911,7 +950,7 @@ impl RunContext {
     }
     /// Adopt a resource scope immediately after acquisition. The runtime awaits
     /// its graceful shutdown on every controlled exit; Drop executes fallbacks.
-    pub fn own_resources(&self, scope: eliteforge_agent_plugin_kernel::ResourceScope) {
+    pub fn own_resources(&self, scope: eliteforge_agent_plugin_core::ResourceScope) {
         self.resources
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -921,10 +960,10 @@ impl RunContext {
     pub async fn close_resources(
         &self,
         timeout: std::time::Duration,
-    ) -> eliteforge_agent_plugin_kernel::ShutdownReport {
+    ) -> eliteforge_agent_plugin_core::ShutdownReport {
         let mut scopes =
             std::mem::take(&mut *self.resources.lock().unwrap_or_else(|e| e.into_inner()));
-        let mut report = eliteforge_agent_plugin_kernel::ShutdownReport::default();
+        let mut report = eliteforge_agent_plugin_core::ShutdownReport::default();
         while let Some(mut scope) = scopes.pop() {
             report.merge(scope.close_async(timeout).await);
         }
@@ -961,6 +1000,12 @@ impl RunContext {
         }
     }
     pub fn take_steering(&self) -> Vec<String> {
+        self.take_steering_content()
+            .into_iter()
+            .map(|content| content.protocol_text())
+            .collect()
+    }
+    pub fn take_steering_content(&self) -> Vec<crate::Content> {
         self.steering
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -970,6 +1015,13 @@ impl RunContext {
     }
     #[doc(hidden)]
     pub fn pending_or_seal(&self) -> Vec<String> {
+        self.pending_content_or_seal()
+            .into_iter()
+            .map(|content| content.protocol_text())
+            .collect()
+    }
+    #[doc(hidden)]
+    pub fn pending_content_or_seal(&self) -> Vec<crate::Content> {
         let mut state = self.steering.lock().unwrap_or_else(|e| e.into_inner());
         if state.pending.is_empty() {
             state.closed = true;

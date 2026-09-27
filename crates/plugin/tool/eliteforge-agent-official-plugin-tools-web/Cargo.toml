@@ -1,0 +1,19 @@
+[package]
+name = "eliteforge-agent-official-plugin-tools-web"
+version.workspace = true
+edition.workspace = true
+description = "Configurable in-process web search and bounded HTTP text fetching"
+
+[dependencies]
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+scraper = "0.24"
+
+[dev-dependencies]
+eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
+eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }
+tokio = { workspace = true, features = ["net", "io-util"] }

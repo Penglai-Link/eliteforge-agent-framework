@@ -1,0 +1,2 @@
+# Keep upstream resource bytes intact for SHA256SUMS verification.
+crates/plugin/storage/eliteforge-agent-sqlite-extensions/resources/** -text

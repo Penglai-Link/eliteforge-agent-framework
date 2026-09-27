@@ -480,12 +480,36 @@ impl RunNext<'_> {
     }
 }
 
+/// Trusted invocation identity supplied by the invoker, available to executors
+/// through `RunContext.extensions`. Each concurrent call receives its own value.
+/// Persist `invocation_id` when a tool needs an idempotency key across recovery.
+#[derive(Debug, Clone)]
+pub struct ToolCallIdentity {
+    pub invocation_id: String,
+    pub provider_call_id: String,
+    pub tool_id: String,
+}
+
 pub struct ToolInvocationContext<'a> {
     pub invocation_id: &'a str,
     pub call: &'a ToolCall,
     pub descriptor: &'a ToolDescriptor,
     pub run: &'a RunContext,
 }
+
+/// Host projection of a confirmed result, including rejected/invalid calls.
+/// Called in model-call order before the result enters durable history. On
+/// recovery it can run again; implementations must use invocation_id for
+/// idempotent external persistence. It cannot turn a failure into success.
+#[async_trait]
+pub trait ToolResultProcessor: Send + Sync {
+    async fn process(
+        &self,
+        invocation: &ToolInvocationContext<'_>,
+        output: ToolOutput,
+    ) -> Result<ToolOutput, AgentError>;
+}
+pub struct ToolResultProcessorService(pub Arc<dyn ToolResultProcessor>);
 
 /// Intercepts a single immutable tool invocation. A denial returns an error
 /// without calling next. Execution failures cannot be converted to success;
@@ -548,9 +572,15 @@ impl ToolNext<'_> {
                         return Err(ToolError::Failed("tool was revoked before dispatch".into()));
                     }
                     self.execution.dispatched.store(true, Ordering::Release);
+                    let mut invocation_run = context.clone();
+                    invocation_run.extensions.insert(ToolCallIdentity {
+                        invocation_id: self.invocation.invocation_id.to_owned(),
+                        provider_call_id: self.invocation.call.id.clone(),
+                        tool_id: self.binding.descriptor.id.clone(),
+                    });
                     self.binding
                         .executor
-                        .call(self.invocation.call.arguments.clone(), context)
+                        .call(self.invocation.call.arguments.clone(), &invocation_run)
                         .await
                 }
             })

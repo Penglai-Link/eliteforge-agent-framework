@@ -6,7 +6,7 @@ edition.workspace = true
 
 [dependencies]
 eliteforge-agent-capability-macros = { version = "0.1.0", path = "../eliteforge-agent-capability-macros" }
-eliteforge-agent-plugin-kernel = { version = "0.1.0", path = "../eliteforge-agent-plugin-kernel" }
+eliteforge-agent-plugin-core = { version = "0.1.0", path = "../eliteforge-agent-plugin-core" }
 async-trait.workspace = true
 futures.workspace = true
 inventory.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "eliteforge-agent-capability-external"
+version.workspace = true
+edition.workspace = true
+description = "External Agent model-stage capability assembly"
+
+[dependencies]
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-official-plugin-model-external = { path = "../../plugin/model/eliteforge-agent-official-plugin-model-external", version = "0.1.0" }

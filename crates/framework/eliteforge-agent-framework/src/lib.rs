@@ -24,3 +24,5 @@ mod tests;
 mod capability_state;
 
 pub use eliteforge_agent_capability_runtime::*;
+
+mod model_call_budget;
