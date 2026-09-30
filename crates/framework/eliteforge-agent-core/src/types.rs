@@ -204,6 +204,8 @@ impl ChatResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum ModelError {
+    #[error("model is unavailable: {0}")]
+    Unavailable(String),
     #[error("operation result is unknown: {0}")]
     Indeterminate(String),
     #[error(transparent)]
@@ -352,6 +354,8 @@ pub struct RunResult {
     pub usage: Usage,
     pub steps: usize,
     pub tool_calls: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_session: Option<crate::ExternalSessionRef>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -497,6 +501,7 @@ impl RunRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AgentEvent {
+    ExternalAgent(crate::ExternalAgentEvent),
     ModelOperationStarted {
         operation: crate::ModelOperation,
         model: crate::ModelRef,
@@ -629,6 +634,10 @@ pub trait ContextProvider: Send + Sync {
 #[crate::extension_point(single, adapter = crate::AgentLoopPlugin)]
 #[async_trait]
 pub trait AgentLoop: Send + Sync {
+    /// Loops that own their history externally can run without a ConversationStore.
+    fn requires_conversations(&self) -> bool {
+        true
+    }
     /// Whether unaddressed live steering has defined semantics for this loop.
     fn supports_steering(&self) -> bool {
         true
@@ -800,6 +809,7 @@ pub trait ToolProvider: Send + Sync {
 /// Services frozen at build time. Each run owns all its mutable execution state.
 #[derive(Clone)]
 pub struct AgentServices {
+    pub external_agent: Option<Arc<dyn crate::ExternalAgent>>,
     pub extension_router: Option<Arc<dyn ExtensionRouter>>,
     pub operations: Arc<dyn crate::ModelOperations>,
     pub interactions: Option<crate::InteractionManager>,
