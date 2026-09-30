@@ -153,6 +153,12 @@ macro_rules! remote_model {
 remote_model!(EmbeddingModel, embed, EmbeddingRequest, EmbeddingResponse);
 remote_model!(RerankModel, rerank, RerankRequest, RerankResponse);
 remote_model!(
+    ContentDetectionModel,
+    detect,
+    ContentDetectionRequest,
+    ContentDetectionResponse
+);
+remote_model!(
     ImageGenerationModel,
     generate,
     ImageGenerationRequest,

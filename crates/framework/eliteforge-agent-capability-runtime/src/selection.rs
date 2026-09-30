@@ -695,6 +695,9 @@ impl Plugin for RemoteMemberPlugin {
                 model!(SpeechSynthesisModelService, SpeechSynthesisModel)
             }
             "framework.realtime" => model!(RealtimeModelService, RealtimeModel),
+            "framework.content-detection" => {
+                model!(ContentDetectionModelService, ContentDetectionModel)
+            }
             "framework.tool-provider" => multiple!(ToolProviderService, ToolProvider),
             "framework.tool-policy" => multiple!(ToolPolicyService, ToolPolicy),
             "framework.context-provider" => multiple!(ContextService, ContextProvider),

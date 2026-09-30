@@ -108,6 +108,8 @@ pub struct ModelRuntime {
     partitions: Mutex<BTreeMap<String, ModelRuntimeUpdate>>,
     retired_video: Mutex<BTreeMap<(ModelRef, String), VideoGenerationModelService>>,
     retired_image: Mutex<BTreeMap<(ModelRef, String), ImageGenerationModelService>>,
+    video_jobs: Mutex<BTreeMap<(ModelRef, String, String), VideoGenerationModelService>>,
+    image_jobs: Mutex<BTreeMap<(ModelRef, String, String), ImageGenerationModelService>>,
 }
 impl ModelRuntime {
     pub fn new(update: ModelRuntimeUpdate) -> Result<Arc<Self>, AgentError> {
@@ -117,6 +119,8 @@ impl ModelRuntime {
             partitions: Mutex::new(BTreeMap::from([("__base".into(), update)])),
             retired_video: Mutex::new(BTreeMap::new()),
             retired_image: Mutex::new(BTreeMap::new()),
+            video_jobs: Mutex::new(BTreeMap::new()),
+            image_jobs: Mutex::new(BTreeMap::new()),
         }))
     }
     pub fn snapshot(&self) -> Arc<ModelRuntimeSnapshot> {
@@ -233,6 +237,11 @@ impl ModelRuntime {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some((scope, revision)) = expected {
+            if update.account_scope != scope || update.revision < revision {
+                return Err(AgentError::InvalidConfiguration(
+                    "model refresh account scope or revision changed".into(),
+                ));
+            }
             let current = partitions.get(connection_id);
             if current
                 .is_none_or(|value| value.account_scope != scope || value.revision != revision)
@@ -304,7 +313,17 @@ impl ModelRuntime {
         &self,
         model: &ModelRef,
         protocol: &str,
+        job_id: &str,
     ) -> Option<VideoGenerationModelService> {
+        if let Some(binding) = self
+            .video_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(model.clone(), protocol.to_owned(), job_id.to_owned()))
+            .cloned()
+        {
+            return Some(binding);
+        }
         self.snapshot()
             .video
             .get(model)
@@ -322,7 +341,17 @@ impl ModelRuntime {
         &self,
         model: &ModelRef,
         protocol: &str,
+        job_id: &str,
     ) -> Option<ImageGenerationModelService> {
+        if let Some(binding) = self
+            .image_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&(model.clone(), protocol.to_owned(), job_id.to_owned()))
+            .cloned()
+        {
+            return Some(binding);
+        }
         self.snapshot()
             .image
             .get(model)
@@ -335,6 +364,26 @@ impl ModelRuntime {
                     .get(&(model.clone(), protocol.to_owned()))
                     .cloned()
             })
+    }
+    pub(crate) fn retain_video_job(&self, job: &VideoJob, binding: VideoGenerationModelService) {
+        self.video_jobs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                (job.model.clone(), job.protocol.clone(), job.id.clone()),
+                binding,
+            );
+    }
+    pub(crate) fn retain_image_job(&self, job: &ImageJob, binding: ImageGenerationModelService) {
+        if !job.id.is_empty() {
+            self.image_jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    (job.model.clone(), job.protocol.clone(), job.id.clone()),
+                    binding,
+                );
+        }
     }
     pub(crate) fn from_registry(registry: &ServiceRegistry) -> Result<Arc<Self>, AgentError> {
         let mut update = ModelRuntimeUpdate::new(

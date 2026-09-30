@@ -122,15 +122,88 @@ async fn external_loop_runs_without_framework_storage() {
         session_id: "remote-1".into(),
         run_id: None,
     });
-    let result = agent.run(request).await.unwrap();
+    let mut handle = agent.start(request).unwrap();
+    let mut events = agent.events(&mut handle).unwrap();
+    let result = agent.wait(handle).await.unwrap();
     assert_eq!(result.output, "done");
     assert_eq!(
         result.external_session.unwrap().run_id.as_deref(),
         Some("run-2")
     );
+    let mut status = false;
+    let mut session = false;
+    while let Ok(envelope) = events.try_recv() {
+        match envelope.event {
+            AgentEvent::ExternalAgent(ExternalAgentEvent::Status(value)) if value == "running" => {
+                status = true
+            }
+            AgentEvent::ExternalAgent(ExternalAgentEvent::Session(value))
+                if value.run_id.as_deref() == Some("run-2") =>
+            {
+                session = true
+            }
+            _ => {}
+        }
+    }
+    assert!(status && session);
 }
 
-struct QueuedVideo;
+#[tokio::test]
+async fn external_loop_rejects_framework_resume() {
+    let agent = AgentBuilder::new()
+        .default_models(false)
+        .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
+        .plugin(ExternalAgentPlugin::new(FakeExternal))
+        .build()
+        .await
+        .unwrap();
+    let mut request = RunRequest::new("local-1", "hello");
+    request.resume = Some(ResumeRequest::default());
+    let error = match agent.start(request) {
+        Ok(_) => panic!("external loop accepted Framework resume"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("resume"));
+}
+
+struct PendingExternal;
+#[async_trait]
+impl ExternalAgent for PendingExternal {
+    async fn run(
+        &self,
+        _request: ExternalAgentRequest,
+        _sink: &dyn ExternalAgentEventSink,
+    ) -> Result<ExternalAgentResult, AgentError> {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        unreachable!("cancelled external invocation continued")
+    }
+}
+
+#[tokio::test]
+async fn external_loop_observes_cancel_and_timeout() {
+    let agent = AgentBuilder::new()
+        .default_models(false)
+        .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
+        .plugin(ExternalAgentPlugin::new(PendingExternal))
+        .build()
+        .await
+        .unwrap();
+    let handle = agent.start(RunRequest::new("cancel", "hello")).unwrap();
+    agent.cancel(&handle).unwrap();
+    let cancelled = tokio::time::timeout(std::time::Duration::from_secs(2), agent.wait(handle))
+        .await
+        .unwrap();
+    assert!(matches!(cancelled, Err(AgentError::Cancelled)));
+
+    let mut request = RunRequest::new("timeout", "hello");
+    request.limits.run_timeout = std::time::Duration::from_millis(20);
+    let timed_out = tokio::time::timeout(std::time::Duration::from_secs(2), agent.run(request))
+        .await
+        .unwrap();
+    assert!(timed_out.unwrap_err().to_string().contains("deadline"));
+}
+
+struct QueuedVideo(f64);
 #[async_trait]
 impl VideoGenerationModel for QueuedVideo {
     async fn submit(
@@ -149,7 +222,10 @@ impl VideoGenerationModel for QueuedVideo {
         })
     }
     async fn query(&self, job: &VideoJob) -> Result<VideoJob, ModelError> {
-        Ok(job.clone())
+        Ok(VideoJob {
+            progress: Some(self.0),
+            ..job.clone()
+        })
     }
 }
 
@@ -182,7 +258,8 @@ async fn retired_video_job_keeps_its_original_binding() {
     let model = ModelRef::new("personai", "video");
     let mut update = ModelRuntimeUpdate::new("alice", 1, vec![]);
     update.video.push(
-        VideoGenerationModelService::new(model.clone(), Arc::new(QueuedVideo)).protocol("mock"),
+        VideoGenerationModelService::new(model.clone(), Arc::new(QueuedVideo(0.1)))
+            .protocol("mock"),
     );
     runtime.replace_connection("personai", update).unwrap();
     assert_eq!(
@@ -208,5 +285,45 @@ async fn retired_video_job_keeps_its_original_binding() {
         .replace_connection("personai", ModelRuntimeUpdate::new("alice", 1, vec![]))
         .unwrap();
     assert!(agent.models(ModelOperation::VideoGeneration).is_empty());
-    assert_eq!(agent.query_video(&job).await.unwrap().id, "job-1");
+    assert_eq!(agent.query_video(&job).await.unwrap().progress, Some(0.1));
+}
+
+#[tokio::test]
+async fn video_job_retains_binding_across_same_model_token_refresh() {
+    let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
+    let agent = AgentBuilder::new()
+        .default_models(false)
+        .plugin(ModelRuntimePlugin::new(runtime.clone()))
+        .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
+        .build()
+        .await
+        .unwrap();
+    let model = ModelRef::new("personai", "video");
+    let mut first = ModelRuntimeUpdate::new("alice", 1, vec![]);
+    first.video.push(
+        VideoGenerationModelService::new(model.clone(), Arc::new(QueuedVideo(0.1)))
+            .protocol("mock"),
+    );
+    runtime.replace_connection("personai", first).unwrap();
+    let job = agent
+        .submit_video(VideoGenerationRequest {
+            choice: ModelChoice::model(model.clone()),
+            prompt: "clip".into(),
+            seconds: 2,
+            size: None,
+            first_frame: None,
+            last_frame: None,
+            reference_images: vec![],
+            reference_videos: vec![],
+            reference_audios: vec![],
+            provider_options: Default::default(),
+        })
+        .await
+        .unwrap();
+    let mut refreshed = ModelRuntimeUpdate::new("alice", 2, vec![]);
+    refreshed
+        .video
+        .push(VideoGenerationModelService::new(model, Arc::new(QueuedVideo(0.9))).protocol("mock"));
+    runtime.replace_connection("personai", refreshed).unwrap();
+    assert_eq!(agent.query_video(&job).await.unwrap().progress, Some(0.1));
 }
