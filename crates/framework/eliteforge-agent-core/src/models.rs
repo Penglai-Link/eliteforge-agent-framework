@@ -2,7 +2,10 @@
 use crate::*;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::{Arc, RwLock}};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, RwLock},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ModelRef {
