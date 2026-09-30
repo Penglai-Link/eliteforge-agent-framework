@@ -102,6 +102,21 @@ pub trait ConversationStore: Send + Sync {
     }
 }
 
+/// Placeholder used only when the selected loop does not require conversations.
+/// It never persists or supplies a transcript.
+pub struct UnconfiguredConversationStore;
+#[async_trait]
+impl ConversationStore for UnconfiguredConversationStore {
+    async fn open(
+        &self,
+        _session_id: &str,
+    ) -> Result<Box<dyn ConversationSession>, ConversationError> {
+        Err(ConversationError::Other(
+            "ConversationStore is not configured for this Agent".into(),
+        ))
+    }
+}
+
 /// A run-local session lease. Implement Drop for mandatory cleanup: cancellation
 /// can interrupt any async operation, including `finish`.
 #[async_trait]

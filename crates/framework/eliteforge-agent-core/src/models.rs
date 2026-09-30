@@ -2,7 +2,7 @@
 use crate::*;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::{Arc, RwLock}};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ModelRef {
@@ -189,7 +189,7 @@ impl ModelConnection {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ModelCatalog {
     #[doc(hidden)]
     pub connections: BTreeMap<String, ModelConnection>,
@@ -272,6 +272,65 @@ impl ModelCatalog {
         )
     }
 }
+
+/// Serializable provider metadata. Runtime adapters and credentials are rebuilt
+/// from the active account context after restoring this cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCatalogEntry {
+    pub operation: ModelOperation,
+    pub model: ModelRef,
+    pub protocol: String,
+    pub capabilities: OperationCapabilities,
+    pub descriptor: Option<ModelDescriptor>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCatalogSnapshot {
+    pub account_scope: String,
+    pub revision: u64,
+    pub synced_at_unix_ms: u64,
+    pub entries: Vec<ModelCatalogEntry>,
+}
+
+#[crate::extension_point(single, adapter = crate::ModelCatalogStorePlugin)]
+#[async_trait]
+pub trait ModelCatalogStore: Send + Sync {
+    async fn load(&self, account_scope: &str) -> Result<Option<ModelCatalogSnapshot>, ModelError>;
+    async fn save(&self, snapshot: &ModelCatalogSnapshot) -> Result<(), ModelError>;
+}
+
+/// An immutable catalog is replaced as one unit. A call keeps the returned Arc
+/// until its response completes, so a concurrent refresh cannot change its
+/// descriptor, protocol or adapter midway through dispatch.
+pub struct DynamicModelCatalog {
+    current: RwLock<Arc<ModelCatalog>>,
+}
+impl DynamicModelCatalog {
+    pub fn new(catalog: ModelCatalog) -> Self {
+        Self {
+            current: RwLock::new(Arc::new(catalog)),
+        }
+    }
+    pub fn snapshot(&self) -> Arc<ModelCatalog> {
+        self.current
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+    pub fn replace(&self, catalog: ModelCatalog) -> Arc<ModelCatalog> {
+        std::mem::replace(
+            &mut *self
+                .current
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Arc::new(catalog),
+        )
+    }
+}
+
+pub struct DynamicModelCatalogService(pub Arc<DynamicModelCatalog>);
 
 pub struct ModelSelectionContext<'a> {
     pub stage: &'a str,
@@ -516,6 +575,9 @@ pub trait ChatExecutor: Send + Sync {
         Ok(())
     }
     fn catalog(&self) -> &ModelCatalog;
+    fn catalog_snapshot(&self) -> Arc<ModelCatalog> {
+        Arc::new(self.catalog().clone())
+    }
     async fn invoke(
         &self,
         call: ModelCall<'_>,
