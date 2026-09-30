@@ -1,6 +1,10 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_memory::*;
+use eliteforge_agent_official_plugin_storage_local::{
+    SqliteConversationOptions, SqliteConversationStore, SqliteLongTermMemory, SqliteSummaryStore,
+    SummaryStoreOptions,
+};
 use eliteforge_agent_test_support::*;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -179,6 +183,7 @@ impl AgentLoop for ToolChecks {
             usage: Usage::default(),
             steps: 0,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }

@@ -1,7 +1,4 @@
-//! Host-scoped memory stores, contributors and explicit tools. No automatic fact extraction.
+//! Host-scoped memory contributors and explicit tools. Storage is supplied by the host.
 mod components;
-mod conversation;
-mod long_term;
+mod validation;
 pub use components::*;
-pub use conversation::*;
-pub use long_term::*;
