@@ -301,6 +301,7 @@ pub trait ImageGenerationModel: Send + Sync {
             model: response.model,
             protocol: "custom".into(),
             id: String::new(),
+            binding_id: None,
             status: ModelJobStatus::Completed,
             progress: Some(1.0),
             images: response.images,
@@ -328,6 +329,9 @@ pub struct ImageJob {
     pub model: ModelRef,
     pub protocol: String,
     pub id: String,
+    /// Process-local adapter identity assigned by Framework on submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_id: Option<RunId>,
     pub status: ModelJobStatus,
     pub progress: Option<f64>,
     pub images: Vec<MediaContent>,
@@ -386,6 +390,9 @@ pub struct VideoJob {
     pub model: ModelRef,
     pub protocol: String,
     pub id: String,
+    /// Process-local adapter identity assigned by Framework on submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_id: Option<RunId>,
     pub status: ModelJobStatus,
     pub progress: Option<f64>,
     pub output: Option<ResourceReference>,
