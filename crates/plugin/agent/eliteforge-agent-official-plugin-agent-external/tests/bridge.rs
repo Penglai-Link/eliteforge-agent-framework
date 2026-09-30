@@ -6,7 +6,7 @@ use std::sync::{
 use eliteforge_agent_official_plugin_agent_external::JsonAgentBridge;
 use serde_json::json;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
     sync::Notify,
 };
@@ -29,10 +29,11 @@ async fn dropping_wait_only_attempts_remote_cancel_with_a_known_run_id() {
                 let cancelled = cancelled.clone();
                 let cancel_count = cancel_count.clone();
                 tokio::spawn(async move {
-                    let mut buffer = [0u8; 4096];
-                    let n = stream.read(&mut buffer).await.unwrap();
-                    let head = String::from_utf8_lossy(&buffer[..n]);
-                    if head.contains("/runs/known/cancel") {
+                    let mut reader = BufReader::new(stream);
+                    let mut request_line = String::new();
+                    reader.read_line(&mut request_line).await.unwrap();
+                    let mut stream = reader.into_inner();
+                    if request_line.contains("/runs/known/cancel") {
                         cancel_count.fetch_add(1, Ordering::SeqCst);
                         cancelled.notify_one();
                         let _ = stream
