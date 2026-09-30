@@ -4,6 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use base64::Engine;
 use crab_serverapi::{
+    base::AuthorizedClientApi,
     error::ServerApiError,
     gateway::{ProtocolType, QualityType},
     multimedia::{self, TaskStatus},
@@ -20,6 +21,7 @@ use eliteforge_agent_core::{
     VideoJob,
 };
 use eliteforge_agent_framework::ModelRuntimeUpdate;
+use reqwest::Method;
 use serde_json::{Value, json};
 
 use crate::realtime::PersonAiRealtimeAdapter;
@@ -31,19 +33,22 @@ pub struct PersonAiModels {
     connection_id: String,
     services: Arc<PersonAiServices>,
     context: Arc<dyn PersonAiContextProvider>,
+    api: Arc<AuthorizedClientApi>,
 }
 
 impl PersonAiModels {
     pub fn new(
         connection_id: String,
+        server_base_url: &str,
         services: Arc<PersonAiServices>,
         context: Arc<dyn PersonAiContextProvider>,
-    ) -> Self {
-        Self {
+    ) -> crab_serverapi::error::Result<Self> {
+        Ok(Self {
             connection_id,
             services,
             context,
-        }
+            api: Arc::new(AuthorizedClientApi::new(server_base_url)?),
+        })
     }
 
     pub fn bind(&self, account: Arc<AccountContext>) -> Arc<BoundPersonAiModels> {
@@ -51,6 +56,7 @@ impl PersonAiModels {
             connection_id: self.connection_id.clone(),
             services: self.services.clone(),
             context: self.context.clone(),
+            api: self.api.clone(),
             account,
         })
     }
@@ -80,9 +86,11 @@ impl PersonAiModels {
         let mut connections = Vec::new();
         if let Some(first) = descriptors.first() {
             let protocol = chat_protocol(snapshot.chat.iter().find(|model| model.id == first.id));
+            let quality = chat_quality(snapshot.chat.iter().find(|model| model.id == first.id));
             let default: Arc<dyn ChatModel> = Arc::new(PersonAiChatAdapter {
                 binding: binding.clone(),
                 protocol,
+                quality,
             });
             let mut connection =
                 ModelConnection::new(&config.connection_id, default, descriptors.clone())
@@ -93,6 +101,9 @@ impl PersonAiModels {
                 let adapter: Arc<dyn ChatModel> = Arc::new(PersonAiChatAdapter {
                     binding: binding.clone(),
                     protocol,
+                    quality: chat_quality(
+                        snapshot.chat.iter().find(|model| model.id == descriptor.id),
+                    ),
                 });
                 connection = connection
                     .bind(&descriptor.id, adapter, protocol_name(protocol))
@@ -286,9 +297,10 @@ fn chat_descriptor(model: &DiscoveredChatModel) -> ModelDescriptor {
     if model.image_understanding {
         descriptor.input_modalities.push(Modality::Image);
     }
-    if model.video_understanding {
-        descriptor.input_modalities.push(Modality::Video);
-    }
+    descriptor.metadata.insert(
+        "personai.video_understanding".into(),
+        json!(model.video_understanding),
+    );
     descriptor
         .metadata
         .insert("personai.quality_tiers".into(), json!(model.quality_tiers));
@@ -317,6 +329,14 @@ fn chat_protocol(model: Option<&DiscoveredChatModel>) -> ProtocolType {
     }
 }
 
+fn chat_quality(model: Option<&DiscoveredChatModel>) -> QualityType {
+    match model {
+        Some(model) if model.quality_tiers.contains("low") => QualityType::Low,
+        Some(model) if model.quality_tiers.contains("middle") => QualityType::Middle,
+        _ => QualityType::High,
+    }
+}
+
 fn protocol_name(protocol: ProtocolType) -> &'static str {
     match protocol {
         ProtocolType::ChatCompletions => "personai.chat-completions",
@@ -328,6 +348,7 @@ pub struct BoundPersonAiModels {
     connection_id: String,
     services: Arc<PersonAiServices>,
     context: Arc<dyn PersonAiContextProvider>,
+    api: Arc<AuthorizedClientApi>,
     account: Arc<AccountContext>,
 }
 
@@ -364,6 +385,7 @@ impl BoundPersonAiModels {
         &self,
         model_id: &str,
         protocol: ProtocolType,
+        quality: QualityType,
         request: ChatRequest,
         stream: &dyn ChatStream,
     ) -> Result<ChatResponse, ModelError> {
@@ -379,7 +401,7 @@ impl BoundPersonAiModels {
             ProtocolType::ChatCompletions => {
                 self.services
                     .chat
-                    .create(context, &raw, Some(QualityType::Low), None)
+                    .create(context, &raw, Some(quality), None)
                     .await
             }
             ProtocolType::Responses => self.services.responses.create(context, &raw).await,
@@ -394,12 +416,71 @@ impl BoundPersonAiModels {
         }
         Ok(parsed)
     }
+
+    pub async fn stream_chat_with_protocol(
+        &self,
+        model_id: &str,
+        protocol: ProtocolType,
+        quality: QualityType,
+        request: ChatRequest,
+        stream: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        self.ensure_current()?;
+        let body = match protocol {
+            ProtocolType::ChatCompletions => chat_completions_request(model_id, &request)?,
+            ProtocolType::Responses => responses_request(model_id, &request)?,
+        };
+        let raw =
+            serde_json::to_string(&body).map_err(|error| ModelError::Fatal(error.to_string()))?;
+        let context = &self.account.authorization;
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let future = async {
+            match protocol {
+                ProtocolType::ChatCompletions => {
+                    self.services
+                        .chat
+                        .create_stream(context, &raw, quality, None, move |data| {
+                            let _ = sender.send(data.to_string());
+                            Ok(())
+                        })
+                        .await
+                }
+                ProtocolType::Responses => {
+                    self.services
+                        .responses
+                        .create_stream(context, &raw, move |data| {
+                            let _ = sender.send(data.to_string());
+                            Ok(())
+                        })
+                        .await
+                }
+            }
+        };
+        tokio::pin!(future);
+        let mut completed = false;
+        let mut collected = StreamAccumulator::default();
+        loop {
+            tokio::select! {
+                result = &mut future, if !completed => {
+                    result.map_err(map_error)?;
+                    completed = true;
+                }
+                chunk = receiver.recv() => match chunk {
+                    Some(chunk) => collected.accept(protocol, &chunk, stream).await?,
+                    None if completed => break,
+                    None => return Err(ModelError::Transient("PersonAI model stream ended before request completion".into())),
+                },
+            }
+        }
+        collected.finish()
+    }
 }
 
 /// One protocol per adapter value ensures catalog bindings cannot silently change wire format.
 pub struct PersonAiChatAdapter {
     pub binding: Arc<BoundPersonAiModels>,
     pub protocol: ProtocolType,
+    pub quality: QualityType,
 }
 
 #[async_trait]
@@ -411,8 +492,144 @@ impl ChatModel for PersonAiChatAdapter {
         stream: &dyn ChatStream,
     ) -> Result<ChatResponse, ModelError> {
         self.binding
-            .chat_with_protocol(model_id, self.protocol, request, stream)
+            .stream_chat_with_protocol(model_id, self.protocol, self.quality, request, stream)
             .await
+    }
+}
+
+#[derive(Default)]
+struct PartialToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+#[derive(Default)]
+struct StreamAccumulator {
+    text: String,
+    calls: BTreeMap<String, PartialToolCall>,
+    usage: Usage,
+}
+
+impl StreamAccumulator {
+    async fn accept(
+        &mut self,
+        protocol: ProtocolType,
+        data: &str,
+        stream: &dyn ChatStream,
+    ) -> Result<(), ModelError> {
+        if data == "[DONE]" || data.trim().is_empty() {
+            return Ok(());
+        }
+        let event: Value = serde_json::from_str(data)
+            .map_err(|error| ModelError::Fatal(format!("invalid PersonAI SSE payload: {error}")))?;
+        if let Some(error) = event.get("error") {
+            return Err(ModelError::Fatal(format!("PersonAI model stream: {error}")));
+        }
+        match protocol {
+            ProtocolType::ChatCompletions => {
+                let delta = &event["choices"][0]["delta"];
+                if let Some(value) = delta["content"].as_str() {
+                    self.text.push_str(value);
+                    stream.text_delta(value).await;
+                }
+                if let Some(value) = delta["reasoning_content"].as_str() {
+                    stream.reasoning_delta(value).await;
+                }
+                if let Some(calls) = delta["tool_calls"].as_array() {
+                    for call in calls {
+                        let key = call["index"].as_u64().unwrap_or(0).to_string();
+                        let partial = self.calls.entry(key).or_default();
+                        if let Some(id) = call["id"].as_str() {
+                            partial.id.push_str(id);
+                        }
+                        if let Some(name) = call["function"]["name"].as_str() {
+                            partial.name.push_str(name);
+                        }
+                        if let Some(args) = call["function"]["arguments"].as_str() {
+                            partial.arguments.push_str(args);
+                        }
+                    }
+                }
+                self.usage.input_tokens = event["usage"]["prompt_tokens"]
+                    .as_u64()
+                    .unwrap_or(self.usage.input_tokens);
+                self.usage.output_tokens = event["usage"]["completion_tokens"]
+                    .as_u64()
+                    .unwrap_or(self.usage.output_tokens);
+            }
+            ProtocolType::Responses => match event["type"].as_str().unwrap_or_default() {
+                "response.output_text.delta" => {
+                    if let Some(value) = event["delta"].as_str() {
+                        self.text.push_str(value);
+                        stream.text_delta(value).await;
+                    }
+                }
+                "response.reasoning_text.delta" => {
+                    if let Some(value) = event["delta"].as_str() {
+                        stream.reasoning_delta(value).await;
+                    }
+                }
+                "response.output_item.added" => {
+                    let item = &event["item"];
+                    if item["type"] == "function_call" {
+                        let key = item["id"].as_str().unwrap_or_default();
+                        self.calls.insert(
+                            key.into(),
+                            PartialToolCall {
+                                id: item["call_id"].as_str().unwrap_or_default().into(),
+                                name: item["name"].as_str().unwrap_or_default().into(),
+                                arguments: String::new(),
+                            },
+                        );
+                    }
+                }
+                "response.function_call_arguments.delta" => {
+                    let key = event["item_id"].as_str().unwrap_or_default();
+                    if let Some(partial) = self.calls.get_mut(key) {
+                        partial
+                            .arguments
+                            .push_str(event["delta"].as_str().unwrap_or_default());
+                    }
+                }
+                "response.completed" => {
+                    let response = &event["response"];
+                    self.usage.input_tokens = response["usage"]["input_tokens"]
+                        .as_u64()
+                        .unwrap_or(self.usage.input_tokens);
+                    self.usage.output_tokens = response["usage"]["output_tokens"]
+                        .as_u64()
+                        .unwrap_or(self.usage.output_tokens);
+                }
+                "response.failed" => {
+                    return Err(ModelError::Fatal(format!(
+                        "PersonAI Responses failed: {}",
+                        event["response"]["error"]
+                    )));
+                }
+                _ => {}
+            },
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<ChatResponse, ModelError> {
+        let mut result = ChatResponse::text(self.text);
+        result.usage = self.usage;
+        for (_, call) in self.calls {
+            let arguments = serde_json::from_str(if call.arguments.is_empty() {
+                "{}"
+            } else {
+                &call.arguments
+            })
+            .map_err(|error| {
+                ModelError::Fatal(format!("invalid streamed tool arguments: {error}"))
+            })?;
+            result
+                .tool_calls
+                .push(ToolCall::new(call.id, call.name, arguments));
+        }
+        Ok(result)
     }
 }
 
@@ -488,19 +705,12 @@ impl EmbeddingModel for BoundPersonAiModels {
 impl ImageGenerationModel for BoundPersonAiModels {
     async fn generate(
         &self,
-        model: &str,
-        request: ImageGenerationRequest,
+        _model: &str,
+        _request: ImageGenerationRequest,
     ) -> Result<ImageGenerationResponse, ModelError> {
-        let job = self.submit(model, request).await?;
-        if job.status != ModelJobStatus::Completed {
-            return Err(ModelError::Fatal(
-                "PersonAI image generation is asynchronous; use submit_image/query_image".into(),
-            ));
-        }
-        Ok(ImageGenerationResponse {
-            model: job.model,
-            images: job.images,
-        })
+        Err(ModelError::Fatal(
+            "PersonAI image generation is asynchronous; use submit_image/query_image".into(),
+        ))
     }
 
     async fn submit(
@@ -509,24 +719,55 @@ impl ImageGenerationModel for BoundPersonAiModels {
         request: ImageGenerationRequest,
     ) -> Result<ImageJob, ModelError> {
         self.ensure_current()?;
-        if !request.provider_options.is_empty() {
-            return Err(ModelError::Fatal(
-                "PersonAI SDK image generation has no provider_options field".into(),
-            ));
-        }
+        let count = i32::try_from(request.count)
+            .map_err(|_| ModelError::Fatal("image count exceeds PersonAI request range".into()))?;
         let sdk_request = multimedia::ImageGenerationRequest {
             prompt: request.prompt,
             model_id: Some(model.into()),
             size: request.size,
-            n: Some(request.count as i32),
+            n: Some(count),
             quality: request.quality,
         };
-        let response = self
-            .services
-            .multimedia
-            .generate_image(&self.account.authorization, &sdk_request)
-            .await
-            .map_err(map_error)?;
+        let response = if request.provider_options.is_empty() {
+            self.services
+                .multimedia
+                .generate_image(&self.account.authorization, &sdk_request)
+                .await
+                .map_err(map_error)?
+        } else {
+            let mut body = serde_json::to_value(&sdk_request)
+                .map_err(|error| ModelError::Fatal(error.to_string()))?;
+            for (key, value) in request.provider_options {
+                if body.get(&key).is_some()
+                    || matches!(
+                        key.as_str(),
+                        "prompt" | "model_id" | "size" | "n" | "quality"
+                    )
+                {
+                    return Err(ModelError::Fatal(format!(
+                        "PersonAI provider option overrides {key}"
+                    )));
+                }
+                body[&key] = value;
+            }
+            let http = self
+                .api
+                .new_authorized_request(
+                    Method::POST,
+                    "/images/generations",
+                    &self.account.authorization,
+                )
+                .map_err(map_error)?
+                .json(&body);
+            self.api
+                .execute_for_object::<multimedia::MultimediaTaskResponse>(
+                    http,
+                    Some(&self.account.authorization),
+                    "PersonAI image generation",
+                )
+                .await
+                .map_err(map_error)?
+        };
         Ok(self.image_job(model, response))
     }
 
@@ -537,7 +778,9 @@ impl ImageGenerationModel for BoundPersonAiModels {
             .get_task(&self.account.authorization, &job.id)
             .await
             .map_err(map_error)?;
-        Ok(self.image_job(&job.model.model, response))
+        let mut updated = self.image_job(&job.model.model, response);
+        updated.binding_id = job.binding_id.clone();
+        Ok(updated)
     }
 
     async fn cancel(&self, _job: &ImageJob) -> Result<(), ModelError> {
@@ -555,12 +798,60 @@ impl VideoGenerationModel for BoundPersonAiModels {
         request: VideoGenerationRequest,
     ) -> Result<VideoJob, ModelError> {
         self.ensure_current()?;
+        let duration = i32::try_from(request.seconds).map_err(|_| {
+            ModelError::Fatal("video duration exceeds PersonAI request range".into())
+        })?;
+        let mut extra_params = serde_json::Map::new();
+        for (key, value) in request.provider_options {
+            if matches!(
+                key.as_str(),
+                "prompt"
+                    | "model_id"
+                    | "duration"
+                    | "resolution"
+                    | "ratio"
+                    | "first_frame"
+                    | "last_frame"
+                    | "reference_images"
+                    | "reference_videos"
+                    | "reference_audios"
+            ) {
+                return Err(ModelError::Fatal(format!(
+                    "PersonAI provider option overrides {key}"
+                )));
+            }
+            extra_params.insert(key, value);
+        }
         let sdk_request = multimedia::VideoGenerationRequest {
             prompt: request.prompt,
             model_id: Some(model.into()),
-            duration: Some(request.seconds as i32),
+            duration: Some(duration),
             resolution: request.size,
-            ..Default::default()
+            ratio: None,
+            first_frame: request.first_frame.as_ref().map(media_url).transpose()?,
+            last_frame: request.last_frame.as_ref().map(media_url).transpose()?,
+            reference_images: Some(
+                request
+                    .reference_images
+                    .iter()
+                    .map(media_url)
+                    .collect::<Result<_, _>>()?,
+            ),
+            reference_videos: Some(
+                request
+                    .reference_videos
+                    .iter()
+                    .map(media_url)
+                    .collect::<Result<_, _>>()?,
+            ),
+            reference_audios: Some(
+                request
+                    .reference_audios
+                    .iter()
+                    .map(media_url)
+                    .collect::<Result<_, _>>()?,
+            ),
+            extra_params: Some(extra_params),
         };
         let response = self
             .services
@@ -578,13 +869,24 @@ impl VideoGenerationModel for BoundPersonAiModels {
             .get_task(&self.account.authorization, &job.id)
             .await
             .map_err(map_error)?;
-        Ok(self.video_job(&job.model.model, response))
+        let mut updated = self.video_job(&job.model.model, response);
+        updated.binding_id = job.binding_id.clone();
+        Ok(updated)
     }
 
     async fn cancel(&self, _job: &VideoJob) -> Result<(), ModelError> {
         Err(ModelError::Fatal(
             "PersonAI video task cancellation is unsupported by the SDK".into(),
         ))
+    }
+}
+
+fn media_url(media: &MediaContent) -> Result<String, ModelError> {
+    match &media.source {
+        MediaSource::Url(url) => Ok(url.clone()),
+        MediaSource::Base64(_) => Err(ModelError::Fatal(
+            "PersonAI video references require URLs".into(),
+        )),
     }
 }
 
@@ -604,6 +906,7 @@ impl BoundPersonAiModels {
             model: self.model_ref(model),
             protocol: "personai.multimedia".into(),
             id: task.id,
+            binding_id: None,
             status: job_status(task.status),
             progress: Some((task.progress as f64 / 100.0).clamp(0.0, 1.0)),
             images,
@@ -616,6 +919,7 @@ impl BoundPersonAiModels {
             model: self.model_ref(model),
             protocol: "personai.multimedia".into(),
             id: task.id,
+            binding_id: None,
             status: job_status(task.status),
             progress: Some((task.progress as f64 / 100.0).clamp(0.0, 1.0)),
             output: task.result_url.map(|uri| ResourceReference {
@@ -788,7 +1092,7 @@ fn chat_completions_request(model: &str, request: &ChatRequest) -> Result<Value,
         Ok(encoded)
     }).collect::<Result<Vec<_>, ModelError>>()?;
     let mut body = json!({"model": model, "messages": messages});
-    apply_options(&mut body, request);
+    apply_options(&mut body, request, false);
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(request.tools.iter().map(|tool| json!({
             "type": "function", "function": {"name": tool.call_name, "description": tool.description, "parameters": tool.input_schema}
@@ -798,21 +1102,40 @@ fn chat_completions_request(model: &str, request: &ChatRequest) -> Result<Value,
 }
 
 fn responses_request(model: &str, request: &ChatRequest) -> Result<Value, ModelError> {
-    let input = request
-        .messages
-        .iter()
-        .map(|message| {
-            let role = match message.role {
-                Role::System | Role::Developer => "developer",
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::Tool => "user",
-            };
-            Ok(json!({"role": role, "content": content_for_chat(&message.content)?}))
-        })
-        .collect::<Result<Vec<_>, ModelError>>()?;
+    if request.options.stop_sequences.is_some() {
+        return Err(ModelError::Fatal(
+            "PersonAI Responses does not accept stop_sequences".into(),
+        ));
+    }
+    let mut input = Vec::new();
+    for message in &request.messages {
+        if message.role == Role::Tool {
+            if message.content.has_media() {
+                return Err(ModelError::Fatal(
+                    "PersonAI Responses tool results must be text".into(),
+                ));
+            }
+            input.push(json!({"type":"function_call_output",
+                "call_id": message.tool_call_id.as_deref().unwrap_or_default(),
+                "output": message.content.text()}));
+            continue;
+        }
+        let role = match message.role {
+            Role::System | Role::Developer => "developer",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => unreachable!(),
+        };
+        if !message.content.is_empty() {
+            input.push(json!({"role": role, "content": content_for_responses(&message.content)?}));
+        }
+        for call in &message.tool_calls {
+            input.push(json!({"type":"function_call", "call_id":call.id,
+                "name":call.call_name, "arguments":call.arguments.to_string()}));
+        }
+    }
     let mut body = json!({"model": model, "input": input});
-    apply_options(&mut body, request);
+    apply_options(&mut body, request, true);
     if !request.tools.is_empty() {
         body["tools"] = Value::Array(request.tools.iter().map(|tool| json!({
             "type": "function", "name": tool.call_name, "description": tool.description, "parameters": tool.input_schema
@@ -821,7 +1144,7 @@ fn responses_request(model: &str, request: &ChatRequest) -> Result<Value, ModelE
     Ok(body)
 }
 
-fn apply_options(body: &mut Value, request: &ChatRequest) {
+fn apply_options(body: &mut Value, request: &ChatRequest, responses: bool) {
     if let Some(value) = request.options.temperature {
         body["temperature"] = json!(value);
     }
@@ -829,14 +1152,39 @@ fn apply_options(body: &mut Value, request: &ChatRequest) {
         body["top_p"] = json!(value);
     }
     if let Some(value) = request.options.max_output_tokens {
-        body["max_output_tokens"] = json!(value);
+        body[if responses {
+            "max_output_tokens"
+        } else {
+            "max_completion_tokens"
+        }] = json!(value);
     }
-    if let Some(value) = &request.options.stop_sequences {
+    if let Some(value) = &request.options.stop_sequences
+        && !responses
+    {
         body["stop"] = json!(value);
+    }
+    if let Some(schema) = &request.options.output_schema {
+        if responses {
+            body["text"]["format"] = json!({"type":"json_schema", "name":schema.name,
+                "schema":schema.schema, "strict":true});
+        } else {
+            body["response_format"] = json!({"type":"json_schema", "json_schema": {
+                "name":schema.name, "schema":schema.schema, "strict":true
+            }});
+        }
     }
 }
 
 fn content_for_chat(content: &Content) -> Result<Value, ModelError> {
+    if content
+        .0
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Resource { .. }))
+    {
+        return Err(ModelError::Fatal(
+            "PersonAI chat cannot resolve opaque resources".into(),
+        ));
+    }
     if !content.has_media() {
         return Ok(json!(content.text()));
     }
@@ -857,6 +1205,31 @@ fn content_for_chat(content: &Content) -> Result<Value, ModelError> {
             ContentBlock::Media { .. } | ContentBlock::Resource { .. } => {
                 return Err(ModelError::Fatal(
                     "PersonAI chat adapter cannot inline this content block".into(),
+                ));
+            }
+        }
+    }
+    Ok(Value::Array(blocks))
+}
+
+fn content_for_responses(content: &Content) -> Result<Value, ModelError> {
+    let mut blocks = Vec::new();
+    for block in &content.0 {
+        match block {
+            ContentBlock::Text { text } => blocks.push(json!({"type": "input_text", "text": text})),
+            ContentBlock::Json { value } => {
+                blocks.push(json!({"type": "input_text", "text": value.to_string()}))
+            }
+            ContentBlock::Media { media } if media.mime_type.starts_with("image/") => {
+                let uri = match &media.source {
+                    MediaSource::Url(uri) => uri.clone(),
+                    MediaSource::Base64(data) => format!("data:{};base64,{data}", media.mime_type),
+                };
+                blocks.push(json!({"type": "input_image", "image_url": uri}));
+            }
+            ContentBlock::Media { .. } | ContentBlock::Resource { .. } => {
+                return Err(ModelError::Fatal(
+                    "PersonAI Responses cannot inline this content block".into(),
                 ));
             }
         }
@@ -927,4 +1300,360 @@ fn parse_responses_response(response: Value) -> Result<ChatResponse, ModelError>
         output_tokens: response["usage"]["output_tokens"].as_u64().unwrap_or(0),
     };
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PersonAiContextHandle;
+    use crab_serverapi::base::AuthorizedClientContext;
+    use rsa::{RsaPrivateKey, pkcs8::EncodePublicKey};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+        sync::{Mutex, oneshot},
+    };
+
+    #[derive(Default)]
+    struct CollectedStream(Mutex<Vec<String>>);
+    #[async_trait]
+    impl ChatStream for CollectedStream {
+        async fn text_delta(&self, text: &str) {
+            self.0.lock().await.push(text.into());
+        }
+        async fn reasoning_delta(&self, _text: &str) {}
+    }
+
+    fn chat_request() -> ChatRequest {
+        ChatRequest {
+            options: Default::default(),
+            messages: vec![eliteforge_agent_core::Message::user("hello")],
+            tools: vec![],
+            extensions: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn streams_chat_while_account_change_does_not_rebind_inflight_call() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                let header_end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n");
+                if let Some(end) = header_end {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            accepted_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            let body = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let public = private
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        let provider = Arc::new(PersonAiContextHandle::default());
+        let auth = AuthorizedClientContext::new()
+            .with_token("token")
+            .with_client_id("client")
+            .with_public_key(public)
+            .with_product_code("product")
+            .with_product_version("1.0.0");
+        provider.publish(AccountContext {
+            account_scope: "alice".into(),
+            revision: 1,
+            authorization: auth.clone(),
+        });
+        let services = Arc::new(PersonAiServices::new(&url).unwrap());
+        let factory =
+            PersonAiModels::new("personai".into(), &url, services, provider.clone()).unwrap();
+        let binding = factory.bind_current().unwrap();
+        let adapter = Arc::new(PersonAiChatAdapter {
+            binding,
+            protocol: ProtocolType::ChatCompletions,
+            quality: QualityType::Low,
+        });
+        let events = Arc::new(CollectedStream::default());
+        let running = {
+            let adapter = adapter.clone();
+            let events = events.clone();
+            tokio::spawn(async move {
+                adapter
+                    .generate("p/model", chat_request(), events.as_ref())
+                    .await
+            })
+        };
+        accepted_rx.await.unwrap();
+        provider.publish(AccountContext {
+            account_scope: "bob".into(),
+            revision: 2,
+            authorization: auth,
+        });
+        release_tx.send(()).unwrap();
+        let response = running.await.unwrap().unwrap();
+        assert_eq!(response.content.text(), "hello");
+        assert_eq!(events.0.lock().await.as_slice(), ["hel", "lo"]);
+        assert!(
+            adapter
+                .generate("p/model", chat_request(), events.as_ref())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn streams_responses_text_and_tool_calls() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let count = socket.read(&mut chunk).await.unwrap();
+                if count == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..count]);
+                let header_end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n");
+                if let Some(end) = header_end {
+                    let headers = String::from_utf8_lossy(&request[..end]);
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+            }
+            assert!(String::from_utf8_lossy(&request).contains(" /api/v1/responses "));
+            let body = concat!(
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+                "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"lookup\"}}\n\n",
+                "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"item-1\",\"delta\":\"{\\\"q\\\":\\\"x\\\"}\"}\n\n",
+                "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":3}}}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let public = private
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        let provider = Arc::new(PersonAiContextHandle::default());
+        provider.publish(AccountContext {
+            account_scope: "alice".into(),
+            revision: 1,
+            authorization: AuthorizedClientContext::new()
+                .with_token("token")
+                .with_client_id("client")
+                .with_public_key(public)
+                .with_product_code("product")
+                .with_product_version("1.0.0"),
+        });
+        let services = Arc::new(PersonAiServices::new(&url).unwrap());
+        let binding = PersonAiModels::new("personai".into(), &url, services, provider)
+            .unwrap()
+            .bind_current()
+            .unwrap();
+        let adapter = PersonAiChatAdapter {
+            binding,
+            protocol: ProtocolType::Responses,
+            quality: QualityType::Low,
+        };
+        let events = CollectedStream::default();
+        let result = adapter
+            .generate("responses-only", chat_request(), &events)
+            .await
+            .unwrap();
+        assert_eq!(result.content.text(), "hello");
+        assert_eq!(result.usage.input_tokens, 2);
+        assert_eq!(result.usage.output_tokens, 3);
+        assert_eq!(result.tool_calls.len(), 1);
+        assert_eq!(result.tool_calls[0].call_name, "lookup");
+        assert_eq!(events.0.lock().await.as_slice(), ["hello"]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn routes_embedding_media_file_speech_and_detection_operations() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for _ in 0..6 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0_u8; 8192];
+                let size = socket.read(&mut bytes).await.unwrap();
+                let request = String::from_utf8_lossy(&bytes[..size]);
+                let body = if request.contains(" /api/v1/embeddings ") {
+                    r#"{"data":[{"index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":2}}"#
+                } else if request.contains(" /api/v1/images/generations ") {
+                    r#"{"code":0,"data":{"id":"img","media_type":0,"status":0,"progress":0}}"#
+                } else if request.contains(" /api/v1/multimedia/tasks/img ") {
+                    r#"{"code":0,"data":{"id":"img","media_type":0,"status":2,"progress":100,"result_url":"https://example.com/image.png"}}"#
+                } else if request.contains(" /api/v1/videos/generations ") {
+                    r#"{"code":0,"data":{"id":"vid","media_type":1,"status":0,"progress":0}}"#
+                } else if request.contains(" /api/v1/audio/transcriptions ") {
+                    r#"{"text":"recognized"}"#
+                } else if request.contains(" /api/v1/aigc/detections/text ") {
+                    r#"{"code":0,"data":{"id":"det","detection_type":0,"model_code":"text-detector","status":0,"ai_confidence":0.2}}"#
+                } else {
+                    panic!("unexpected mock request: {request}")
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let public = private
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        let provider = Arc::new(PersonAiContextHandle::default());
+        provider.publish(AccountContext {
+            account_scope: "alice".into(),
+            revision: 1,
+            authorization: AuthorizedClientContext::new()
+                .with_token("token")
+                .with_client_id("client")
+                .with_public_key(public)
+                .with_product_code("product")
+                .with_product_version("1.0.0"),
+        });
+        let services = Arc::new(PersonAiServices::new(&url).unwrap());
+        let binding = PersonAiModels::new("personai".into(), &url, services, provider)
+            .unwrap()
+            .bind_current()
+            .unwrap();
+
+        let embedding = EmbeddingModel::embed(
+            binding.as_ref(),
+            "embedding-1",
+            EmbeddingRequest::texts(["hello"]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(embedding.vectors[0].values.len(), 2);
+
+        let image = ImageGenerationModel::submit(
+            binding.as_ref(),
+            "image-1",
+            ImageGenerationRequest {
+                choice: Default::default(),
+                prompt: "draw".into(),
+                size: Some("1024x1024".into()),
+                count: 1,
+                quality: Some("high".into()),
+                provider_options: BTreeMap::from([("seed".into(), json!(7))]),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(image.id, "img");
+        let image = ImageGenerationModel::query(binding.as_ref(), &image)
+            .await
+            .unwrap();
+        assert_eq!(image.status, ModelJobStatus::Completed);
+        assert_eq!(image.images.len(), 1);
+
+        let video = VideoGenerationModel::submit(
+            binding.as_ref(),
+            "video-1",
+            VideoGenerationRequest {
+                choice: Default::default(),
+                prompt: "animate".into(),
+                seconds: 5,
+                size: Some("720p".into()),
+                first_frame: Some(MediaContent {
+                    mime_type: "image/png".into(),
+                    source: MediaSource::Url("https://example.com/frame.png".into()),
+                    name: None,
+                    estimated_tokens: Some(1),
+                }),
+                last_frame: None,
+                reference_images: vec![],
+                reference_videos: vec![],
+                reference_audios: vec![],
+                provider_options: BTreeMap::from([("seed".into(), json!(7))]),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(video.id, "vid");
+
+        let speech = SpeechRecognitionModel::transcribe(
+            binding.as_ref(),
+            "speech-auto",
+            SpeechRecognitionRequest {
+                choice: Default::default(),
+                audio: MediaContent {
+                    mime_type: "audio/wav".into(),
+                    source: MediaSource::Base64("AA==".into()),
+                    name: Some("clip.wav".into()),
+                    estimated_tokens: Some(1),
+                },
+                language: Some("en".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(speech.text, "recognized");
+
+        let detection = ContentDetectionModel::detect(
+            binding.as_ref(),
+            "text-detector",
+            ContentDetectionRequest {
+                choice: Default::default(),
+                content: Content::from("some text"),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(detection.result["ai_confidence"], 0.2);
+        server.await.unwrap();
+    }
 }

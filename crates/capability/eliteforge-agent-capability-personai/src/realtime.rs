@@ -211,6 +211,11 @@ fn map_event(message: &Value) -> Option<RealtimeEvent> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AccountContext, PersonAiContextHandle, PersonAiModels, PersonAiServices};
+    use crab_serverapi::base::AuthorizedClientContext;
+    use eliteforge_agent_core::{ContentBlock, MediaContent, ModelChoice};
+    use rsa::{RsaPrivateKey, pkcs8::EncodePublicKey};
+    use tokio::net::TcpListener;
 
     #[test]
     fn maps_transcript_delta() {
@@ -218,5 +223,81 @@ mod tests {
         assert!(
             matches!(map_event(&event), Some(RealtimeEvent::Transcript(text)) if text == "你好")
         );
+    }
+
+    #[tokio::test]
+    async fn websocket_sends_audio_while_receiving_transcript() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let start = ws.next().await.unwrap().unwrap();
+            assert!(matches!(start, Message::Text(_)));
+            let audio = ws.next().await.unwrap().unwrap();
+            assert!(matches!(audio, Message::Text(_)));
+            ws.send(Message::Text(
+                json!({
+                    "type":"realtime_event", "event":{"delta":"transcribed"}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            let _ = ws.next().await;
+        });
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let public = private
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        let context = Arc::new(PersonAiContextHandle::default());
+        context.publish(AccountContext {
+            account_scope: "alice".into(),
+            revision: 1,
+            authorization: AuthorizedClientContext::new()
+                .with_token("token")
+                .with_client_id("client")
+                .with_public_key(public)
+                .with_product_code("product")
+                .with_product_version("1.0.0"),
+        });
+        let services = Arc::new(PersonAiServices::new(&url).unwrap());
+        let factory = PersonAiModels::new("personai".into(), &url, services, context).unwrap();
+        let adapter = PersonAiRealtimeAdapter {
+            binding: factory.bind_current().unwrap(),
+            server_base_url: url,
+        };
+        let session = adapter
+            .connect(
+                "speech-auto",
+                RealtimeRequest {
+                    choice: ModelChoice::default(),
+                    input: vec![Modality::Audio],
+                    output: vec![Modality::Text],
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        session
+            .send(RealtimeInput::Content(Content(vec![ContentBlock::Media {
+                media: MediaContent {
+                    mime_type: "audio/pcm".into(),
+                    source: MediaSource::Base64("AA==".into()),
+                    name: None,
+                    estimated_tokens: Some(1),
+                },
+            }])))
+            .await
+            .unwrap();
+        let received = tokio::time::timeout(std::time::Duration::from_secs(3), session.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(received, Some(RealtimeEvent::Transcript(text)) if text == "transcribed"));
+        session.close().await.unwrap();
+        server.await.unwrap();
     }
 }
