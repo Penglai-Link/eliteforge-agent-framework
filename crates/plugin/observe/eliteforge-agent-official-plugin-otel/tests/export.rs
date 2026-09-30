@@ -232,7 +232,7 @@ async fn cleanup_failure_does_not_reclassify_a_cancelled_run() {
     assert!(!format!("{spans:?}").contains("private-shutdown-error"));
 }
 
-use eliteforge_agent_state_sqlite::{SqliteOptions, SqliteStateStore};
+use eliteforge_agent_official_plugin_storage_local::{SqliteOptions, SqliteStateStore};
 use opentelemetry_sdk::trace::SpanData;
 use std::sync::Mutex;
 
@@ -1288,6 +1288,7 @@ impl AgentLoop for SummaryCall {
             usage: context.usage(),
             steps: 0,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }

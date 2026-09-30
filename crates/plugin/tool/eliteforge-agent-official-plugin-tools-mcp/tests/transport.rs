@@ -217,8 +217,9 @@ impl eliteforge_agent_framework::AgentLoop for InspectOnly {
 
 async fn configured_mcp_plugins_are_discovered_and_closed_through_agent() {
     use eliteforge_agent_framework::{AgentBuilder, AgentError, AgentLoopPlugin};
-    use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
+    use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let dir = tempfile::tempdir().unwrap();
+    let artifacts = tempfile::tempdir_in(dir.path()).unwrap();
     let (url, stop, task) = http_server(Server::default()).await;
     let config = |namespace| {
         McpConfig::new(
@@ -230,7 +231,7 @@ async fn configured_mcp_plugins_are_discovered_and_closed_through_agent() {
         )
     };
     let agent = AgentBuilder::new()
-        .plugin(SqliteStoragePlugin::new(dir.path().join("mcp.db")))
+        .plugin(LocalStoragePlugin::new(dir.path().join("mcp.db"), artifacts.path()))
         .plugin(AgentLoopPlugin::new(InspectOnly))
         .plugin(McpToolsPlugin::new("first", config("first")))
         .plugin(McpToolsPlugin::new("second", config("second")))
@@ -636,6 +637,7 @@ impl eliteforge_agent_framework::AgentLoop for ReadResourceLoop {
                     usage: Default::default(),
                     steps: 0,
                     tool_calls: 1,
+                    external_session: None,
                 });
             }
         }
@@ -645,8 +647,9 @@ impl eliteforge_agent_framework::AgentLoop for ReadResourceLoop {
 
 async fn resource_operations_and_tools_are_agent_owned() {
     use eliteforge_agent_framework::{AgentBuilder, AgentLoopPlugin, RunRequest};
-    use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
+    use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let dir = tempfile::tempdir().unwrap();
+    let artifacts = tempfile::tempdir_in(dir.path()).unwrap();
     let (url, stop, task) = http_server(Server {
         resources: true,
         resources_only: true,
@@ -655,7 +658,7 @@ async fn resource_operations_and_tools_are_agent_owned() {
     .await;
     let agent = AgentBuilder::new()
         .default_models(false)
-        .plugin(SqliteStoragePlugin::new(dir.path().join("resources.db")))
+        .plugin(LocalStoragePlugin::new(dir.path().join("resources.db"), artifacts.path()))
         .plugin(AgentLoopPlugin::new(ReadResourceLoop))
         .plugin(McpToolsPlugin::new(
             "resources",

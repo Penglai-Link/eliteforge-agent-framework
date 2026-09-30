@@ -14,7 +14,7 @@ use eliteforge_agent_framework::AgentBuilder;
 use eliteforge_agent_official_plugin_skills::{
     FileSystemSkillProvider, FileSystemSkillsConfig, SkillsPlugin,
 };
-use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
+use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
 use eliteforge_agent_test_support::TestConversationStore;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
@@ -36,6 +36,20 @@ fn skills_config(system: &Path, local: &Path) -> FileSystemSkillsConfig {
     FileSystemSkillsConfig::new()
         .with_system_directory(system)
         .with_local_directory(local)
+}
+
+fn local_storage(database: impl AsRef<Path>) -> LocalStoragePlugin {
+    let database = database.as_ref();
+    let artifacts = database.with_extension("artifacts");
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(&artifacts).unwrap();
+    LocalStoragePlugin::new(database.to_path_buf(), artifacts)
 }
 
 #[tokio::test]
@@ -373,6 +387,7 @@ fn completed() -> RunResult {
         usage: Usage::default(),
         steps: 0,
         tool_calls: 0,
+        external_session: None,
     }
 }
 
@@ -1120,9 +1135,7 @@ async fn react_model_loop_uses_the_skill_tools_and_receives_loaded_details() {
         .plugin(ChatModelPlugin::new(LoadSkillModel {
             requests: requests.clone(),
         }))
-        .plugin(SqliteStoragePlugin::new(
-            directory.path().join("agent.sqlite"),
-        ))
+        .plugin(local_storage(directory.path().join("agent.sqlite")))
         .plugin(SkillsPlugin::filesystem(skills_config(&system, &local)))
         .build()
         .await
@@ -1236,7 +1249,7 @@ async fn approved_skill_resource_read_survives_a_rebuilt_agent_resume() {
         .plugin(ChatModelPlugin::new(LoadThenReadResourceModel {
             requests: requests.clone(),
         }))
-        .plugin(SqliteStoragePlugin::new(&database))
+        .plugin(local_storage(&database))
         .plugin(ToolPolicyPlugin::new(
             "approval.skill.resource",
             RequireSkillResourceApproval,
@@ -1259,7 +1272,7 @@ async fn approved_skill_resource_read_survives_a_rebuilt_agent_resume() {
         .plugin(ChatModelPlugin::new(LoadThenReadResourceModel {
             requests: requests.clone(),
         }))
-        .plugin(SqliteStoragePlugin::new(&database))
+        .plugin(local_storage(&database))
         .plugin(ToolPolicyPlugin::new(
             "approval.skill.resource",
             RequireSkillResourceApproval,
@@ -1306,7 +1319,7 @@ async fn in_process_skill_resume_keeps_the_original_file_snapshot() {
         .plugin(ChatModelPlugin::new(LoadThenReadResourceModel {
             requests: requests.clone(),
         }))
-        .plugin(SqliteStoragePlugin::new(&database))
+        .plugin(local_storage(&database))
         .plugin(ToolPolicyPlugin::new(
             "approval.skill.resource",
             RequireSkillResourceApproval,
@@ -1389,7 +1402,7 @@ async fn rebuilt_agent_resume_does_not_bypass_skill_load() {
     let agent = AgentBuilder::new()
         .default_models(false)
         .plugin(ChatModelPlugin::new(ReadResourceWithoutLoadingModel))
-        .plugin(SqliteStoragePlugin::new(&database))
+        .plugin(local_storage(&database))
         .plugin(ToolPolicyPlugin::new(
             "approval.skill.resource",
             RequireSkillResourceApproval,
@@ -1413,7 +1426,7 @@ async fn rebuilt_agent_resume_does_not_bypass_skill_load() {
     let agent = AgentBuilder::new()
         .default_models(false)
         .plugin(ChatModelPlugin::new(ReadResourceWithoutLoadingModel))
-        .plugin(SqliteStoragePlugin::new(&database))
+        .plugin(local_storage(&database))
         .plugin(ToolPolicyPlugin::new(
             "approval.skill.resource",
             RequireSkillResourceApproval,
@@ -1497,9 +1510,7 @@ async fn skill_loading_flows_through_existing_tool_policy() {
         .plugin(ChatModelPlugin::new(DeniedLoadModel {
             requests: requests.clone(),
         }))
-        .plugin(SqliteStoragePlugin::new(
-            directory.path().join("agent.sqlite"),
-        ))
+        .plugin(local_storage(directory.path().join("agent.sqlite")))
         .plugin(ToolPolicyPlugin::new("deny.skill.load", DenySkillLoad))
         .plugin(SkillsPlugin::filesystem(skills_config(&system, &local)))
         .build()

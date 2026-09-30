@@ -9,13 +9,13 @@ publish = false
 default = []
 live-model = [
     "dep:eliteforge-agent-framework",
-    "dep:eliteforge-agent-official-plugin-storage-sqlite",
+    "dep:eliteforge-agent-official-plugin-storage-local",
     "dep:tokio",
 ]
 
 [dependencies]
 eliteforge-agent-framework = { path = "../crates/framework/eliteforge-agent-framework", optional = true }
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../crates/plugin/storage/eliteforge-agent-official-plugin-storage-sqlite", optional = true }
+eliteforge-agent-official-plugin-storage-local = { path = "../crates/plugin/storage/eliteforge-agent-official-plugin-storage-local", optional = true }
 tokio = { workspace = true, optional = true }
 
 [[bin]]

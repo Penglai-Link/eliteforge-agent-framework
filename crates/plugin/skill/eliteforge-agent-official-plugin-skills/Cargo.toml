@@ -15,6 +15,6 @@ tokio.workspace = true
 
 [dev-dependencies]
 eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../../storage/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-storage-local = { path = "../../storage/eliteforge-agent-official-plugin-storage-local" }
 eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }
 tempfile = "3"

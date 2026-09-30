@@ -1,8 +1,7 @@
 //! Development fixtures only; not a storage option shipped to applications.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_memory::*;
-use eliteforge_agent_state_sqlite::*;
+use eliteforge_agent_official_plugin_storage_local::{SqliteConversationStore, SqliteStateStore};
 use std::sync::Arc;
 #[allow(dead_code)]
 mod conversation;
