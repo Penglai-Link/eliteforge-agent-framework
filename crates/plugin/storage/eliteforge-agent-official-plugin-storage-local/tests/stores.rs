@@ -276,13 +276,15 @@ async fn sqlite_plugin_prepares_extensions_on_every_physical_connection() {
         std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let agent = AgentBuilder::new()
-        .plugin(LocalStoragePlugin::new(dir.path().join("agent.db"), artifacts).with_extensions(config))
+        .plugin(
+            LocalStoragePlugin::new(dir.path().join("agent.db"), artifacts).with_extensions(config),
+        )
         .plugin(AgentLoopPlugin::new(Noop))
         .build()
         .await
         .unwrap();
     let capabilities = agent.execute(ReadSqliteCapabilities).await.unwrap();
-    assert_eq!(capabilities.len(), 4);
+    assert_eq!(capabilities.len(), 6);
     for (_, report) in &capabilities {
         assert!(report.fts5);
         assert_eq!(report.simple, ExtensionStatus::Available);

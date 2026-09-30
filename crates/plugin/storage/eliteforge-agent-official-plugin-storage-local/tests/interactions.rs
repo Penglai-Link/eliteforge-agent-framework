@@ -323,10 +323,9 @@ async fn terminal_resume_repairs_transcript_without_repeating_the_model() {
             .await
             .unwrap(),
     );
-    let conversations =
-        SqliteConversationStore::open(&path, Default::default())
-            .await
-            .unwrap();
+    let conversations = SqliteConversationStore::open(&path, Default::default())
+        .await
+        .unwrap();
     let seen = Arc::new(Mutex::new(vec![]));
     let agent = AgentBuilder::new()
         .plugin(state.clone().plugin())
