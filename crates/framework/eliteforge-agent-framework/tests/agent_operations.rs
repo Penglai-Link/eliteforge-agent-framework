@@ -31,6 +31,7 @@ impl AgentLoop for Immediate {
             usage: Usage::default(),
             steps: 1,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }

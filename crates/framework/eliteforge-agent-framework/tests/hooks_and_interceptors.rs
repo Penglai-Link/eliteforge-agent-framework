@@ -18,6 +18,7 @@ fn completed(text: &str) -> RunResult {
         usage: Usage::default(),
         steps: 0,
         tool_calls: 0,
+        external_session: None,
     }
 }
 struct SimpleLoop(Arc<Mutex<Vec<String>>>);

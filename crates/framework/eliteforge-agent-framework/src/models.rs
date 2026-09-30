@@ -6,6 +6,7 @@ use std::sync::{
 };
 pub struct ModelInvoker {
     catalog: ModelCatalog,
+    runtime: Option<Arc<ModelRuntime>>,
     strategy: Arc<dyn ModelSelectionStrategy>,
     middleware: Vec<Arc<dyn ModelMiddleware>>,
     assembler: Arc<dyn ContextAssembler>,
@@ -19,10 +20,21 @@ impl ModelInvoker {
         strategy.validate(&catalog)?;
         Ok(Self {
             catalog,
+            runtime: None,
             strategy,
             middleware: Vec::new(),
             assembler: Arc::new(DefaultContextAssembler::default()),
         })
+    }
+    pub fn with_runtime(mut self, runtime: Arc<ModelRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+    pub fn catalog_snapshot(&self) -> Arc<ModelCatalog> {
+        self.runtime.as_ref().map_or_else(
+            || Arc::new(self.catalog.clone()),
+            |runtime| runtime.snapshot().chat.clone(),
+        )
     }
     pub fn with_middleware(mut self, middleware: Vec<Arc<dyn ModelMiddleware>>) -> Self {
         self.middleware = middleware;
@@ -50,8 +62,14 @@ impl ModelInvoker {
     ) -> Result<ChatResponse, AgentError> {
         limits.validate()?;
         context.check_cancelled()?;
-        require_model(&self.catalog, model)?;
-        let descriptor = self.catalog.get(model).expect("validated model");
+        let snapshot = self.catalog_snapshot();
+        let catalog = snapshot.as_ref();
+        if catalog.get(model).is_none() {
+            return Err(
+                ModelError::Unavailable(format!("{}/{}", model.connection, model.model)).into(),
+            );
+        }
+        let descriptor = catalog.get(model).expect("validated model");
         let budget = ContextBudget {
             max_messages: limits.max_context_messages,
             max_tokens: descriptor.input_capacity(limits, &request.options)?,
@@ -67,11 +85,11 @@ impl ModelInvoker {
         };
         let next = ModelNext {
             middleware: &self.middleware,
-            provider: self.catalog.adapter(model).expect("validated model"),
+            provider: catalog.adapter(model).expect("validated model"),
             stream: &SilentStream,
             budget,
             descriptor,
-            estimator: self.catalog.connections[&model.connection]
+            estimator: catalog.connections[&model.connection]
                 .token_estimator
                 .as_ref(),
             max_total_tokens: limits.max_total_tokens,
@@ -104,11 +122,7 @@ impl ModelInvoker {
         crate::middleware::validate_model_response(&mut response, &options)?;
         if let Some(data) = &mut response.model_context {
             data.model = model.clone();
-            data.protocol = self
-                .catalog
-                .protocol(model)
-                .expect("validated model")
-                .into();
+            data.protocol = catalog.protocol(model).expect("validated model").into();
         }
         context
             .emit(AgentEvent::ModelUsage {
@@ -128,6 +142,12 @@ impl ModelInvoker {
     ) -> Result<ChatResponse, AgentError> {
         call.limits.validate()?;
         call.options.validate()?;
+        let runtime_snapshot = self.runtime.as_ref().map(|runtime| runtime.snapshot());
+        let catalog_snapshot = runtime_snapshot.as_ref().map_or_else(
+            || Arc::new(self.catalog.clone()),
+            |snapshot| snapshot.chat.clone(),
+        );
+        let catalog = catalog_snapshot.as_ref();
         let mut retries = 0;
         let mut recoveries = 0;
         let mut attempt = 0;
@@ -141,6 +161,7 @@ impl ModelInvoker {
             .collect();
         let models = crate::model_call_budget::StepModels {
             inner: self,
+            catalog_snapshot: catalog_snapshot.clone(),
             limit: call.limits.max_model_calls_per_step,
             used: std::sync::atomic::AtomicUsize::new(0),
         };
@@ -170,13 +191,19 @@ impl ModelInvoker {
                             options: call.options,
                             run: context,
                         },
-                        &self.catalog,
+                        catalog,
                     )
                     .await?
             };
-            require_model(&self.catalog, &selected)?;
-            let descriptor = self.catalog.get(&selected).expect("validated model");
-            let estimator = self.catalog.connections[&selected.connection]
+            if catalog.get(&selected).is_none() {
+                return Err(ModelError::Unavailable(format!(
+                    "{}/{}",
+                    selected.connection, selected.model
+                ))
+                .into());
+            }
+            let descriptor = catalog.get(&selected).expect("validated model");
+            let estimator = catalog.connections[&selected.connection]
                 .token_estimator
                 .as_ref();
             if !call.tools.is_empty() && descriptor.supports_tools == Some(false) {
@@ -278,7 +305,7 @@ impl ModelInvoker {
             context.emit_output(OutputEvent::MessageStarted {
                 message_id: stream.message_id.clone(),
             });
-            let provider = self.catalog.adapter(&selected).expect("validated model");
+            let provider = catalog.adapter(&selected).expect("validated model");
             let invocation_context = ModelInvocationContext {
                 model: &selected,
                 stage: call.stage,
@@ -327,11 +354,8 @@ impl ModelInvoker {
                     }
                     if let Some(data) = &mut response.model_context {
                         data.model = selected.clone();
-                        data.protocol = self
-                            .catalog
-                            .protocol(&selected)
-                            .expect("validated model")
-                            .into();
+                        data.protocol =
+                            catalog.protocol(&selected).expect("validated model").into();
                     }
                     context.emit_output(OutputEvent::MessageFinished {
                         message_id: stream.message_id.clone(),
@@ -430,10 +454,13 @@ impl ChatStream for AttemptStream<'_> {
 #[async_trait]
 impl ChatExecutor for ModelInvoker {
     async fn validate_async(&self) -> Result<(), AgentError> {
-        self.strategy.validate_async(&self.catalog).await
+        self.strategy.validate_async(&self.catalog_snapshot()).await
     }
     fn catalog(&self) -> &ModelCatalog {
         self.catalog()
+    }
+    fn catalog_snapshot(&self) -> Arc<ModelCatalog> {
+        self.catalog_snapshot()
     }
     async fn invoke(
         &self,

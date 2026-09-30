@@ -3,7 +3,9 @@ pub use eliteforge_agent_core::*;
 #[cfg(feature = "genai")]
 pub use eliteforge_agent_official_plugin_model_genai::GenaiPlugin;
 mod capability_execution;
+mod external_loop;
 pub use capability_execution::ModelClient;
+pub use external_loop::ExternalAgentLoop;
 pub mod dag;
 pub use dag::*;
 mod agent;
@@ -17,7 +19,9 @@ pub use react::*;
 pub mod workflow;
 pub use workflow::*;
 mod model_execution;
+mod model_runtime;
 pub use model_execution::TranscriptProjection;
+pub use model_runtime::*;
 #[cfg(test)]
 mod tests;
 

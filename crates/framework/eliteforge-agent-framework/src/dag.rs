@@ -609,6 +609,7 @@ impl DagWorkflowLoop {
                 .filter_map(|n| n.result.as_ref())
                 .map(|r| r.tool_calls)
                 .sum(),
+            external_session: None,
         }
     }
 }

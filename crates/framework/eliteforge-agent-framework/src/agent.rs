@@ -281,6 +281,7 @@ impl AgentBuilder {
                 .iter()
                 .map(|service| service.0.clone())
                 .collect();
+            let model_runtime = ModelRuntime::from_registry(registry)?;
             let strategy = registry
                 .get::<ModelStrategyService>()
                 .map(|service| service.0.clone())
@@ -315,14 +316,17 @@ impl AgentBuilder {
                     "an explicit ContextLayout must configure its history reducer on the history block".into(),
                 ));
             }
-            let models: Option<Arc<dyn ChatExecutor>> = if connections.is_empty() {
+            let models: Option<Arc<dyn ChatExecutor>> = if connections.is_empty()
+                && registry.get::<ModelRuntimeService>().is_none()
+            {
                 if strategy.is_some() {
                     return Err(AgentError::MissingService("ModelConnection"));
                 }
                 None
             } else {
                 Some(Arc::new(
-                    ModelInvoker::new(ModelCatalog::new(connections)?, strategy)?
+                    ModelInvoker::new((*model_runtime.snapshot().chat).clone(), strategy)?
+                        .with_runtime(model_runtime.clone())
                         .with_middleware(
                             registry
                                 .all::<ModelMiddlewareService>()
@@ -358,15 +362,18 @@ impl AgentBuilder {
                 return Err(AgentError::MissingService("ChatModel"));
             }
             let services = AgentServices {
+                external_agent: registry
+                    .get::<ExternalAgentService>()
+                    .map(|service| service.0.clone()),
                 extension_router: Some(RemoteExtensionDirectory::new(
                     registry
                         .all::<RemoteExtensionService>()
                         .iter()
                         .map(|s| s.0.clone()),
                 )),
-                operations: Arc::new(crate::capability_execution::ModelClient::from_registry(
-                    registry,
-                )?),
+                operations: Arc::new(crate::capability_execution::ModelClient::from_runtime(
+                    model_runtime.clone(),
+                )),
                 interactions: registry
                     .get::<InteractionStoreService>()
                     .map(|s| InteractionManager(s.0.clone())),
@@ -409,9 +416,13 @@ impl AgentBuilder {
                     .collect(),
                 conversations: registry
                     .get::<ConversationStoreService>()
-                    .ok_or(AgentError::MissingService("ConversationStore"))?
-                    .0
-                    .clone(),
+                    .map(|service| service.0.clone())
+                    .or_else(|| {
+                        (!agent_loop.requires_conversations()).then(|| {
+                            Arc::new(UnconfiguredConversationStore) as Arc<dyn ConversationStore>
+                        })
+                    })
+                    .ok_or(AgentError::MissingService("ConversationStore"))?,
                 tools: registry
                     .all::<ToolProviderService>()
                     .iter()
@@ -1072,6 +1083,18 @@ impl AgentGeneration {
     ) -> Result<ImageGenerationResponse, AgentError> {
         self.operations.generate_image(request).await
     }
+    pub async fn submit_image(
+        &self,
+        request: ImageGenerationRequest,
+    ) -> Result<ImageJob, AgentError> {
+        self.operations.submit_image(request).await
+    }
+    pub async fn query_image(&self, job: &ImageJob) -> Result<ImageJob, AgentError> {
+        self.operations.query_image(job).await
+    }
+    pub async fn cancel_image(&self, job: &ImageJob) -> Result<(), AgentError> {
+        self.operations.cancel_image(job).await
+    }
     pub async fn submit_video(
         &self,
         request: VideoGenerationRequest,
@@ -1083,6 +1106,12 @@ impl AgentGeneration {
     }
     pub async fn cancel_video(&self, job: &VideoJob) -> Result<(), AgentError> {
         self.operations.cancel_video(job).await
+    }
+    pub async fn detect_content(
+        &self,
+        request: ContentDetectionRequest,
+    ) -> Result<ContentDetectionResponse, AgentError> {
+        self.operations.detect_content(request).await
     }
     pub async fn transcribe(
         &self,

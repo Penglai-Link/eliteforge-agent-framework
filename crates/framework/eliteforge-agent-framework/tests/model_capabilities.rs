@@ -494,7 +494,9 @@ async fn dedicated_operations_dispatch_and_video_job_survives_serialization() {
                 choice: Default::default(),
                 prompt: "image".into(),
                 size: None,
-                count: 2
+                count: 2,
+                quality: None,
+                provider_options: Default::default(),
             })
             .await
             .unwrap()
@@ -508,6 +510,12 @@ async fn dedicated_operations_dispatch_and_video_job_survives_serialization() {
             prompt: "video".into(),
             size: None,
             seconds: 4,
+            first_frame: None,
+            last_frame: None,
+            reference_images: vec![],
+            reference_videos: vec![],
+            reference_audios: vec![],
+            provider_options: Default::default(),
         })
         .await
         .unwrap();
@@ -655,6 +663,7 @@ impl AgentLoop for EmbeddingProbe {
             usage: context.usage(),
             steps: 0,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }

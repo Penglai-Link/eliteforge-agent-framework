@@ -55,6 +55,7 @@ fn admission_result(context: &RunContext) -> RunResult {
         usage: context.usage(),
         steps: 0,
         tool_calls: 0,
+        external_session: None,
     }
 }
 #[async_trait]

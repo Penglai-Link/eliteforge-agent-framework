@@ -27,6 +27,22 @@ impl Agent {
         let (generation, _lease) = self.admit("operation", "generate_image")?;
         generation.generate_image(request).await
     }
+    pub async fn submit_image(&self, request: ImageGenerationRequest) -> Result<ImageJob, AgentError> {
+        let (generation, _lease) = self.admit("operation", "submit_image")?;
+        generation.submit_image(request).await
+    }
+    pub async fn query_image(&self, job: &ImageJob) -> Result<ImageJob, AgentError> {
+        let (generation, _lease) = self.admit("operation", "query_image")?;
+        generation.query_image(job).await
+    }
+    pub async fn cancel_image(&self, job: &ImageJob) -> Result<(), AgentError> {
+        let (generation, _lease) = self.admit("operation", "cancel_image")?;
+        generation.cancel_image(job).await
+    }
+    pub async fn detect_content(&self, request: ContentDetectionRequest) -> Result<ContentDetectionResponse, AgentError> {
+        let (generation, _lease) = self.admit("operation", "detect_content")?;
+        generation.detect_content(request).await
+    }
     pub async fn submit_video(
         &self,
         request: VideoGenerationRequest,

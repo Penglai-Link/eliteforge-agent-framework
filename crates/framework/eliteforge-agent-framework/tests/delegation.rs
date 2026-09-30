@@ -52,6 +52,7 @@ fn result(context: &RunContext, text: String) -> RunResult {
         usage: context.usage(),
         steps: 0,
         tool_calls: 0,
+        external_session: None,
     }
 }
 struct Delegator {

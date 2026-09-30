@@ -1,20 +1,11 @@
 use crate::*;
 use async_trait::async_trait;
-use eliteforge_agent_plugin_core::ServiceRegistry;
-use std::{collections::BTreeMap, future::Future, sync::Arc};
+use std::{future::Future, sync::Arc};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 struct Catalogs {
-    chat: Vec<ModelRef>,
-    embedding: CapabilityCatalog<dyn EmbeddingModel>,
-    rerank: CapabilityCatalog<dyn RerankModel>,
-    image: CapabilityCatalog<dyn ImageGenerationModel>,
-    video: CapabilityCatalog<dyn VideoGenerationModel>,
-    recognition: CapabilityCatalog<dyn SpeechRecognitionModel>,
-    synthesis: CapabilityCatalog<dyn SpeechSynthesisModel>,
-    realtime: CapabilityCatalog<dyn RealtimeModel>,
-    spaces: BTreeMap<ModelRef, EmbeddingSpace>,
+    runtime: Arc<ModelRuntime>,
     stopped: CancellationToken,
     active: RwLock<()>,
 }
@@ -31,58 +22,15 @@ pub struct ModelClient {
     options: ModelInvocationOptions,
 }
 impl ModelClient {
-    pub(crate) fn from_registry(registry: &ServiceRegistry) -> Result<Self, AgentError> {
-        let routing = registry
-            .get::<ModelRouting>()
-            .map(|r| (*r).clone())
-            .unwrap_or_default();
-        macro_rules! catalog {
-            ($service:ty, $op:ident) => {
-                CapabilityCatalog::new(
-                    registry
-                        .all::<$service>()
-                        .iter()
-                        .map(|s| (**s).clone())
-                        .collect(),
-                )?
-                .with_routing(ModelOperation::$op, &routing)?
-            };
-        }
-        let embedding = catalog!(EmbeddingModelService, Embedding);
-        let mut spaces = BTreeMap::new();
-        for service in registry.all::<EmbeddingSpaceService>() {
-            let space = &service.0;
-            if space.dimensions == 0
-                || space.revision.trim().is_empty()
-                || space.preprocessing.trim().is_empty()
-                || embedding.get(&space.model).is_none()
-                || spaces.insert(space.model.clone(), space.clone()).is_some()
-            {
-                return Err(invalid(
-                    "invalid, unregistered or duplicate embedding space",
-                ));
-            }
-        }
-        Ok(Self {
+    pub(crate) fn from_runtime(runtime: Arc<ModelRuntime>) -> Self {
+        Self {
             catalogs: Arc::new(Catalogs {
-                embedding,
-                spaces,
-                chat: registry
-                    .all::<ModelConnectionService>()
-                    .iter()
-                    .flat_map(|s| s.0.models.iter().map(|m| ModelRef::new(&s.0.id, &m.id)))
-                    .collect(),
-                rerank: catalog!(RerankModelService, Rerank),
-                image: catalog!(ImageGenerationModelService, ImageGeneration),
-                video: catalog!(VideoGenerationModelService, VideoGeneration),
-                recognition: catalog!(SpeechRecognitionModelService, SpeechRecognition),
-                synthesis: catalog!(SpeechSynthesisModelService, SpeechSynthesis),
-                realtime: catalog!(RealtimeModelService, Realtime),
+                runtime,
                 stopped: CancellationToken::new(),
                 active: RwLock::new(()),
             }),
             options: ModelInvocationOptions::default(),
-        })
+        }
     }
     fn check_inputs(&self, inputs: &[Content]) -> Result<(), AgentError> {
         if inputs.is_empty()
@@ -139,11 +87,11 @@ impl ModelClient {
             }
         }
     }
-    fn video_binding(&self, job: &VideoJob) -> Result<&VideoGenerationModelService, AgentError> {
+    fn video_binding(&self, job: &VideoJob) -> Result<VideoGenerationModelService, AgentError> {
         let binding = self
             .catalogs
-            .video
-            .get(&job.model)
+            .runtime
+            .video_job_binding(&job.model, &job.protocol)
             .ok_or_else(|| invalid("video job model is not registered"))?;
         if job.id.trim().is_empty() || binding.protocol != job.protocol {
             return Err(invalid(
@@ -169,29 +117,29 @@ impl ModelOperations for ModelClient {
         })
     }
     fn models(&self, operation: ModelOperation) -> Vec<ModelRef> {
+        let snapshot = self.catalogs.runtime.snapshot();
         match operation {
-            ModelOperation::Embedding => self.catalogs.embedding.models().cloned().collect(),
-            ModelOperation::Rerank => self.catalogs.rerank.models().cloned().collect(),
-            ModelOperation::ImageGeneration => self.catalogs.image.models().cloned().collect(),
-            ModelOperation::VideoGeneration => self.catalogs.video.models().cloned().collect(),
-            ModelOperation::SpeechRecognition => {
-                self.catalogs.recognition.models().cloned().collect()
-            }
-            ModelOperation::SpeechSynthesis => self.catalogs.synthesis.models().cloned().collect(),
-            ModelOperation::Realtime => self.catalogs.realtime.models().cloned().collect(),
-            ModelOperation::Chat => self.catalogs.chat.clone(),
+            ModelOperation::Embedding => snapshot.embedding.models().cloned().collect(),
+            ModelOperation::Rerank => snapshot.rerank.models().cloned().collect(),
+            ModelOperation::ImageGeneration => snapshot.image.models().cloned().collect(),
+            ModelOperation::VideoGeneration => snapshot.video.models().cloned().collect(),
+            ModelOperation::SpeechRecognition => snapshot.recognition.models().cloned().collect(),
+            ModelOperation::SpeechSynthesis => snapshot.synthesis.models().cloned().collect(),
+            ModelOperation::Realtime => snapshot.realtime.models().cloned().collect(),
+            ModelOperation::ContentDetection => snapshot.detection.models().cloned().collect(),
+            ModelOperation::Chat => snapshot.chat.models(),
         }
     }
     async fn embed(&self, mut request: EmbeddingRequest) -> Result<EmbeddingResponse, AgentError> {
+        let snapshot = self.catalogs.runtime.snapshot();
         self.check_inputs(&request.inputs)?;
         if request.dimensions == Some(0) {
             return Err(invalid("embedding dimensions must be positive"));
         }
-        let binding = self
-            .catalogs
+        let binding = snapshot
             .embedding
             .select(&request.choice, &request.inputs)?;
-        if let Some(space) = self.catalogs.spaces.get(&binding.model) {
+        if let Some(space) = snapshot.spaces.get(&binding.model) {
             if request.dimensions.is_some_and(|d| d != space.dimensions) {
                 return Err(invalid(
                     "embedding dimensions conflict with registered space",
@@ -261,7 +209,7 @@ impl ModelOperations for ModelClient {
         space: &EmbeddingSpace,
         mut request: EmbeddingRequest,
     ) -> Result<EmbeddingResponse, AgentError> {
-        if self.catalogs.spaces.get(&space.model) != Some(space) {
+        if self.catalogs.runtime.snapshot().spaces.get(&space.model) != Some(space) {
             return Err(invalid(
                 "query embedding space does not match registered model, revision, dimensions and preprocessing",
             ));
@@ -270,6 +218,7 @@ impl ModelOperations for ModelClient {
         self.embed(request).await
     }
     async fn rerank(&self, mut request: RerankRequest) -> Result<RerankResponse, AgentError> {
+        let snapshot = self.catalogs.runtime.snapshot();
         let mut inputs = request.documents.clone();
         inputs.push(request.query.clone());
         self.check_inputs(&inputs)?;
@@ -278,7 +227,7 @@ impl ModelOperations for ModelClient {
             return Err(invalid("invalid rerank top_n or document count"));
         }
         let max = request.top_n.unwrap_or(count);
-        let binding = self.catalogs.rerank.select(&request.choice, &inputs)?;
+        let binding = snapshot.rerank.select(&request.choice, &inputs)?;
         request.choice.model = Some(binding.model.clone());
         let response = self
             .dispatch(
@@ -303,13 +252,14 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: ImageGenerationRequest,
     ) -> Result<ImageGenerationResponse, AgentError> {
+        let snapshot = self.catalogs.runtime.snapshot();
         let inputs = [Content::from(request.prompt.clone())];
         self.check_inputs(&inputs)?;
         if request.count == 0 || request.count as usize > self.options.max_batch_size {
             return Err(invalid("invalid image count"));
         }
         let count = request.count as usize;
-        let binding = self.catalogs.image.select(&request.choice, &inputs)?;
+        let binding = snapshot.image.select(&request.choice, &inputs)?;
         request.choice.model = Some(binding.model.clone());
         let response = self
             .dispatch(
@@ -331,16 +281,78 @@ impl ModelOperations for ModelClient {
         }
         Ok(response)
     }
+    async fn submit_image(
+        &self,
+        mut request: ImageGenerationRequest,
+    ) -> Result<ImageJob, AgentError> {
+        let snapshot = self.catalogs.runtime.snapshot();
+        let inputs = [Content::from(request.prompt.clone())];
+        self.check_inputs(&inputs)?;
+        if request.count == 0 || request.count as usize > self.options.max_batch_size {
+            return Err(invalid("invalid image count"));
+        }
+        let binding = snapshot.image.select(&request.choice, &inputs)?;
+        request.choice.model = Some(binding.model.clone());
+        let mut job = self
+            .dispatch(
+                ModelOperation::ImageGeneration,
+                &binding.model,
+                binding.implementation.submit(&binding.model.model, request),
+            )
+            .await?;
+        if job.model != binding.model || (!job.id.is_empty() && job.protocol != binding.protocol) {
+            return Err(invalid("invalid image job binding"));
+        }
+        if job.id.is_empty() {
+            job.protocol = binding.protocol.clone();
+        }
+        Ok(job)
+    }
+    async fn query_image(&self, job: &ImageJob) -> Result<ImageJob, AgentError> {
+        let binding = self
+            .catalogs
+            .runtime
+            .image_job_binding(&job.model, &job.protocol)
+            .ok_or_else(|| invalid("image job model is not registered"))?;
+        let next = self
+            .dispatch(
+                ModelOperation::ImageGeneration,
+                &binding.model,
+                binding.implementation.query(job),
+            )
+            .await?;
+        if next.id != job.id || next.model != job.model || next.protocol != job.protocol {
+            return Err(invalid("image query changed job identity"));
+        }
+        Ok(next)
+    }
+    async fn cancel_image(&self, job: &ImageJob) -> Result<(), AgentError> {
+        let binding = self
+            .catalogs
+            .runtime
+            .image_job_binding(&job.model, &job.protocol)
+            .ok_or_else(|| invalid("image job model is not registered"))?;
+        if !binding.capabilities.cancellation {
+            return Err(invalid("image binding does not support cancellation"));
+        }
+        self.dispatch(
+            ModelOperation::ImageGeneration,
+            &binding.model,
+            binding.implementation.cancel(job),
+        )
+        .await
+    }
     async fn submit_video(
         &self,
         mut request: VideoGenerationRequest,
     ) -> Result<VideoJob, AgentError> {
+        let snapshot = self.catalogs.runtime.snapshot();
         let inputs = [Content::from(request.prompt.clone())];
         self.check_inputs(&inputs)?;
         if request.seconds == 0 {
             return Err(invalid("video duration must be positive"));
         }
-        let binding = self.catalogs.video.select(&request.choice, &inputs)?;
+        let binding = snapshot.video.select(&request.choice, &inputs)?;
         request.choice.model = Some(binding.model.clone());
         let job = self
             .dispatch(
@@ -383,6 +395,7 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: SpeechRecognitionRequest,
     ) -> Result<SpeechRecognitionResponse, AgentError> {
+        let snapshot = self.catalogs.runtime.snapshot();
         let inputs = [Content(vec![ContentBlock::Media {
             media: request.audio.clone(),
         }])];
@@ -390,7 +403,7 @@ impl ModelOperations for ModelClient {
         if !request.audio.mime_type.starts_with("audio/") {
             return Err(invalid("speech recognition requires audio"));
         }
-        let binding = self.catalogs.recognition.select(&request.choice, &inputs)?;
+        let binding = snapshot.recognition.select(&request.choice, &inputs)?;
         request.choice.model = Some(binding.model.clone());
         let response = self
             .dispatch(
@@ -417,12 +430,13 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: SpeechSynthesisRequest,
     ) -> Result<SpeechSynthesisResponse, AgentError> {
+        let snapshot = self.catalogs.runtime.snapshot();
         let inputs = [Content::from(request.text.clone())];
         self.check_inputs(&inputs)?;
         if request.voice.trim().is_empty() || request.format.trim().is_empty() {
             return Err(invalid("speech voice and format are required"));
         }
-        let binding = self.catalogs.synthesis.select(&request.choice, &inputs)?;
+        let binding = snapshot.synthesis.select(&request.choice, &inputs)?;
         request.choice.model = Some(binding.model.clone());
         let response = self
             .dispatch(
@@ -438,11 +452,35 @@ impl ModelOperations for ModelClient {
         }
         Ok(response)
     }
+    async fn detect_content(
+        &self,
+        mut request: ContentDetectionRequest,
+    ) -> Result<ContentDetectionResponse, AgentError> {
+        let snapshot = self.catalogs.runtime.snapshot();
+        let inputs = [request.content.clone()];
+        self.check_inputs(&inputs)?;
+        let binding = snapshot.detection.select(&request.choice, &inputs)?;
+        request.choice.model = Some(binding.model.clone());
+        let response = self
+            .dispatch(
+                ModelOperation::ContentDetection,
+                &binding.model,
+                binding.implementation.detect(&binding.model.model, request),
+            )
+            .await?;
+        if response.model != binding.model {
+            return Err(invalid(
+                "content detection response model does not match binding",
+            ));
+        }
+        Ok(response)
+    }
     async fn connect_realtime(
         &self,
         mut request: RealtimeRequest,
     ) -> Result<Arc<dyn RealtimeSession>, AgentError> {
-        let binding = self.catalogs.realtime.select_modalities(
+        let snapshot = self.catalogs.runtime.snapshot();
+        let binding = snapshot.realtime.select_modalities(
             &request.choice,
             &request.input,
             &request.output,
