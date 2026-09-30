@@ -8,6 +8,8 @@ use crate::*;
 pub struct ConversationStoreService(pub Arc<dyn ConversationStore>);
 pub struct LongTermMemoryService(pub Arc<dyn LongTermMemory>);
 pub struct LoopService(pub Arc<dyn AgentLoop>);
+pub struct ExternalAgentService(pub Arc<dyn ExternalAgent>);
+pub struct ModelCatalogStoreService(pub Arc<dyn ModelCatalogStore>);
 pub struct ToolProviderService(pub Arc<dyn ToolProvider>);
 pub struct ContextService(pub Arc<dyn ContextProvider>);
 pub struct EventService(pub Arc<dyn EventSink>);
@@ -84,6 +86,8 @@ unique_plugin!(
     "framework.conversations"
 );
 unique_plugin!(AgentLoopPlugin, AgentLoop, LoopService, "framework.loop");
+unique_plugin!(ExternalAgentPlugin, ExternalAgent, ExternalAgentService, "framework.external-agent");
+unique_plugin!(ModelCatalogStorePlugin, ModelCatalogStore, ModelCatalogStoreService, "framework.model-catalog-store");
 unique_plugin!(
     LongTermMemoryPlugin,
     LongTermMemory,
