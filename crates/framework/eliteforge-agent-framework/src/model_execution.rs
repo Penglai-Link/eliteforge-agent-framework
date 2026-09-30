@@ -191,6 +191,7 @@ impl AgentLoop for ModelExecutionLoop {
                     usage: state.usage,
                     steps: state.steps,
                     tool_calls: state.tool_calls,
+                    external_session: None,
                 }),
             };
             if let Some(session) = &mut conversation {
@@ -543,6 +544,7 @@ impl ModelExecutionRuntime<'_> {
             usage: self.state.usage.clone(),
             steps: self.state.steps,
             tool_calls: self.state.tool_calls,
+            external_session: None,
         }
     }
     async fn save(&mut self, event: Option<AgentEvent>) -> Result<(), AgentError> {

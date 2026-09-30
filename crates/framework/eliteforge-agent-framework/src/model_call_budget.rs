@@ -3,6 +3,7 @@ use crate::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) struct StepModels<'a> {
     pub inner: &'a dyn ChatExecutor,
+    pub catalog_snapshot: std::sync::Arc<ModelCatalog>,
     pub limit: Option<usize>,
     pub used: AtomicUsize,
 }
@@ -23,7 +24,10 @@ impl StepModels<'_> {
 #[async_trait::async_trait]
 impl ChatExecutor for StepModels<'_> {
     fn catalog(&self) -> &ModelCatalog {
-        self.inner.catalog()
+        &self.catalog_snapshot
+    }
+    fn catalog_snapshot(&self) -> std::sync::Arc<ModelCatalog> {
+        self.catalog_snapshot.clone()
     }
     async fn invoke(
         &self,
