@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_official_plugin_storage_sqlite::*;
+use eliteforge_agent_official_plugin_storage_local::*;
 use std::sync::Arc;
 
 struct Noop;
@@ -16,12 +16,19 @@ impl AgentLoop for Noop {
     }
 }
 #[tokio::test]
-async fn sqlite_bundle_reopens_conversations_memory_summaries_and_binary_artifacts() {
+async fn local_bundle_reopens_conversations_memory_summaries_and_binary_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("all.db");
+    let artifacts = dir.path().join("artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let build = || {
         AgentBuilder::new()
-            .plugin(SqliteStoragePlugin::new(&path))
+            .plugin(LocalStoragePlugin::new(&path, &artifacts))
             .plugin(AgentLoopPlugin::new(Noop))
     };
     let agent = build().build().await.unwrap();
@@ -186,12 +193,12 @@ async fn sqlite_interaction_answers_have_atomic_competition_and_idempotency() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("answers.db");
     let a = Arc::new(
-        eliteforge_agent_state_sqlite::SqliteStateStore::open(&path, Default::default())
+        SqliteStateStore::open(&path, Default::default())
             .await
             .unwrap(),
     );
     let b = Arc::new(
-        eliteforge_agent_state_sqlite::SqliteStateStore::open(&path, Default::default())
+        SqliteStateStore::open(&path, Default::default())
             .await
             .unwrap(),
     );
@@ -261,14 +268,21 @@ async fn sqlite_plugin_prepares_extensions_on_every_physical_connection() {
     let mut config = ExtensionConfig::new(dir.path().join("native"));
     config.simple = ExtensionMode::Required;
     config.vector = ExtensionMode::Required;
+    let artifacts = dir.path().join("artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let agent = AgentBuilder::new()
-        .plugin(SqliteStoragePlugin::new(dir.path().join("agent.db")).with_extensions(config))
+        .plugin(LocalStoragePlugin::new(dir.path().join("agent.db"), artifacts).with_extensions(config))
         .plugin(AgentLoopPlugin::new(Noop))
         .build()
         .await
         .unwrap();
     let capabilities = agent.execute(ReadSqliteCapabilities).await.unwrap();
-    assert_eq!(capabilities.len(), 5);
+    assert_eq!(capabilities.len(), 4);
     for (_, report) in &capabilities {
         assert!(report.fts5);
         assert_eq!(report.simple, ExtensionStatus::Available);

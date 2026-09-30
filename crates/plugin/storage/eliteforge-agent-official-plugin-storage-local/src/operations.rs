@@ -1,7 +1,7 @@
 //! Storage requests submitted through `agent.execute(request)`.
 use crate::{ArtifactStoreService, SqliteCapabilitiesService, SummaryStoreService};
 use async_trait::async_trait;
-pub use eliteforge_agent_context::{
+pub use eliteforge_agent_context_contracts::{
     ArtifactChunk, ArtifactId, ArtifactMetadata, ConversationSummary, SummaryKey, VersionedSummary,
 };
 use eliteforge_agent_core::{AgentError, AgentOperation};
@@ -79,9 +79,9 @@ pub struct ReadArtifact {
     pub length: usize,
 }
 pub struct RemoveArtifact(pub ArtifactId);
-fn artifact_error(error: eliteforge_agent_context::ArtifactError) -> AgentError {
+fn artifact_error(error: eliteforge_agent_context_contracts::ArtifactError) -> AgentError {
     match error {
-        eliteforge_agent_context::ArtifactError::Cancelled => AgentError::Cancelled,
+        eliteforge_agent_context_contracts::ArtifactError::Cancelled => AgentError::Cancelled,
         error => AgentError::Context(eliteforge_agent_core::ContextError::Other(
             error.to_string(),
         )),
