@@ -7,6 +7,3 @@ mod summary;
 pub use artifact::*;
 pub use compression::*;
 pub use summary::*;
-
-mod sqlite_artifact;
-pub use sqlite_artifact::*;

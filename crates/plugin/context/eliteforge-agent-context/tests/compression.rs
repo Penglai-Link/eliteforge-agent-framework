@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use eliteforge_agent_context::*;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_state_sqlite::*;
+use eliteforge_agent_official_plugin_storage_local::{
+    SqliteOptions, SqliteStateStore, SqliteSummaryStore, SummaryStoreOptions,
+};
 use eliteforge_agent_test_support::*;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -303,6 +305,7 @@ impl AgentLoop for PreserveLatest {
             usage: context.usage(),
             steps: 0,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }
@@ -404,6 +407,7 @@ impl AgentLoop for CachedProjection {
             usage: context.usage(),
             steps: 0,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }
@@ -632,6 +636,7 @@ impl AgentLoop for SmallSummaryWindow {
             usage: context.usage(),
             steps: 0,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }

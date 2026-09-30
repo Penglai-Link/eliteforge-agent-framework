@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use eliteforge_agent_context::*;
 use eliteforge_agent_framework::*;
+use eliteforge_agent_official_plugin_storage_local::{
+    FileArtifactLimits, FileArtifactStore, SqliteOptions, SqliteStateStore,
+};
 use eliteforge_agent_test_support::*;
 use serde_json::json;
 use std::sync::Arc;
@@ -361,7 +364,6 @@ fn offload_agent_builder(
 }
 #[tokio::test]
 async fn workflow_offload_failure_ends_run_without_automatic_tool_replay() {
-    use eliteforge_agent_state_sqlite::*;
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(
         SqliteStateStore::open(directory.path().join("state.db"), SqliteOptions::default())
@@ -405,7 +407,6 @@ async fn workflow_offload_failure_ends_run_without_automatic_tool_replay() {
 }
 #[tokio::test]
 async fn completed_workflow_replays_offloaded_reference_without_rerunning_tool() {
-    use eliteforge_agent_state_sqlite::*;
     let directory = tempfile::tempdir().unwrap();
     let artifacts_dir = directory.path().join("artifacts");
     std::fs::create_dir(&artifacts_dir).unwrap();

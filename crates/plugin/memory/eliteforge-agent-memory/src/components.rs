@@ -21,7 +21,7 @@ impl MemoryContributor {
         memory: Arc<dyn LongTermMemory>,
     ) -> Result<Self, MemoryError> {
         let namespace = namespace.into();
-        crate::long_term::validate_namespace(&namespace)?;
+        crate::validation::validate_namespace(&namespace)?;
         let id = id.into();
         if id.trim().is_empty() {
             return Err(MemoryError::Invalid(
@@ -107,7 +107,7 @@ impl MemoryTools {
         namespace: impl Into<String>,
     ) -> Result<Self, MemoryError> {
         let namespace = namespace.into();
-        crate::long_term::validate_namespace(&namespace)?;
+        crate::validation::validate_namespace(&namespace)?;
         Ok(Self {
             memory,
             namespace,

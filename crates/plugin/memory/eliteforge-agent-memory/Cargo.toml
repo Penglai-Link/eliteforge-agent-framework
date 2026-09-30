@@ -2,24 +2,20 @@
 name = "eliteforge-agent-memory"
 version.workspace = true
 edition.workspace = true
-description = "Persistent conversation storage and explicit long-term memory components"
+description = "Explicit long-term memory contributors and tools over host-provided storage"
 
 [dependencies]
-eliteforge-agent-sqlite-extensions = { path = "../../storage/eliteforge-agent-sqlite-extensions" }
 eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
-tokio-rusqlite = { version = "0.7.0", features = ["bundled"] }
-uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../../storage/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-storage-local = { path = "../../storage/eliteforge-agent-official-plugin-storage-local" }
 eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
-eliteforge-agent-state-sqlite = { path = "../../storage/eliteforge-agent-state-sqlite" }
 eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }
 eliteforge-agent-official-plugin-model-genai = { path = "../../model/eliteforge-agent-official-plugin-model-genai" }
 eliteforge-agent-context = { path = "../../context/eliteforge-agent-context" }
 tempfile = "3"
+tokio-util.workspace = true

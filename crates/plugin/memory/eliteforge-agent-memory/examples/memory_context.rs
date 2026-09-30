@@ -4,6 +4,11 @@ use eliteforge_agent_context::*;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_memory::*;
 use eliteforge_agent_official_plugin_model_genai::{AdapterKind, AuthData, GenaiChatAdapter};
+use eliteforge_agent_official_plugin_storage_local::{
+    FileArtifactLimits, FileArtifactStore, MemoryStoreOptions, SqliteConversationOptions,
+    SqliteConversationStore, SqliteLongTermMemory, SqliteOptions, SqliteStateStore,
+    SqliteSummaryStore, SummaryStoreOptions,
+};
 use std::sync::Arc;
 
 // The host supplies configuration; dependency assembly and resource ownership
@@ -48,21 +53,16 @@ impl MemoryContextPlugin {
         context.on_shutdown(move || async move { close.close().await.map_err(|e| e.to_string()) });
 
         let state = Arc::new(
-            eliteforge_agent_state_sqlite::SqliteStateStore::open(
-                "execution.sqlite",
-                Default::default(),
-            )
-            .await?,
+            SqliteStateStore::open(directory.join("execution.sqlite"), SqliteOptions::default())
+                .await?,
         );
         let close = state.clone();
         context.on_shutdown(move || async move { close.close().await.map_err(|e| e.to_string()) });
         state.plugin().install(context).await?;
         let summary_store: Arc<dyn SummaryStore> = summaries.clone();
-        context.provide(
-            eliteforge_agent_official_plugin_storage_sqlite::SummaryStoreService(
-                summary_store.clone(),
-            ),
-        )?;
+        context.provide(eliteforge_agent_context::SummaryStoreService(
+            summary_store.clone(),
+        ))?;
         context.contribute_extension(summary_store)?;
         let compressor = ModelCompressor::new(
             ModelRef::new("default", &self.model),
@@ -93,11 +93,9 @@ impl MemoryContextPlugin {
             .reduce_with(compressor),
         ]);
         let artifact_store: Arc<dyn ArtifactStore> = artifacts.clone();
-        context.provide(
-            eliteforge_agent_official_plugin_storage_sqlite::ArtifactStoreService(
-                artifact_store.clone(),
-            ),
-        )?;
+        context.provide(eliteforge_agent_context::ArtifactStoreService(
+            artifact_store.clone(),
+        ))?;
         context.contribute_extension(artifact_store)?;
         ConversationStorePlugin::from_arc(conversations.clone())
             .install(context)
