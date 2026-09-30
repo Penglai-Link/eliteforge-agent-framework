@@ -9,8 +9,7 @@ use tokio_rusqlite::{
 };
 
 pub use eliteforge_agent_context_contracts::{
-    ConversationSummary, SummaryKey, SummaryStore, SummaryStorePlugin, SummaryStoreService,
-    VersionedSummary,
+    ConversationSummary, SummaryKey, SummaryStore, VersionedSummary,
 };
 
 #[derive(Debug, Clone)]

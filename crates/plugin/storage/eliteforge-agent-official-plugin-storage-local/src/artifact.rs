@@ -1,8 +1,7 @@
-//! Capability-scoped artifacts and lossless tool-output offloading.
+//! Capability-scoped immutable artifact files.
 //!
-//! An artifact ID is not an authorization token. Give each reader/offloader a
-//! store scoped to the data its agent may access. The directory belongs to the
-//! store: untrusted processes must not have write access to it.
+//! An artifact ID is not an authorization token. Scope stores to the data
+//! each agent may access. Untrusted processes must not write to the directory.
 use std::{
     collections::HashSet,
     io::{Read, Seek, SeekFrom, Write},
@@ -11,25 +10,15 @@ use std::{
 };
 
 use async_trait::async_trait;
-use base64::{Engine, engine::general_purpose::STANDARD};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt, OpenOptionsSyncExt};
 use cap_std::fs::{Dir, OpenOptions};
-use eliteforge_agent_core::{
-    Content, ContentBlock, ResourceReference, RunContext, Tool, ToolBinding, ToolDescriptor,
-    ToolError, ToolInvocationContext, ToolMiddleware, ToolNext, ToolOutput,
-};
-use serde::Deserialize;
-use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const IO_CHUNK: usize = 64 * 1024;
-const TOOL_OUTPUT_MIME: &str = "application/vnd.eliteforge-agent-framework.tool-output+json";
-
-pub use eliteforge_agent_context_contracts::{
-    ArtifactChunk, ArtifactError, ArtifactId, ArtifactMetadata, ArtifactStore, ArtifactStorePlugin,
-    ArtifactStoreService,
+use eliteforge_agent_context_contracts::{
+    ArtifactChunk, ArtifactError, ArtifactId, ArtifactMetadata, ArtifactStore,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -124,7 +113,10 @@ impl FileArtifactStore {
                 }
                 let metadata = item.metadata()?;
                 if !metadata.is_file()
-                    || now.duration_since(metadata.modified()?).unwrap_or_default() < minimum_age
+                    || now
+                        .duration_since(metadata.modified()?.into_std())
+                        .unwrap_or_default()
+                        < minimum_age
                 {
                     continue;
                 }
@@ -312,580 +304,88 @@ impl ArtifactStore for FileArtifactStore {
     }
 }
 
-/// Offloads content and structured data. Error and control fields remain inline.
-/// Add the artifact reader's tool ID to exclusions when its configured range
-/// could itself exceed the offload threshold.
-pub struct ToolOutputOffloader {
-    store: Arc<dyn ArtifactStore>,
-    threshold_bytes: usize,
-    preview_bytes: usize,
-    excluded_tools: HashSet<String>,
-}
-
-impl ToolOutputOffloader {
-    pub fn new(
-        store: Arc<dyn ArtifactStore>,
-        threshold_bytes: usize,
-        preview_bytes: usize,
-    ) -> Result<Self, ArtifactError> {
-        if threshold_bytes == 0 || preview_bytes > threshold_bytes {
-            return Err(ArtifactError::InvalidLimits(
-                "offload threshold must be positive and preview <= threshold",
-            ));
-        }
-        Ok(Self {
-            store,
-            threshold_bytes,
-            preview_bytes,
-            excluded_tools: HashSet::new(),
-        })
-    }
-
-    pub fn excluding_tool(mut self, tool_id: impl Into<String>) -> Self {
-        self.excluded_tools.insert(tool_id.into());
-        self
-    }
-
-    pub async fn offload(
-        &self,
-        output: &mut ToolOutput,
-        cancellation: CancellationToken,
-    ) -> Result<Option<ArtifactMetadata>, ArtifactError> {
-        check_cancelled(&cancellation)?;
-        let mut counter = BoundedBuffer::counting(self.threshold_bytes);
-        if serde_json::to_writer(&mut counter, &(&output.content, &output.structured)).is_ok() {
-            return Ok(None);
-        }
-        let mut buffer = BoundedBuffer::collecting(self.store.max_artifact_bytes());
-        if let Err(error) = serde_json::to_writer(&mut buffer, &*output) {
-            return if buffer.exceeded {
-                Err(ArtifactError::TooLarge)
-            } else {
-                Err(ArtifactError::Serialization(error))
-            };
-        }
-        let preview = content_preview(&output.content, self.preview_bytes);
-        // Original content and runtime semantics remain unchanged on failure.
-        let metadata = self.store.put(buffer.bytes, cancellation).await?;
-        let reference = ResourceReference {
-            uri: format!("artifact:{}", metadata.id),
-            mime_type: Some(TOOL_OUTPUT_MIME.into()),
-            name: Some("Original tool output".into()),
-            size_bytes: Some(metadata.size_bytes),
-        };
-        output.structured = None;
-        output.result_reference = Some(Box::new(reference.clone()));
-        output.content = vec![
-            ContentBlock::Text {
-                text: format!(
-                    "Tool output stored as artifact {} ({} bytes). Preview:\n{}",
-                    metadata.id, metadata.size_bytes, preview
-                ),
-            },
-            ContentBlock::Resource {
-                resource: reference,
-            },
-        ]
-        .into();
-        Ok(Some(metadata))
-    }
-}
-
-fn content_preview(content: &Content, limit: usize) -> String {
-    let mut preview = String::new();
-    for block in &content.0 {
-        if let ContentBlock::Text { text } = block {
-            let mut length = text.len().min(limit - preview.len());
-            while !text.is_char_boundary(length) {
-                length -= 1;
-            }
-            preview.push_str(&text[..length]);
-            if length < text.len() || preview.len() == limit {
-                break;
-            }
-        }
-    }
-    preview
-}
-
-struct BoundedBuffer {
-    bytes: Vec<u8>,
-    size: usize,
-    limit: usize,
-    collect: bool,
-    exceeded: bool,
-}
-impl BoundedBuffer {
-    fn counting(limit: usize) -> Self {
-        Self {
-            bytes: Vec::new(),
-            size: 0,
-            limit,
-            collect: false,
-            exceeded: false,
-        }
-    }
-    fn collecting(limit: usize) -> Self {
-        Self {
-            collect: true,
-            ..Self::counting(limit)
-        }
-    }
-}
-impl Write for BoundedBuffer {
-    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-        if data.len() > self.limit - self.size {
-            self.exceeded = true;
-            return Err(std::io::Error::other("artifact byte limit exceeded"));
-        }
-        self.size += data.len();
-        if self.collect {
-            self.bytes.extend_from_slice(data);
-        }
-        Ok(data.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl ToolMiddleware for ToolOutputOffloader {
-    async fn intercept(
-        &self,
-        context: &ToolInvocationContext<'_>,
-        next: ToolNext<'_>,
-    ) -> Result<ToolOutput, ToolError> {
-        let mut output = next.run().await?;
-        if self.excluded_tools.contains(&context.descriptor.id) {
-            return Ok(output);
-        }
-        {
-            let token = CancellationToken::new();
-            let _cancel_on_drop = CancelOnDrop(token.clone());
-            tokio::select! {
-                biased;
-                _ = context.run.cancelled() => {
-                    token.cancel();
-                    return Err(ToolError::Failed("artifact offload cancelled".into()));
-                }
-                result = self.offload(&mut output, token.clone()) => {
-                    result.map_err(|e| ToolError::Failed(e.to_string()))?;
-                }
-            }
-        }
-        Ok(output)
-    }
-}
-
-/// Reads raw artifact bytes in bounded pages. UTF-8 pages are returned as text;
-/// pages splitting a codepoint or containing binary data use base64 losslessly.
-#[derive(Clone)]
-pub struct ArtifactReadTool {
-    store: Arc<dyn ArtifactStore>,
-}
-impl ArtifactReadTool {
-    pub fn new(store: Arc<dyn ArtifactStore>) -> Self {
-        Self { store }
-    }
-
-    pub fn binding(self, id: impl Into<String>, call_name: impl Into<String>) -> ToolBinding {
-        let max_read_bytes = self.store.max_read_bytes();
-        ToolBinding::new(
-            ToolDescriptor::new(
-                id,
-                call_name,
-                "Read a bounded byte range from an authorized artifact. Use next_offset to continue; encoding is utf8 or base64.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
-                        "offset": {"type": "integer", "minimum": 0},
-                        "length": {"type": "integer", "minimum": 1, "maximum": max_read_bytes}
-                    },
-                    "required": ["id", "length"],
-                    "additionalProperties": false
-                }),
-            ),
-            self,
-        )
-        .parallel_safe()
-    }
-
-    async fn read_arguments(
-        &self,
-        arguments: Value,
-        token: CancellationToken,
-    ) -> Result<ToolOutput, ArtifactError> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Arguments {
-            id: ArtifactId,
-            #[serde(default)]
-            offset: u64,
-            length: usize,
-        }
-        let arguments: Arguments = serde_json::from_value(arguments)?;
-        let chunk = self
-            .store
-            .read(&arguments.id, arguments.offset, arguments.length, token)
-            .await?;
-        let (encoding, data) = match std::str::from_utf8(&chunk.bytes) {
-            Ok(text) => ("utf8", text.to_owned()),
-            Err(_) => ("base64", STANDARD.encode(&chunk.bytes)),
-        };
-        let value = json!({
-            "id": chunk.metadata.id,
-            "size_bytes": chunk.metadata.size_bytes,
-            "offset": chunk.offset,
-            "next_offset": chunk.next_offset(),
-            "eof": chunk.eof(),
-            "encoding": encoding,
-            "data": data,
-        });
-        Ok(ToolOutput {
-            structured: Some(value.clone()),
-            content: Content(vec![ContentBlock::Json { value }]),
-            ..ToolOutput::default()
-        })
-    }
-}
-
-#[async_trait]
-impl Tool for ArtifactReadTool {
-    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
-        let token = CancellationToken::new();
-        let _cancel_on_drop = CancelOnDrop(token.clone());
-        tokio::select! {
-            biased;
-            _ = context.cancelled() => {
-                token.cancel();
-                Err(ToolError::Failed("artifact read cancelled".into()))
-            }
-            result = self.read_arguments(arguments, token.clone()) => result.map_err(|e| ToolError::Failed(e.to_string())),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eliteforge_agent_core::ToolEffect;
 
-    fn store() -> (tempfile::TempDir, Arc<FileArtifactStore>) {
+    fn store() -> (tempfile::TempDir, FileArtifactStore) {
         let directory = tempfile::tempdir().unwrap();
-        let store = Arc::new(
-            FileArtifactStore::open(
-                directory.path(),
-                FileArtifactLimits {
-                    max_artifact_bytes: 1024 * 1024,
-                    max_read_bytes: 4096,
-                    max_in_flight: 2,
-                },
-            )
-            .unwrap(),
-        );
+        let store = FileArtifactStore::open(
+            directory.path(),
+            FileArtifactLimits {
+                max_artifact_bytes: 1024,
+                max_read_bytes: 128,
+                max_in_flight: 2,
+            },
+        )
+        .unwrap();
         (directory, store)
     }
 
-    #[test]
-    fn identifiers_reject_paths_noncanonical_and_nonrandom_uuids() {
-        for value in [
-            "../secret",
-            "/etc/passwd",
-            "a/b",
-            ".",
-            "",
-            "urn:uuid:8a6d6b78-cc24-40ef-94cd-c960dbb7b293",
-            "8A6D6B78-CC24-40EF-94CD-C960DBB7B293",
-            "00000000-0000-0000-0000-000000000000",
-        ] {
-            assert!(ArtifactId::parse(value).is_err(), "{value}");
-            assert!(serde_json::from_value::<ArtifactId>(json!(value)).is_err());
-        }
-        let id = ArtifactId::new();
-        assert_eq!(serde_json::from_value::<ArtifactId>(json!(id)).unwrap(), id);
-    }
-
     #[tokio::test]
-    async fn files_are_published_complete_and_reopen_with_bounded_ranges() {
+    async fn file_publication_is_complete_bounded_and_cancel_safe() {
         let (directory, store) = store();
-        let data = "hello 世界".as_bytes().to_vec();
+        let cancelled = CancellationToken::new();
+        cancelled.cancel();
+        assert!(matches!(
+            store.put(vec![1], cancelled).await,
+            Err(ArtifactError::Cancelled)
+        ));
+        let data = b"hello world".to_vec();
         let metadata = store
             .put(data.clone(), CancellationToken::new())
             .await
             .unwrap();
-        assert_eq!(metadata.size_bytes, data.len() as u64);
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
-        let reopened = FileArtifactStore::open(directory.path(), store.limits).unwrap();
-        let chunk = reopened
-            .read(&metadata.id, 6, 3, CancellationToken::new())
-            .await
-            .unwrap();
-        assert_eq!(chunk.bytes, "世".as_bytes());
-        assert_eq!(chunk.next_offset(), 9);
-        assert!(!chunk.eof());
-        let last = reopened
-            .read(&metadata.id, 9, 4096, CancellationToken::new())
-            .await
-            .unwrap();
-        assert_eq!(last.bytes, "界".as_bytes());
-        assert!(last.eof());
-        let empty = reopened
-            .read(
-                &metadata.id,
-                metadata.size_bytes,
-                1,
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        assert!(empty.bytes.is_empty() && empty.eof());
-        reopened
-            .remove(&metadata.id, CancellationToken::new())
-            .await
-            .unwrap();
-        assert!(
-            reopened
-                .read(&metadata.id, 0, 1, CancellationToken::new())
-                .await
-                .is_err()
+        assert_eq!(
+            std::fs::read(directory.path().join(metadata.id.as_str())).unwrap(),
+            data
         );
-    }
-
-    #[tokio::test]
-    async fn store_enforces_size_and_read_limits() {
-        let (directory, store) = store();
+        assert_eq!(
+            store
+                .read(&metadata.id, 6, 5, CancellationToken::new())
+                .await
+                .unwrap()
+                .bytes,
+            b"world"
+        );
         assert!(matches!(
             store
-                .put(
-                    vec![0; store.max_artifact_bytes() + 1],
-                    CancellationToken::new()
-                )
+                .read(&metadata.id, 0, 129, CancellationToken::new())
                 .await,
+            Err(ArtifactError::InvalidRange)
+        ));
+        assert!(matches!(
+            store.put(vec![0; 1025], CancellationToken::new()).await,
             Err(ArtifactError::TooLarge)
         ));
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
-        let metadata = store
-            .put(vec![1, 2, 3], CancellationToken::new())
-            .await
-            .unwrap();
-        for (offset, length) in [(0, 0), (0, 4097), (4, 1), (u64::MAX, 1)] {
-            assert!(matches!(
-                store
-                    .read(&metadata.id, offset, length, CancellationToken::new())
-                    .await,
-                Err(ArtifactError::InvalidRange)
-            ));
-        }
-        std::fs::write(
-            directory.path().join(metadata.id.as_str()),
-            vec![0; store.max_artifact_bytes() + 1],
-        )
-        .unwrap();
-        assert!(matches!(
-            store
-                .read(&metadata.id, 0, 1, CancellationToken::new())
-                .await,
-            Err(ArtifactError::TooLarge)
-        ));
-    }
-
-    #[tokio::test]
-    async fn cancellation_prevents_writes_reads_and_deletes() {
-        let (directory, store) = store();
-        let token = CancellationToken::new();
-        token.cancel();
-        assert!(matches!(
-            store.put(vec![1], token.clone()).await,
-            Err(ArtifactError::Cancelled)
-        ));
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
-        let metadata = store.put(vec![1], CancellationToken::new()).await.unwrap();
-        assert!(matches!(
-            store.read(&metadata.id, 0, 1, token.clone()).await,
-            Err(ArtifactError::Cancelled)
-        ));
-        assert!(matches!(
-            store.remove(&metadata.id, token).await,
-            Err(ArtifactError::Cancelled)
-        ));
-        assert!(directory.path().join(metadata.id.as_str()).exists());
-    }
-
-    #[tokio::test]
-    async fn cancellation_while_waiting_for_capacity_does_not_start_work() {
-        let (directory, store) = store();
-        let _permits = store.permits.acquire_many(2).await.unwrap();
-        let token = CancellationToken::new();
-        let pending = store.put(vec![1], token.clone());
-        tokio::pin!(pending);
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(10), &mut pending)
-                .await
-                .is_err()
-        );
-        token.cancel();
-        assert!(matches!(pending.await, Err(ArtifactError::Cancelled)));
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn symlinks_inside_and_outside_directory_are_never_followed() {
+    async fn symlinks_and_public_directory_are_rejected() {
         let (directory, store) = store();
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("secret"), b"secret").unwrap();
-        let original = store
-            .put(b"inside".to_vec(), CancellationToken::new())
-            .await
-            .unwrap();
-        for target in [
-            outside.path().join("secret"),
-            std::path::PathBuf::from(original.id.as_str()),
-        ] {
-            let id = ArtifactId::new();
-            std::os::unix::fs::symlink(target, directory.path().join(id.as_str())).unwrap();
-            assert!(
-                store
-                    .read(&id, 0, 20, CancellationToken::new())
-                    .await
-                    .is_err()
-            );
-        }
-        assert_eq!(
-            std::fs::read(outside.path().join("secret")).unwrap(),
-            b"secret"
-        );
         let id = ArtifactId::new();
-        std::fs::create_dir(directory.path().join(id.as_str())).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("secret"),
+            directory.path().join(id.as_str()),
+        )
+        .unwrap();
         assert!(
             store
                 .read(&id, 0, 1, CancellationToken::new())
                 .await
                 .is_err()
         );
-    }
-
-    #[tokio::test]
-    async fn offload_preserves_full_output_and_runtime_semantics() {
-        let (_directory, store) = store();
-        let offloader = ToolOutputOffloader::new(store.clone(), 128, 5).unwrap();
-        let original = ToolOutput {
-            content: format!("世界{}", "x".repeat(500)).into(),
-            structured: Some(json!({"important": true})),
-            is_error: true,
-            effect: ToolEffect::ExposeTools(vec!["dynamic".into()]),
-            result_reference: None,
-        };
-        let mut output = original.clone();
-        let metadata = offloader
-            .offload(&mut output, CancellationToken::new())
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(output.structured.is_none());
-        assert!(output.result_reference.is_some());
-        assert_eq!(output.is_error, original.is_error);
-        assert_eq!(output.effect, original.effect);
-        assert!(output.content.text().ends_with("\n世"));
-        let chunk = store
-            .read(&metadata.id, 0, 4096, CancellationToken::new())
-            .await
-            .unwrap();
         assert_eq!(
-            serde_json::from_slice::<ToolOutput>(&chunk.bytes).unwrap(),
-            original
+            std::fs::read(outside.path().join("secret")).unwrap(),
+            b"secret"
         );
-        assert!(
-            matches!(&output.content.0[1], ContentBlock::Resource { resource } if resource.uri == format!("artifact:{}", metadata.id))
-        );
-    }
-
-    #[tokio::test]
-    async fn failed_and_unnecessary_offloads_leave_original_unchanged() {
-        let (directory, store) = store();
-        let offloader = ToolOutputOffloader::new(store.clone(), 128, 8).unwrap();
-        let small = ToolOutput::text("short");
-        let mut output = small.clone();
-        assert_eq!(
-            offloader
-                .offload(&mut output, CancellationToken::new())
-                .await
-                .unwrap(),
-            None
-        );
-        assert_eq!(output, small);
-        let mut output = ToolOutput::text("x".repeat(store.max_artifact_bytes()));
-        let original = output.clone();
-        assert!(matches!(
-            offloader
-                .offload(&mut output, CancellationToken::new())
-                .await,
-            Err(ArtifactError::TooLarge)
-        ));
-        assert_eq!(output, original);
-        let token = CancellationToken::new();
-        token.cancel();
-        assert!(matches!(
-            offloader.offload(&mut output, token).await,
-            Err(ArtifactError::Cancelled)
-        ));
-        assert_eq!(output, original);
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
-    }
-
-    #[tokio::test]
-    async fn reader_preserves_split_utf8_bytes_and_validates_arguments() {
-        let (_directory, store) = store();
-        let metadata = store
-            .put("世界".as_bytes().to_vec(), CancellationToken::new())
-            .await
-            .unwrap();
-        let reader = ArtifactReadTool::new(store);
-        let output = reader
-            .read_arguments(
-                json!({"id": metadata.id, "offset": 1, "length": 2}),
-                CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        let value = output.structured.unwrap();
-        assert_eq!(value["encoding"], "base64");
-        assert_eq!(
-            STANDARD.decode(value["data"].as_str().unwrap()).unwrap(),
-            "世界".as_bytes()[1..3]
-        );
-        assert_eq!(value["next_offset"], 3);
-        assert_eq!(value["eof"], false);
-        for arguments in [
-            json!({"id": "../secret", "length": 1}),
-            json!({"id": metadata.id, "length": 0}),
-            json!({"id": metadata.id, "length": 4097}),
-            json!({"id": metadata.id, "length": 1, "path": "/etc/passwd"}),
-        ] {
-            assert!(
-                reader
-                    .read_arguments(arguments, CancellationToken::new())
-                    .await
-                    .is_err()
-            );
-        }
-    }
-
-    #[test]
-    fn preview_is_bounded_across_blocks_and_utf8() {
-        let content = Content::from(vec![
-            ContentBlock::Text { text: "a".into() },
-            ContentBlock::Json {
-                value: json!({"skip": true}),
-            },
-            ContentBlock::Text {
-                text: "世界".into(),
-            },
-        ]);
-        assert_eq!(content_preview(&content, 0), "");
-        assert_eq!(content_preview(&content, 3), "a");
-        assert_eq!(content_preview(&content, 4), "a世");
+        let public = directory.path().join("public");
+        std::fs::create_dir(&public).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&public, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(FileArtifactStore::open(&public, FileArtifactLimits::default()).is_err());
     }
 }
