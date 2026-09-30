@@ -39,6 +39,12 @@ macro_rules! model_adapter {
 model_adapter!(embedding_model, EmbeddingModel, embed, EmbeddingRequest);
 model_adapter!(rerank_model, RerankModel, rerank, RerankRequest);
 model_adapter!(
+    content_detection_model,
+    ContentDetectionModel,
+    detect,
+    ContentDetectionRequest
+);
+model_adapter!(
     image_model,
     ImageGenerationModel,
     generate,

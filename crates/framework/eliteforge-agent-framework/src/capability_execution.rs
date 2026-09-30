@@ -91,7 +91,7 @@ impl ModelClient {
         let binding = self
             .catalogs
             .runtime
-            .video_job_binding(&job.model, &job.protocol)
+            .video_job_binding(&job.model, &job.protocol, &job.id)
             .ok_or_else(|| invalid("video job model is not registered"))?;
         if job.id.trim().is_empty() || binding.protocol != job.protocol {
             return Err(invalid(
@@ -306,13 +306,16 @@ impl ModelOperations for ModelClient {
         if job.id.is_empty() {
             job.protocol = binding.protocol.clone();
         }
+        self.catalogs
+            .runtime
+            .retain_image_job(&job, binding.clone());
         Ok(job)
     }
     async fn query_image(&self, job: &ImageJob) -> Result<ImageJob, AgentError> {
         let binding = self
             .catalogs
             .runtime
-            .image_job_binding(&job.model, &job.protocol)
+            .image_job_binding(&job.model, &job.protocol, &job.id)
             .ok_or_else(|| invalid("image job model is not registered"))?;
         let next = self
             .dispatch(
@@ -330,7 +333,7 @@ impl ModelOperations for ModelClient {
         let binding = self
             .catalogs
             .runtime
-            .image_job_binding(&job.model, &job.protocol)
+            .image_job_binding(&job.model, &job.protocol, &job.id)
             .ok_or_else(|| invalid("image job model is not registered"))?;
         if !binding.capabilities.cancellation {
             return Err(invalid("image binding does not support cancellation"));
@@ -362,6 +365,9 @@ impl ModelOperations for ModelClient {
             )
             .await?;
         validate_job(&job, &binding.model, &binding.protocol)?;
+        self.catalogs
+            .runtime
+            .retain_video_job(&job, binding.clone());
         Ok(job)
     }
     async fn query_video(&self, job: &VideoJob) -> Result<VideoJob, AgentError> {
