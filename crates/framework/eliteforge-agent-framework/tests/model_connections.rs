@@ -260,6 +260,7 @@ impl AgentLoop for PhaseLoop {
             usage: Usage::default(),
             steps: 2,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }
