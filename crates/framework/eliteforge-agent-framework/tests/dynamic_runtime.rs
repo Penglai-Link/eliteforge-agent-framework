@@ -129,3 +129,84 @@ async fn external_loop_runs_without_framework_storage() {
         Some("run-2")
     );
 }
+
+struct QueuedVideo;
+#[async_trait]
+impl VideoGenerationModel for QueuedVideo {
+    async fn submit(
+        &self,
+        _model: &str,
+        request: VideoGenerationRequest,
+    ) -> Result<VideoJob, ModelError> {
+        Ok(VideoJob {
+            model: request.choice.model.unwrap(),
+            protocol: "mock".into(),
+            id: "job-1".into(),
+            status: ModelJobStatus::Queued,
+            progress: None,
+            output: None,
+            error: None,
+        })
+    }
+    async fn query(&self, job: &VideoJob) -> Result<VideoJob, ModelError> {
+        Ok(job.clone())
+    }
+}
+
+struct OperationOnlyLoop;
+#[async_trait]
+impl AgentLoop for OperationOnlyLoop {
+    fn requires_conversations(&self) -> bool {
+        false
+    }
+    async fn run(
+        &self,
+        _request: &RunRequest,
+        _context: &RunContext,
+        _services: &AgentServices,
+    ) -> Result<RunResult, AgentError> {
+        Err(AgentError::Run("not used".into()))
+    }
+}
+
+#[tokio::test]
+async fn retired_video_job_keeps_its_original_binding() {
+    let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
+    let agent = AgentBuilder::new()
+        .default_models(false)
+        .plugin(ModelRuntimePlugin::new(runtime.clone()))
+        .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
+        .build()
+        .await
+        .unwrap();
+    let model = ModelRef::new("personai", "video");
+    let mut update = ModelRuntimeUpdate::new("alice", 1, vec![]);
+    update.video.push(
+        VideoGenerationModelService::new(model.clone(), Arc::new(QueuedVideo)).protocol("mock"),
+    );
+    runtime.replace_connection("personai", update).unwrap();
+    assert_eq!(
+        agent.models(ModelOperation::VideoGeneration),
+        vec![model.clone()]
+    );
+    let job = agent
+        .submit_video(VideoGenerationRequest {
+            choice: ModelChoice::model(model.clone()),
+            prompt: "clip".into(),
+            seconds: 2,
+            size: None,
+            first_frame: None,
+            last_frame: None,
+            reference_images: vec![],
+            reference_videos: vec![],
+            reference_audios: vec![],
+            provider_options: Default::default(),
+        })
+        .await
+        .unwrap();
+    runtime
+        .replace_connection("personai", ModelRuntimeUpdate::new("alice", 1, vec![]))
+        .unwrap();
+    assert!(agent.models(ModelOperation::VideoGeneration).is_empty());
+    assert_eq!(agent.query_video(&job).await.unwrap().id, "job-1");
+}
