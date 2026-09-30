@@ -330,6 +330,7 @@ pub struct ImageJob {
     pub protocol: String,
     pub id: String,
     /// Process-local adapter identity assigned by Framework on submission.
+    /// It is serializable, but cannot restore the adapter after process restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_id: Option<RunId>,
     pub status: ModelJobStatus,
@@ -391,6 +392,7 @@ pub struct VideoJob {
     pub protocol: String,
     pub id: String,
     /// Process-local adapter identity assigned by Framework on submission.
+    /// It is serializable, but cannot restore the adapter after process restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binding_id: Option<RunId>,
     pub status: ModelJobStatus,

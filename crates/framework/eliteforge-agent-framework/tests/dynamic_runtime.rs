@@ -215,6 +215,7 @@ impl VideoGenerationModel for QueuedVideo {
             model: request.choice.model.unwrap(),
             protocol: "mock".into(),
             id: "job-1".into(),
+            binding_id: None,
             status: ModelJobStatus::Queued,
             progress: None,
             output: None,
@@ -326,4 +327,176 @@ async fn video_job_retains_binding_across_same_model_token_refresh() {
         .push(VideoGenerationModelService::new(model, Arc::new(QueuedVideo(0.9))).protocol("mock"));
     runtime.replace_connection("personai", refreshed).unwrap();
     assert_eq!(agent.query_video(&job).await.unwrap().progress, Some(0.1));
+}
+
+#[tokio::test]
+async fn identical_remote_video_ids_across_accounts_keep_distinct_bindings() {
+    let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
+    let agent = AgentBuilder::new()
+        .default_models(false)
+        .plugin(ModelRuntimePlugin::new(runtime.clone()))
+        .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
+        .build()
+        .await
+        .unwrap();
+    let model = ModelRef::new("personai", "video");
+    let request = || VideoGenerationRequest {
+        choice: ModelChoice::model(model.clone()),
+        prompt: "clip".into(),
+        seconds: 2,
+        size: None,
+        first_frame: None,
+        last_frame: None,
+        reference_images: vec![],
+        reference_videos: vec![],
+        reference_audios: vec![],
+        provider_options: Default::default(),
+    };
+    let mut alice = ModelRuntimeUpdate::new("alice", 1, vec![]);
+    alice.video.push(
+        VideoGenerationModelService::new(model.clone(), Arc::new(QueuedVideo(0.1)))
+            .protocol("mock"),
+    );
+    runtime.replace_connection("personai", alice).unwrap();
+    let alice_job = agent.submit_video(request()).await.unwrap();
+
+    let mut bob = ModelRuntimeUpdate::new("bob", 2, vec![]);
+    bob.video.push(
+        VideoGenerationModelService::new(model.clone(), Arc::new(QueuedVideo(0.9)))
+            .protocol("mock"),
+    );
+    runtime.replace_connection("personai", bob).unwrap();
+    let bob_job = agent.submit_video(request()).await.unwrap();
+
+    assert_eq!(alice_job.id, bob_job.id);
+    assert_eq!(alice_job.model, bob_job.model);
+    assert_ne!(alice_job.binding_id, bob_job.binding_id);
+    assert_eq!(
+        agent.query_video(&alice_job).await.unwrap().progress,
+        Some(0.1)
+    );
+    assert_eq!(
+        agent.query_video(&bob_job).await.unwrap().progress,
+        Some(0.9)
+    );
+
+    let restored: VideoJob =
+        serde_json::from_value(serde_json::to_value(&alice_job).unwrap()).unwrap();
+    let fresh_runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
+    let mut refreshed = ModelRuntimeUpdate::new("alice", 1, vec![]);
+    refreshed
+        .video
+        .push(VideoGenerationModelService::new(model, Arc::new(QueuedVideo(0.7))).protocol("mock"));
+    fresh_runtime
+        .replace_connection("personai", refreshed)
+        .unwrap();
+    let fresh_agent = AgentBuilder::new()
+        .default_models(false)
+        .plugin(ModelRuntimePlugin::new(fresh_runtime))
+        .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
+        .build()
+        .await
+        .unwrap();
+    let error = fresh_agent.query_video(&restored).await.unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::Model(ModelError::Unavailable(_))
+    ));
+}
+
+struct QueuedImage(f64);
+#[async_trait]
+impl ImageGenerationModel for QueuedImage {
+    async fn generate(
+        &self,
+        _model: &str,
+        _request: ImageGenerationRequest,
+    ) -> Result<ImageGenerationResponse, ModelError> {
+        unreachable!("async image submission must not use synchronous generation")
+    }
+    async fn submit(
+        &self,
+        _model: &str,
+        request: ImageGenerationRequest,
+    ) -> Result<ImageJob, ModelError> {
+        Ok(ImageJob {
+            model: request.choice.model.unwrap(),
+            protocol: "mock".into(),
+            id: "job-1".into(),
+            binding_id: None,
+            status: ModelJobStatus::Queued,
+            progress: None,
+            images: vec![],
+            error: None,
+        })
+    }
+    async fn query(&self, job: &ImageJob) -> Result<ImageJob, ModelError> {
+        Ok(ImageJob {
+            progress: Some(self.0),
+            ..job.clone()
+        })
+    }
+}
+
+#[tokio::test]
+async fn identical_remote_image_ids_across_accounts_keep_distinct_bindings() {
+    let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
+    let agent = AgentBuilder::new()
+        .default_models(false)
+        .plugin(ModelRuntimePlugin::new(runtime.clone()))
+        .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
+        .build()
+        .await
+        .unwrap();
+    let model = ModelRef::new("personai", "image");
+    let request = || ImageGenerationRequest {
+        choice: ModelChoice::model(model.clone()),
+        prompt: "image".into(),
+        size: None,
+        count: 1,
+        quality: None,
+        provider_options: Default::default(),
+    };
+    let mut alice = ModelRuntimeUpdate::new("alice", 1, vec![]);
+    alice.image.push(
+        ImageGenerationModelService::new(model.clone(), Arc::new(QueuedImage(0.1)))
+            .protocol("mock"),
+    );
+    runtime.replace_connection("personai", alice).unwrap();
+    let alice_job = agent.submit_image(request()).await.unwrap();
+
+    let mut bob = ModelRuntimeUpdate::new("bob", 2, vec![]);
+    bob.image.push(
+        ImageGenerationModelService::new(model.clone(), Arc::new(QueuedImage(0.9)))
+            .protocol("mock"),
+    );
+    runtime.replace_connection("personai", bob).unwrap();
+    let bob_job = agent.submit_image(request()).await.unwrap();
+    assert_eq!(alice_job.id, bob_job.id);
+    assert_ne!(alice_job.binding_id, bob_job.binding_id);
+    assert_eq!(
+        agent.query_image(&alice_job).await.unwrap().progress,
+        Some(0.1)
+    );
+    assert_eq!(
+        agent.query_image(&bob_job).await.unwrap().progress,
+        Some(0.9)
+    );
+
+    let restored: ImageJob =
+        serde_json::from_value(serde_json::to_value(&alice_job).unwrap()).unwrap();
+    let fresh_agent = AgentBuilder::new()
+        .default_models(false)
+        .plugin(ModelRuntimePlugin::new(
+            ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap(),
+        ))
+        .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
+        .build()
+        .await
+        .unwrap();
+    let error = fresh_agent.query_image(&restored).await.unwrap_err();
+    assert!(matches!(
+        error,
+        AgentError::Model(ModelError::Unavailable(_))
+    ));
 }

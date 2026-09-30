@@ -106,10 +106,8 @@ impl ModelRuntimeSnapshot {
 pub struct ModelRuntime {
     current: RwLock<Arc<ModelRuntimeSnapshot>>,
     partitions: Mutex<BTreeMap<String, ModelRuntimeUpdate>>,
-    retired_video: Mutex<BTreeMap<(ModelRef, String), VideoGenerationModelService>>,
-    retired_image: Mutex<BTreeMap<(ModelRef, String), ImageGenerationModelService>>,
-    video_jobs: Mutex<BTreeMap<(ModelRef, String, String), VideoGenerationModelService>>,
-    image_jobs: Mutex<BTreeMap<(ModelRef, String, String), ImageGenerationModelService>>,
+    video_jobs: Mutex<BTreeMap<RunId, (ModelRef, String, String, VideoGenerationModelService)>>,
+    image_jobs: Mutex<BTreeMap<RunId, (ModelRef, String, String, ImageGenerationModelService)>>,
 }
 impl ModelRuntime {
     pub fn new(update: ModelRuntimeUpdate) -> Result<Arc<Self>, AgentError> {
@@ -117,8 +115,6 @@ impl ModelRuntime {
         Ok(Arc::new(Self {
             current: RwLock::new(snapshot),
             partitions: Mutex::new(BTreeMap::from([("__base".into(), update)])),
-            retired_video: Mutex::new(BTreeMap::new()),
-            retired_image: Mutex::new(BTreeMap::new()),
             video_jobs: Mutex::new(BTreeMap::new()),
             image_jobs: Mutex::new(BTreeMap::new()),
         }))
@@ -292,96 +288,55 @@ impl ModelRuntime {
         current: &mut Arc<ModelRuntimeSnapshot>,
         next: Arc<ModelRuntimeSnapshot>,
     ) {
-        let old = current.clone();
-        let mut retired_video = self.retired_video.lock().unwrap_or_else(|e| e.into_inner());
-        for model in old.video.models() {
-            if next.video.get(model).is_none() {
-                let binding = old.video.get(model).expect("listed binding");
-                retired_video.insert((model.clone(), binding.protocol.clone()), binding.clone());
-            }
-        }
-        let mut retired_image = self.retired_image.lock().unwrap_or_else(|e| e.into_inner());
-        for model in old.image.models() {
-            if next.image.get(model).is_none() {
-                let binding = old.image.get(model).expect("listed binding");
-                retired_image.insert((model.clone(), binding.protocol.clone()), binding.clone());
-            }
-        }
         *current = next;
     }
-    pub(crate) fn video_job_binding(
-        &self,
-        model: &ModelRef,
-        protocol: &str,
-        job_id: &str,
-    ) -> Option<VideoGenerationModelService> {
-        if let Some(binding) = self
+    pub(crate) fn video_job_binding(&self, job: &VideoJob) -> Option<VideoGenerationModelService> {
+        let (model, protocol, remote_id, binding) = self
             .video_jobs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(model.clone(), protocol.to_owned(), job_id.to_owned()))
-            .cloned()
-        {
-            return Some(binding);
-        }
-        self.snapshot()
-            .video
-            .get(model)
-            .filter(|b| b.protocol == protocol)
-            .cloned()
-            .or_else(|| {
-                self.retired_video
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&(model.clone(), protocol.to_owned()))
-                    .cloned()
-            })
+            .get(&job.binding_id?)
+            .cloned()?;
+        (model == job.model && protocol == job.protocol && remote_id == job.id).then_some(binding)
     }
-    pub(crate) fn image_job_binding(
-        &self,
-        model: &ModelRef,
-        protocol: &str,
-        job_id: &str,
-    ) -> Option<ImageGenerationModelService> {
-        if let Some(binding) = self
+    pub(crate) fn image_job_binding(&self, job: &ImageJob) -> Option<ImageGenerationModelService> {
+        let (model, protocol, remote_id, binding) = self
             .image_jobs
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&(model.clone(), protocol.to_owned(), job_id.to_owned()))
-            .cloned()
-        {
-            return Some(binding);
-        }
-        self.snapshot()
-            .image
-            .get(model)
-            .filter(|b| b.protocol == protocol)
-            .cloned()
-            .or_else(|| {
-                self.retired_image
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get(&(model.clone(), protocol.to_owned()))
-                    .cloned()
-            })
+            .get(&job.binding_id?)
+            .cloned()?;
+        (model == job.model && protocol == job.protocol && remote_id == job.id).then_some(binding)
     }
     pub(crate) fn retain_video_job(&self, job: &VideoJob, binding: VideoGenerationModelService) {
-        self.video_jobs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                (job.model.clone(), job.protocol.clone(), job.id.clone()),
-                binding,
-            );
+        if let Some(id) = job.binding_id {
+            self.video_jobs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    id,
+                    (
+                        job.model.clone(),
+                        job.protocol.clone(),
+                        job.id.clone(),
+                        binding,
+                    ),
+                );
+        }
     }
     pub(crate) fn retain_image_job(&self, job: &ImageJob, binding: ImageGenerationModelService) {
-        if !job.id.is_empty() {
+        if let Some(id) = job.binding_id {
             self.image_jobs
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(
-                    (job.model.clone(), job.protocol.clone(), job.id.clone()),
-                    binding,
+                    id,
+                    (
+                        job.model.clone(),
+                        job.protocol.clone(),
+                        job.id.clone(),
+                        binding,
+                    ),
                 );
         }
     }

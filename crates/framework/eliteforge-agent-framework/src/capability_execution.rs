@@ -91,8 +91,10 @@ impl ModelClient {
         let binding = self
             .catalogs
             .runtime
-            .video_job_binding(&job.model, &job.protocol, &job.id)
-            .ok_or_else(|| invalid("video job model is not registered"))?;
+            .video_job_binding(job)
+            .ok_or_else(|| {
+                ModelError::Unavailable("video job binding is unavailable in this process".into())
+            })?;
         if job.id.trim().is_empty() || binding.protocol != job.protocol {
             return Err(invalid(
                 "video job protocol does not match its model binding",
@@ -306,6 +308,7 @@ impl ModelOperations for ModelClient {
         if job.id.is_empty() {
             job.protocol = binding.protocol.clone();
         }
+        job.binding_id = Some(RunId::new_v4());
         self.catalogs
             .runtime
             .retain_image_job(&job, binding.clone());
@@ -315,9 +318,11 @@ impl ModelOperations for ModelClient {
         let binding = self
             .catalogs
             .runtime
-            .image_job_binding(&job.model, &job.protocol, &job.id)
-            .ok_or_else(|| invalid("image job model is not registered"))?;
-        let next = self
+            .image_job_binding(job)
+            .ok_or_else(|| {
+                ModelError::Unavailable("image job binding is unavailable in this process".into())
+            })?;
+        let mut next = self
             .dispatch(
                 ModelOperation::ImageGeneration,
                 &binding.model,
@@ -327,14 +332,17 @@ impl ModelOperations for ModelClient {
         if next.id != job.id || next.model != job.model || next.protocol != job.protocol {
             return Err(invalid("image query changed job identity"));
         }
+        next.binding_id = job.binding_id;
         Ok(next)
     }
     async fn cancel_image(&self, job: &ImageJob) -> Result<(), AgentError> {
         let binding = self
             .catalogs
             .runtime
-            .image_job_binding(&job.model, &job.protocol, &job.id)
-            .ok_or_else(|| invalid("image job model is not registered"))?;
+            .image_job_binding(job)
+            .ok_or_else(|| {
+                ModelError::Unavailable("image job binding is unavailable in this process".into())
+            })?;
         if !binding.capabilities.cancellation {
             return Err(invalid("image binding does not support cancellation"));
         }
@@ -357,7 +365,7 @@ impl ModelOperations for ModelClient {
         }
         let binding = snapshot.video.select(&request.choice, &inputs)?;
         request.choice.model = Some(binding.model.clone());
-        let job = self
+        let mut job = self
             .dispatch(
                 ModelOperation::VideoGeneration,
                 &binding.model,
@@ -365,6 +373,7 @@ impl ModelOperations for ModelClient {
             )
             .await?;
         validate_job(&job, &binding.model, &binding.protocol)?;
+        job.binding_id = Some(RunId::new_v4());
         self.catalogs
             .runtime
             .retain_video_job(&job, binding.clone());
@@ -372,7 +381,7 @@ impl ModelOperations for ModelClient {
     }
     async fn query_video(&self, job: &VideoJob) -> Result<VideoJob, AgentError> {
         let binding = self.video_binding(job)?;
-        let next = self
+        let mut next = self
             .dispatch(
                 ModelOperation::VideoGeneration,
                 &binding.model,
@@ -383,6 +392,7 @@ impl ModelOperations for ModelClient {
         if next.id != job.id {
             return Err(invalid("video query changed the job ID"));
         }
+        next.binding_id = job.binding_id;
         Ok(next)
     }
     async fn cancel_video(&self, job: &VideoJob) -> Result<(), AgentError> {

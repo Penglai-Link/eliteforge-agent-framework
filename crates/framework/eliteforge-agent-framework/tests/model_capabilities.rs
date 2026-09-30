@@ -342,6 +342,7 @@ impl VideoGenerationModel for MediaAdapter {
             model: ModelRef::new("media", model),
             protocol: "fixture/video".into(),
             id: "job-1".into(),
+            binding_id: None,
             status: ModelJobStatus::Queued,
             progress: Some(0.0),
             output: None,
