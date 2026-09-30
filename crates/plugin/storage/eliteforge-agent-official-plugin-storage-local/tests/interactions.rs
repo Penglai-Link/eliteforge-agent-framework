@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_agui::*;
-use eliteforge_agent_official_plugin_storage_sqlite::*;
+use eliteforge_agent_official_plugin_storage_local::*;
 use eliteforge_agent_official_plugin_tools_human::*;
 use serde_json::{Value, json};
 use std::{
@@ -78,7 +78,16 @@ async fn build(
     count: Arc<Mutex<Vec<Value>>>,
     approval: bool,
 ) -> Agent {
-    let mut builder = AgentBuilder::new().plugin(SqliteStoragePlugin::new(path))
+    let artifacts = path.with_extension("artifacts");
+    if !artifacts.exists() {
+        std::fs::create_dir(&artifacts).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    let mut builder = AgentBuilder::new().plugin(LocalStoragePlugin::new(path, artifacts))
         .plugin(ChatModelPlugin::new(Script { first, requests: seen })).plugin(HumanInteractionPlugin)
         .plugin(ToolProviderPlugin::new("work", StaticToolProvider::new(vec![ToolBinding::new(
             ToolDescriptor::new("work", "work", "work", json!({"type":"object","required":["value"],"properties":{"value":{"type":"integer"}},"additionalProperties":false})), Counted(count)
@@ -262,7 +271,7 @@ async fn missing_storage_and_memory_paths_fail_build() {
     );
     assert!(
         AgentBuilder::new()
-            .plugin(SqliteStoragePlugin::new(":memory:"))
+            .plugin(LocalStoragePlugin::new(":memory:", "artifacts"))
             .build()
             .await
             .is_err()
@@ -270,7 +279,7 @@ async fn missing_storage_and_memory_paths_fail_build() {
 }
 
 struct FailFinalAppend {
-    inner: eliteforge_agent_memory::SqliteConversationStore,
+    inner: SqliteConversationStore,
     fail: Arc<std::sync::atomic::AtomicBool>,
 }
 struct FailFinalSession {
@@ -310,12 +319,12 @@ async fn terminal_resume_repairs_transcript_without_repeating_the_model() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sync.db");
     let state = Arc::new(
-        eliteforge_agent_state_sqlite::SqliteStateStore::open(&path, Default::default())
+        SqliteStateStore::open(&path, Default::default())
             .await
             .unwrap(),
     );
     let conversations =
-        eliteforge_agent_memory::SqliteConversationStore::open(&path, Default::default())
+        SqliteConversationStore::open(&path, Default::default())
             .await
             .unwrap();
     let seen = Arc::new(Mutex::new(vec![]));
