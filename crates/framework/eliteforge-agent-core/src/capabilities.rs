@@ -336,6 +336,18 @@ pub struct VideoGenerationRequest {
     pub prompt: String,
     pub seconds: u32,
     pub size: Option<String>,
+    #[serde(default)]
+    pub first_frame: Option<MediaContent>,
+    #[serde(default)]
+    pub last_frame: Option<MediaContent>,
+    #[serde(default)]
+    pub reference_images: Vec<MediaContent>,
+    #[serde(default)]
+    pub reference_videos: Vec<MediaContent>,
+    #[serde(default)]
+    pub reference_audios: Vec<MediaContent>,
+    #[serde(default)]
+    pub provider_options: BTreeMap<String, serde_json::Value>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ModelJobStatus {
