@@ -311,11 +311,15 @@ pub trait ImageGenerationModel: Send + Sync {
         if job.status == ModelJobStatus::Completed {
             Ok(job.clone())
         } else {
-            Err(ModelError::Fatal("image job querying is unsupported".into()))
+            Err(ModelError::Fatal(
+                "image job querying is unsupported".into(),
+            ))
         }
     }
     async fn cancel(&self, _job: &ImageJob) -> Result<(), ModelError> {
-        Err(ModelError::Fatal("image cancellation is unsupported".into()))
+        Err(ModelError::Fatal(
+            "image cancellation is unsupported".into(),
+        ))
     }
 }
 
@@ -820,9 +824,10 @@ impl<T: ?Sized> CapabilityCatalog<T> {
             .or(self.default.as_ref())
         {
             let binding = self.bindings.get(model).ok_or_else(|| {
-                AgentError::InvalidConfiguration(
-                    "selected model is not registered for this operation".into(),
-                )
+                AgentError::Model(ModelError::Unavailable(format!(
+                    "{}/{}",
+                    model.connection, model.model
+                )))
             })?;
             if !accepts(&binding) {
                 return Err(AgentError::InvalidConfiguration(
