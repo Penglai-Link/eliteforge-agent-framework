@@ -1,8 +1,8 @@
 [package]
-name = "eliteforge-agent-official-plugin-model-external"
+name = "eliteforge-agent-official-plugin-agent-external"
 version.workspace = true
 edition.workspace = true
-description = "Framework-owned external Agent CLI and JSON bridge transports"
+description = "External Agent CLI and JSON bridge transports"
 
 [dependencies]
 eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
@@ -10,7 +10,7 @@ eliteforge-agent-official-plugin-tools-local = { path = "../../tool/eliteforge-a
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["io-util", "process"] }
+tokio = { workspace = true, features = ["io-util", "net", "process", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 [dev-dependencies]

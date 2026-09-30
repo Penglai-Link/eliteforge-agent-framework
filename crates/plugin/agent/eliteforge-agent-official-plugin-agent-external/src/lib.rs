@@ -1,11 +1,11 @@
-//! Native external-Agent transports. The enclosing Framework run owns the
-//! invocation future; cancelling it releases CLI readers and process groups.
-//! Hosts supply authorized configuration and product prompt/context projections.
+//! External Agent transports. A Framework run owns the invocation future;
+//! dropping it stops local waiting and terminates CLI process groups.
+//! The external runtime owns its session, tools, approvals, and checkpoints.
 mod bridge;
 mod cli;
-mod stage;
 pub use bridge::JsonAgentBridge;
-pub use stage::*;
+mod adapter;
+pub use adapter::*;
 mod output;
 pub use cli::ExternalCli;
 use serde::{Deserialize, Serialize};
@@ -36,28 +36,65 @@ pub struct ExternalAgentResult {
     pub output: String,
     pub usage: Option<ExternalAgentUsage>,
     pub session_id: Option<String>,
+    pub run_id: Option<String>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalAgentEventKind {
     Text,
     ReasoningSummary,
+    ToolObserved,
+    ApprovalObserved,
+    Status,
+    SessionObserved,
 }
 #[derive(Debug, Clone)]
 pub struct ExternalAgentEvent {
     pub kind: ExternalAgentEventKind,
     pub delta: String,
+    /// Selected, non-authoritative transport metadata. Never drives Framework tools.
+    pub detail: Option<serde_json::Value>,
 }
 impl ExternalAgentEvent {
     pub fn text_delta(delta: impl Into<String>) -> Self {
         Self {
             kind: ExternalAgentEventKind::Text,
             delta: delta.into(),
+            detail: None,
         }
     }
     pub fn reasoning_summary_delta(delta: impl Into<String>) -> Self {
         Self {
             kind: ExternalAgentEventKind::ReasoningSummary,
             delta: delta.into(),
+            detail: None,
+        }
+    }
+    pub fn tool_observed(name: impl Into<String>, detail: serde_json::Value) -> Self {
+        Self {
+            kind: ExternalAgentEventKind::ToolObserved,
+            delta: name.into(),
+            detail: Some(detail),
+        }
+    }
+    pub fn approval_observed(detail: serde_json::Value) -> Self {
+        Self {
+            kind: ExternalAgentEventKind::ApprovalObserved,
+            delta: "approval".into(),
+            detail: Some(detail),
+        }
+    }
+    pub fn status(status: impl Into<String>) -> Self {
+        Self {
+            kind: ExternalAgentEventKind::Status,
+            delta: status.into(),
+            detail: None,
+        }
+    }
+    pub fn session_observed(session_id: impl Into<String>) -> Self {
+        Self {
+            kind: ExternalAgentEventKind::SessionObserved,
+            delta: session_id.into(),
+            detail: None,
         }
     }
 }

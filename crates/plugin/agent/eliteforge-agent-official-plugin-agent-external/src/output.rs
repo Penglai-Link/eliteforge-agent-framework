@@ -27,10 +27,17 @@ pub(super) fn parse_stream_line(
     line: &str,
     parsed: &mut ParsedSystemAgentOutput,
 ) -> Vec<ModelStreamEvent> {
-    match kind {
+    let previous_session = parsed.system_agent_session_id.clone();
+    let mut events = match kind {
         SystemAgentCliKind::Codex => parse_codex_stdout_line(line, parsed),
         SystemAgentCliKind::OpenCode => parse_opencode_stdout_line(line, parsed),
+    };
+    if previous_session.is_none()
+        && let Some(session_id) = parsed.system_agent_session_id.as_ref()
+    {
+        events.insert(0, ModelStreamEvent::session_observed(session_id.clone()));
     }
+    events
 }
 
 fn parse_codex_stdout_line(
@@ -42,6 +49,45 @@ fn parse_codex_stdout_line(
     };
     if parsed.system_agent_session_id.is_none() {
         parsed.system_agent_session_id = codex_session_id(&value);
+    }
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if event_type.starts_with("approval.")
+        || value
+            .get("item")
+            .and_then(|item| item.get("type"))
+            .and_then(Value::as_str)
+            == Some("approval_request")
+    {
+        return vec![ModelStreamEvent::approval_observed(observation_detail(
+            &value,
+        ))];
+    }
+    if matches!(
+        event_type,
+        "item.started" | "item.updated" | "item.completed"
+    ) && let Some(item) = value.get("item")
+        && let Some(item_type) = item.get("type").and_then(Value::as_str)
+        && matches!(
+            item_type,
+            "command_execution"
+                | "mcp_tool_call"
+                | "web_search"
+                | "file_change"
+                | "function_call"
+                | "tool_call"
+        )
+    {
+        let name = item
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(item_type);
+        return vec![ModelStreamEvent::tool_observed(
+            name,
+            observation_detail(&value),
+        )];
     }
     if value.get("type").and_then(Value::as_str) == Some("item.completed")
         && value
@@ -122,6 +168,12 @@ fn parse_codex_stdout_line(
     {
         return vec![ModelStreamEvent::text_delta(delta)];
     }
+    if matches!(
+        event_type,
+        "turn.started" | "turn.completed" | "turn.failed" | "error"
+    ) {
+        return vec![ModelStreamEvent::status(event_type)];
+    }
     Vec::new()
 }
 
@@ -135,7 +187,19 @@ fn parse_opencode_stdout_line(
     if parsed.system_agent_session_id.is_none() {
         parsed.system_agent_session_id = opencode_session_id(&value);
     }
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if event_type.starts_with("permission.") || event_type.starts_with("approval.") {
+        return vec![ModelStreamEvent::approval_observed(observation_detail(
+            &value,
+        ))];
+    }
     let mut events = Vec::new();
+    if matches!(event_type, "step_start" | "step_finish" | "error") {
+        events.push(ModelStreamEvent::status(event_type));
+    }
     if value.get("type").and_then(Value::as_str) == Some("text")
         && let Some(text) = value
             .get("part")
@@ -154,9 +218,15 @@ fn parse_opencode_stdout_line(
         events.push(ModelStreamEvent::reasoning_summary_delta(text.to_string()));
     }
     if value.get("type").and_then(Value::as_str) == Some("tool_use")
-        && let Some(summary) = opencode_tool_use_summary(&value)
+        && let Some(name) = value
+            .get("part")
+            .and_then(|part| part.get("tool"))
+            .and_then(Value::as_str)
     {
-        events.push(ModelStreamEvent::reasoning_summary_delta(summary));
+        events.push(ModelStreamEvent::tool_observed(
+            name,
+            observation_detail(&value),
+        ));
     }
     if value.get("type").and_then(Value::as_str) == Some("step_finish")
         && let Some(tokens) = value.get("part").and_then(|part| part.get("tokens"))
@@ -187,32 +257,25 @@ fn parse_opencode_stdout_line(
     events
 }
 
-fn opencode_tool_use_summary(value: &Value) -> Option<String> {
-    let part = value.get("part")?;
-    let tool_name = part.get("tool").and_then(Value::as_str).map(str::trim)?;
-    if tool_name.is_empty() {
-        return None;
+fn observation_detail(value: &Value) -> Value {
+    let item = value.get("item").or_else(|| value.get("part"));
+    let mut detail = serde_json::Map::new();
+    for (key, source) in [
+        ("event", value.get("type")),
+        ("id", item.and_then(|item| item.get("id"))),
+        ("type", item.and_then(|item| item.get("type"))),
+        (
+            "status",
+            item.and_then(|item| item.get("state"))
+                .and_then(|state| state.get("status"))
+                .or_else(|| item.and_then(|item| item.get("status"))),
+        ),
+    ] {
+        if let Some(text) = source.and_then(Value::as_str) {
+            detail.insert(key.into(), Value::String(text.to_owned()));
+        }
     }
-    let status = part
-        .get("state")
-        .and_then(|state| state.get("status"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("running");
-
-    let mut summary = format!("tool {tool_name} {status}");
-    if let Some(title) = part
-        .get("state")
-        .and_then(|state| state.get("title"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        summary.push_str(": ");
-        summary.push_str(title);
-    }
-    Some(summary)
+    Value::Object(detail)
 }
 
 fn parse_json_line(line: &str) -> Option<Value> {
@@ -313,9 +376,10 @@ mod tests {
             &mut parsed,
         );
         assert_eq!(parsed.system_agent_session_id.as_deref(), Some("ses-123"));
-        assert_eq!(reasoning.len(), 1);
-        assert_eq!(reasoning[0].kind, ModelStreamEventKind::ReasoningSummary);
-        assert_eq!(reasoning[0].delta, "Thinking...");
+        assert_eq!(reasoning.len(), 2);
+        assert_eq!(reasoning[0].kind, ModelStreamEventKind::SessionObserved);
+        assert_eq!(reasoning[1].kind, ModelStreamEventKind::ReasoningSummary);
+        assert_eq!(reasoning[1].delta, "Thinking...");
 
         let text = parse_stream_line(
             SystemAgentCliKind::OpenCode,
@@ -333,8 +397,9 @@ mod tests {
             &mut parsed,
         );
         assert_eq!(tool_use.len(), 1);
-        assert_eq!(tool_use[0].kind, ModelStreamEventKind::ReasoningSummary);
-        assert_eq!(tool_use[0].delta, "tool glob completed");
+        assert_eq!(tool_use[0].kind, ModelStreamEventKind::ToolObserved);
+        assert_eq!(tool_use[0].delta, "glob");
+        assert_eq!(tool_use[0].detail.as_ref().unwrap()["status"], "completed");
     }
 
     #[test]
@@ -351,5 +416,26 @@ mod tests {
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 3);
         assert_eq!(usage.total_tokens, 13);
+    }
+
+    #[test]
+    fn tool_and_approval_are_observations_not_reasoning() {
+        let mut parsed = ParsedSystemAgentOutput::default();
+        let tool = parse_stream_line(
+            SystemAgentCliKind::Codex,
+            r#"{"type":"item.started","item":{"id":"tool-1","type":"command_execution","command":"secret"}}"#,
+            &mut parsed,
+        );
+        assert_eq!(tool[0].kind, ModelStreamEventKind::ToolObserved);
+        assert_eq!(tool[0].detail.as_ref().unwrap()["id"], "tool-1");
+        assert!(tool[0].detail.as_ref().unwrap().get("command").is_none());
+
+        let approval = parse_stream_line(
+            SystemAgentCliKind::OpenCode,
+            r#"{"type":"permission.asked","part":{"id":"approval-1","prompt":"secret"}}"#,
+            &mut parsed,
+        );
+        assert_eq!(approval[0].kind, ModelStreamEventKind::ApprovalObserved);
+        assert!(approval[0].detail.as_ref().unwrap().get("prompt").is_none());
     }
 }

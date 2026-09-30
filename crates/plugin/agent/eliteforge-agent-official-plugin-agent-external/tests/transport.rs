@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use eliteforge_agent_official_plugin_model_external::*;
+use eliteforge_agent_official_plugin_agent_external::*;
 use std::{
     os::unix::fs::PermissionsExt,
     sync::{Arc, Mutex},
