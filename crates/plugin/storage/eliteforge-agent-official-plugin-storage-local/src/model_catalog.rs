@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use eliteforge_agent_core::{ModelCatalogSnapshot, ModelCatalogStore, ModelError};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
-use tokio_rusqlite::{Connection, rusqlite::{self, OptionalExtension, params}};
+use tokio_rusqlite::{
+    Connection,
+    rusqlite::{self, OptionalExtension, params},
+};
 
 const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -20,7 +23,9 @@ fn error(_: impl std::fmt::Display) -> ModelError {
 
 fn validate_scope(scope: &str) -> Result<(), ModelError> {
     if scope.trim().is_empty() || scope.len() > 512 {
-        return Err(ModelError::Fatal("invalid model catalog account scope".into()));
+        return Err(ModelError::Fatal(
+            "invalid model catalog account scope".into(),
+        ));
     }
     Ok(())
 }
@@ -28,17 +33,24 @@ fn validate_scope(scope: &str) -> Result<(), ModelError> {
 impl SqliteModelCatalogStore {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, ModelError> {
         let connection = Connection::open(path).await.map_err(error)?;
-        connection.call(|c| -> Result<(), ModelError> {
-            c.busy_timeout(Duration::from_secs(5)).map_err(error)?;
-            c.execute_batch(
-                "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+        connection
+            .call(|c| -> Result<(), ModelError> {
+                c.busy_timeout(Duration::from_secs(5)).map_err(error)?;
+                c.execute_batch(
+                    "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
                  CREATE TABLE IF NOT EXISTS model_catalog_snapshots (
                      account_scope TEXT PRIMARY KEY, revision INTEGER NOT NULL,
                      synced_at_unix_ms INTEGER NOT NULL, snapshot TEXT NOT NULL
-                 );"
-            ).map_err(error)
-        }).await.map_err(error)?;
-        Ok(Self { connection, admission: Arc::new(Semaphore::new(64)) })
+                 );",
+                )
+                .map_err(error)
+            })
+            .await
+            .map_err(error)?;
+        Ok(Self {
+            connection,
+            admission: Arc::new(Semaphore::new(64)),
+        })
     }
 
     pub async fn close(&self) -> Result<(), ModelError> {
@@ -50,14 +62,22 @@ impl SqliteModelCatalogStore {
         &self,
         task: impl FnOnce(&mut rusqlite::Connection) -> Result<T, ModelError> + Send + 'static,
     ) -> Result<T, ModelError> {
-        let permit = self.admission.clone().acquire_owned().await.map_err(error)?;
-        self.connection.call(move |c| {
-            let _permit = permit;
-            task(c)
-        }).await.map_err(|failure| match failure {
-            tokio_rusqlite::Error::Error(error) => error,
-            _ => error("worker"),
-        })
+        let permit = self
+            .admission
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(error)?;
+        self.connection
+            .call(move |c| {
+                let _permit = permit;
+                task(c)
+            })
+            .await
+            .map_err(|failure| match failure {
+                tokio_rusqlite::Error::Error(error) => error,
+                _ => error("worker"),
+            })
     }
 }
 
@@ -67,13 +87,16 @@ impl ModelCatalogStore for SqliteModelCatalogStore {
         validate_scope(account_scope)?;
         let scope = account_scope.to_owned();
         self.work(move |c| {
-            let row: Option<(u64, u64, String)> = c.query_row(
-                "SELECT revision,synced_at_unix_ms,snapshot
+            let row: Option<(u64, u64, String)> = c
+                .query_row(
+                    "SELECT revision,synced_at_unix_ms,snapshot
                  FROM model_catalog_snapshots WHERE account_scope=?1
                    AND length(CAST(snapshot AS BLOB))<=?2",
-                params![scope, MAX_SNAPSHOT_BYTES],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            ).optional().map_err(error)?;
+                    params![scope, MAX_SNAPSHOT_BYTES],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(error)?;
             let Some((revision, synced_at_unix_ms, encoded)) = row else {
                 return Ok(None);
             };
@@ -83,10 +106,13 @@ impl ModelCatalogStore for SqliteModelCatalogStore {
                 || snapshot.revision != revision
                 || snapshot.synced_at_unix_ms != synced_at_unix_ms
             {
-                return Err(ModelError::Fatal("stored model catalog identity mismatch".into()));
+                return Err(ModelError::Fatal(
+                    "stored model catalog identity mismatch".into(),
+                ));
             }
             Ok(Some(snapshot))
-        }).await
+        })
+        .await
     }
 
     async fn save(&self, snapshot: &ModelCatalogSnapshot) -> Result<(), ModelError> {
@@ -98,7 +124,9 @@ impl ModelCatalogStore for SqliteModelCatalogStore {
         let encoded = serde_json::to_string(snapshot)
             .map_err(|_| ModelError::Fatal("model catalog cannot be serialized".into()))?;
         if encoded.len() > MAX_SNAPSHOT_BYTES {
-            return Err(ModelError::Fatal("model catalog exceeds storage limit".into()));
+            return Err(ModelError::Fatal(
+                "model catalog exceeds storage limit".into(),
+            ));
         }
         let scope = snapshot.account_scope.clone();
         self.work(move |c| {
@@ -121,6 +149,18 @@ impl ModelCatalogStore for SqliteModelCatalogStore {
             ).map_err(error)?;
             tx.commit().map_err(error)
         }).await
+    }
+}
+
+#[async_trait]
+impl crate::extensions::SqliteExtensionHost for SqliteModelCatalogStore {
+    async fn prepare_extensions(
+        &self,
+        config: crate::extensions::ExtensionConfig,
+    ) -> Result<crate::extensions::ExtensionReport, crate::extensions::ExtensionError> {
+        self.work(move |connection| Ok(config.prepare_connection(connection)))
+            .await
+            .map_err(|_| crate::extensions::ExtensionError::Worker)?
     }
 }
 
@@ -154,6 +194,9 @@ mod tests {
             reopened.save(&stale).await,
             Err(ModelError::Unavailable(_))
         ));
-        assert_eq!(reopened.load("account-a").await.unwrap().unwrap().revision, 3);
+        assert_eq!(
+            reopened.load("account-a").await.unwrap().unwrap().revision,
+            3
+        );
     }
 }

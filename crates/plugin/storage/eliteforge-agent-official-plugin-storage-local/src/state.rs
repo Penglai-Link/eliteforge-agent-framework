@@ -386,10 +386,7 @@ impl crate::extensions::SqliteExtensionHost for SqliteStateStore {
     async fn prepare_extensions(
         &self,
         config: crate::extensions::ExtensionConfig,
-    ) -> Result<
-        crate::extensions::ExtensionReport,
-        crate::extensions::ExtensionError,
-    > {
+    ) -> Result<crate::extensions::ExtensionReport, crate::extensions::ExtensionError> {
         self.execute(move |connection| Ok(config.prepare_connection(connection)))
             .await
             .map_err(|_| crate::extensions::ExtensionError::Worker)?

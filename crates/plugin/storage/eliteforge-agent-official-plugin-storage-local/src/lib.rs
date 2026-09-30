@@ -26,12 +26,12 @@ pub use operations::*;
 pub use state::{SqliteExecutionPlugin, SqliteOptions, SqliteStateStore};
 pub use summary::{SqliteSummaryStore, SummaryStoreOptions};
 
-pub use eliteforge_agent_context_contracts::{
-    ArtifactChunk, ArtifactError, ArtifactId, ArtifactMetadata, ArtifactStore,
-    ArtifactStorePlugin, ArtifactStoreService, ConversationSummary, SummaryKey, SummaryStore,
-    SummaryStorePlugin, SummaryStoreService, VersionedSummary,
-};
 use async_trait::async_trait;
+pub use eliteforge_agent_context_contracts::{
+    ArtifactChunk, ArtifactError, ArtifactId, ArtifactMetadata, ArtifactStore, ArtifactStorePlugin,
+    ArtifactStoreService, ConversationSummary, SummaryKey, SummaryStore, SummaryStorePlugin,
+    SummaryStoreService, VersionedSummary,
+};
 use eliteforge_agent_core::*;
 use std::{path::PathBuf, sync::Arc};
 
@@ -101,16 +101,20 @@ impl Plugin for LocalStoragePlugin {
         let config = &self.config;
         let path = config.database_path.to_string_lossy();
         if path.is_empty() || path == ":memory:" || path.starts_with("file:") {
-            return Err(install_error("local storage requires a SQLite filesystem path"));
+            return Err(install_error(
+                "local storage requires a SQLite filesystem path",
+            ));
         }
         if config.artifact_root.as_os_str().is_empty() {
-            return Err(install_error("local storage requires an artifact directory"));
+            return Err(install_error(
+                "local storage requires an artifact directory",
+            ));
         }
 
         // Check the directory capability first: a missing directory is an
         // installation error, and this plugin never creates one implicitly.
-        let artifact_files =
-            FileArtifactStore::open(&config.artifact_root, config.artifacts).map_err(install_error)?;
+        let artifact_files = FileArtifactStore::open(&config.artifact_root, config.artifacts)
+            .map_err(install_error)?;
         let mut reports = Vec::new();
 
         let state = Arc::new(
@@ -198,6 +202,15 @@ impl Plugin for LocalStoragePlugin {
         );
         let close = artifacts.clone();
         context.on_shutdown(move || async move { close.close().await.map_err(|e| e.to_string()) });
+        if let Some(extensions) = &config.extensions {
+            reports.push((
+                "artifacts".into(),
+                artifacts
+                    .prepare_extensions(extensions.clone())
+                    .await
+                    .map_err(install_error)?,
+            ));
+        }
         context.provide(ArtifactStoreService(artifacts.clone()))?;
         context.contribute_extension(artifacts as Arc<dyn ArtifactStore>)?;
 
@@ -208,6 +221,15 @@ impl Plugin for LocalStoragePlugin {
         );
         let close = catalog.clone();
         context.on_shutdown(move || async move { close.close().await.map_err(|e| e.to_string()) });
+        if let Some(extensions) = &config.extensions {
+            reports.push((
+                "model_catalog".into(),
+                catalog
+                    .prepare_extensions(extensions.clone())
+                    .await
+                    .map_err(install_error)?,
+            ));
+        }
         context.provide(ModelCatalogStoreService(catalog.clone()))?;
         context.contribute_extension(catalog as Arc<dyn ModelCatalogStore>)?;
         context.provide(SqliteCapabilitiesService(reports))
