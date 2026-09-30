@@ -102,6 +102,7 @@ impl ErrorReport {
 impl ModelError {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Unavailable(_) => "model_unavailable",
             Self::Indeterminate(_) => "model_indeterminate",
             Self::State(_) => "state",
             Self::Transient(_) => "transient",
