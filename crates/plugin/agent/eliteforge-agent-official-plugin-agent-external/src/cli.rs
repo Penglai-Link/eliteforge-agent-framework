@@ -7,9 +7,9 @@ use tokio::{
 
 use crate::output::{ParsedSystemAgentOutput, parse_complete_stdout, parse_stream_line};
 use crate::{
-    ExternalAgentEvent as ModelStreamEvent, ExternalAgentEventKind as ModelStreamEventKind,
-    ExternalAgentResult, ExternalAgentSink as ModelStreamSink,
-    ExternalCliKind as SystemAgentCliKind, ExternalCliRequest, TransportError,
+    ExternalAgentEvent as TransportEvent, ExternalAgentEventKind as TransportEventKind,
+    ExternalAgentResult, ExternalAgentSink as TransportSink, ExternalCliKind as SystemAgentCliKind,
+    ExternalCliRequest, TransportError,
 };
 
 const STREAM_DELTA_CHUNK_CHARS: usize = 72;
@@ -37,7 +37,7 @@ impl ExternalCli {
     pub async fn invoke(
         &self,
         context: ExternalCliRequest,
-        sink: Option<ModelStreamSink>,
+        sink: Option<TransportSink>,
     ) -> Result<ExternalAgentResult, TransportError> {
         self.invoke_stream(context, sink.unwrap_or_else(|| std::sync::Arc::new(|_| {})))
             .await
@@ -121,7 +121,7 @@ impl ExternalCli {
     async fn invoke_stream(
         &self,
         context: ExternalCliRequest,
-        sink: ModelStreamSink,
+        sink: TransportSink,
     ) -> Result<ExternalAgentResult, TransportError> {
         let mut command = self.build_command(&context)?;
         command.kill_on_drop(true);
@@ -171,7 +171,7 @@ impl ExternalCli {
                 stream_output.stdout.push('\n');
                 let events = parse_stream_line(kind, line.as_str(), &mut stream_output.parsed);
                 for event in events {
-                    if event.kind == ModelStreamEventKind::Text {
+                    if event.kind == TransportEventKind::Text {
                         stream_output.emitted_text_delta = true;
                     }
                     sink_for_stdout(event);
@@ -238,7 +238,7 @@ impl ExternalCli {
             && !output.is_empty()
         {
             for chunk in split_stream_chunks(output.as_str(), STREAM_DELTA_CHUNK_CHARS) {
-                sink(ModelStreamEvent::text_delta(chunk));
+                sink(TransportEvent::text_delta(chunk));
             }
         }
 
@@ -270,6 +270,7 @@ impl ExternalCli {
             output: final_output,
             usage: parsed.token_usage,
             session_id: parsed.system_agent_session_id.or(context.session_id),
+            run_id: None,
         })
     }
 }
