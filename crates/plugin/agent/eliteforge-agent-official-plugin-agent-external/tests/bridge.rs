@@ -24,7 +24,7 @@ async fn dropping_wait_only_attempts_remote_cancel_with_a_known_run_id() {
         let cancel_count = cancel_count.clone();
         tokio::spawn(async move {
             loop {
-                let (mut stream, _) = listener.accept().await.unwrap();
+                let (stream, _) = listener.accept().await.unwrap();
                 let started = started.clone();
                 let cancelled = cancelled.clone();
                 let cancel_count = cancel_count.clone();
