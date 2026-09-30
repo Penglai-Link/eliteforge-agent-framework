@@ -308,10 +308,11 @@ impl ArtifactStore for LocalArtifactStore {
             return Err(ArtifactError::Cancelled);
         }
         let id = id.clone();
+        let deleted_id = id.clone();
         self.work(move |c| {
             if c.execute(
                 "DELETE FROM local_artifact_metadata WHERE id=?1",
-                [id.as_str()],
+                [deleted_id.as_str()],
             )
             .map_err(error)?
                 == 0
