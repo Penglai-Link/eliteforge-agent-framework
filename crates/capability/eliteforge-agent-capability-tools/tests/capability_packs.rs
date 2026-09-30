@@ -4,13 +4,21 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use eliteforge_agent_capability_tools::{
-    FileSystemToolsConfig, SystemCommandConfig, read_only_filesystem_pack, system_command_pack,
-    write_filesystem_pack,
+    FileSystemToolsConfig, LocalToolsConfig, McpConfig, McpToolsPlugin, McpTransport,
+    SystemCommandConfig, agent_collaboration_pack, human_interaction_pack, local_tools_pack,
+    mcp_tools_pack, read_only_filesystem_pack, system_command_pack, write_filesystem_pack,
 };
 use eliteforge_agent_core::*;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_test_support::TestConversationStore;
 use serde_json::{Value, json};
+
+fn plugin_ids(pack: &impl CapabilityPack) -> Vec<String> {
+    pack.plugins()
+        .iter()
+        .map(|plugin| plugin.id().to_owned())
+        .collect()
+}
 
 fn builder(agent_loop: impl AgentLoop + 'static) -> AgentBuilder {
     AgentBuilder::new()
@@ -22,16 +30,62 @@ fn builder(agent_loop: impl AgentLoop + 'static) -> AgentBuilder {
 }
 
 fn completed() -> RunResult {
-    RunResult {
-        output: String::new(),
-        content: Content::default(),
-        structured: None,
-        status: RunStatus::Completed,
-        interactions: Vec::new(),
-        usage: Usage::default(),
-        steps: 0,
-        tool_calls: 0,
+    // The external Agent runtime adds an optional session reference to the
+    // shared result. Keeping this fixture wire-shaped works across that API
+    // addition without changing what the tool tests observe.
+    serde_json::from_value(json!({
+        "output": "",
+        "content": Content::default(),
+        "structured": null,
+        "status": RunStatus::Completed,
+        "interactions": [],
+        "usage": Usage::default(),
+        "steps": 0,
+        "tool_calls": 0,
+        "external_session": null,
+    }))
+    .expect("completed result should deserialize")
+}
+
+struct ListToolsLoop(Arc<Mutex<Vec<String>>>);
+
+#[async_trait]
+impl AgentLoop for ListToolsLoop {
+    async fn run(
+        &self,
+        _: &RunRequest,
+        context: &RunContext,
+        services: &AgentServices,
+    ) -> Result<RunResult, AgentError> {
+        let mut names = Vec::new();
+        for provider in &services.tools {
+            names.extend(
+                provider
+                    .lease(context)
+                    .await?
+                    .tools
+                    .into_iter()
+                    .map(|binding| binding.descriptor.call_name),
+            );
+        }
+        *self.0.lock().unwrap() = names;
+        Ok(completed())
     }
+}
+
+async fn listed_tools(pack: impl CapabilityPack + 'static) -> Vec<String> {
+    let names = Arc::new(Mutex::new(Vec::new()));
+    let agent = builder(ListToolsLoop(names.clone()))
+        .capability_pack(pack)
+        .build()
+        .await
+        .expect("selected domain pack should build");
+    agent
+        .run(RunRequest::new("tool-domain", "list"))
+        .await
+        .unwrap();
+    assert!(agent.close().await.is_success());
+    names.lock().unwrap().clone()
 }
 
 struct InvokeToolLoop {
@@ -397,6 +451,133 @@ async fn readonly_and_write_filesystem_packs_operate_inside_the_configured_direc
         std::fs::read_to_string(directory.path().join("nested/generated.txt")).unwrap(),
         "done"
     );
+}
+
+#[tokio::test]
+async fn local_domain_pack_combines_selected_tools_without_duplicate_providers() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("note.txt"), "from local pack").unwrap();
+    let config = FileSystemToolsConfig::new(directory.path());
+    let selection = || {
+        local_tools_pack(
+            LocalToolsConfig::new()
+                .read_only_filesystem(config.clone())
+                .write_filesystem(config.clone())
+                .system_commands(SystemCommandConfig::restricted(["git"])),
+        )
+    };
+    let tools = listed_tools(selection()).await;
+    assert_eq!(
+        tools.iter().filter(|name| *name == "fs_read_text").count(),
+        1
+    );
+    assert_eq!(
+        tools.iter().filter(|name| *name == "fs_write_text").count(),
+        1
+    );
+    assert_eq!(
+        tools.iter().filter(|name| *name == "system_exec").count(),
+        1
+    );
+    assert!(selection().rebuildable());
+    let read = invoke(selection(), "fs_read_text", json!({"path":"note.txt"})).await;
+    assert_eq!(read["content"], "from local pack");
+}
+
+#[tokio::test]
+async fn human_and_collaboration_domain_packs_keep_official_tool_descriptors() {
+    assert_eq!(plugin_ids(&human_interaction_pack()), ["tools.human"]);
+    assert_eq!(plugin_ids(&agent_collaboration_pack()), ["tools.agents"]);
+    assert!(human_interaction_pack().rebuildable());
+    assert!(agent_collaboration_pack().rebuildable());
+
+    let names = listed_tools(
+        CapabilityPackBuilder::new("test.tool-domains", ())
+            .include(human_interaction_pack())
+            .include(agent_collaboration_pack()),
+    )
+    .await;
+    assert!(names.contains(&"ask_user".to_owned()));
+    assert!(names.contains(&"agent_spawn".to_owned()));
+    assert!(names.contains(&"thread_create".to_owned()));
+}
+
+#[tokio::test]
+async fn mcp_domain_pack_keeps_one_empty_default_and_multiple_named_servers() {
+    let empty = mcp_tools_pack(Vec::<McpToolsPlugin>::new());
+    assert_eq!(plugin_ids(&empty), ["tools.mcp"]);
+    assert!(empty.rebuildable());
+    assert!(listed_tools(empty).await.is_empty());
+
+    let server = |id: &str| {
+        McpToolsPlugin::new(
+            id,
+            McpConfig::new(
+                id,
+                McpTransport::StreamableHttp {
+                    url: "http://127.0.0.1:1/mcp".into(),
+                    headers: Default::default(),
+                },
+            ),
+        )
+    };
+    let named = mcp_tools_pack([server("mcp.first"), server("mcp.second")]);
+    assert_eq!(plugin_ids(&named), ["mcp.first", "mcp.second"]);
+    assert!(named.rebuildable());
+}
+
+#[tokio::test]
+async fn mcp_domain_pack_rejects_duplicate_server_plugin_ids_before_connection() {
+    let result = builder(ListToolsLoop(Arc::new(Mutex::new(Vec::new()))))
+        .capability_pack(mcp_tools_pack([
+            McpToolsPlugin::default(),
+            McpToolsPlugin::default(),
+        ]))
+        .build()
+        .await;
+    assert!(matches!(
+        result,
+        Err(AgentError::Plugin(PluginError::DuplicatePluginId { id })) if id == "tools.mcp"
+    ));
+}
+
+#[cfg(feature = "web")]
+#[tokio::test]
+async fn web_domain_pack_retains_host_backend_and_exposes_only_selected_tools() {
+    use eliteforge_agent_capability_tools::{WebToolsPlugin, web_tools_pack};
+    use eliteforge_agent_official_plugin_tools_web::WebFetchConfig;
+
+    let pack =
+        web_tools_pack(WebToolsPlugin::new().fetch(WebFetchConfig::restricted(["127.0.0.1"])));
+    assert!(!pack.rebuildable());
+    assert_eq!(plugin_ids(&pack), ["framework.web.tools"]);
+    assert_eq!(listed_tools(pack).await, ["web_fetch"]);
+}
+
+#[cfg(feature = "media")]
+#[tokio::test]
+async fn media_domain_pack_recreates_reader_and_exposes_image_and_pdf_tools() {
+    use eliteforge_agent_capability_tools::{MediaToolsConfig, media_tools_pack};
+
+    let root = tempfile::tempdir().unwrap();
+    let pack = media_tools_pack(MediaToolsConfig::new(root.path()));
+    assert!(pack.rebuildable());
+    assert_eq!(plugin_ids(&pack), ["framework.media.tools"]);
+    assert_eq!(
+        listed_tools(pack).await,
+        ["media_read_image", "media_read_pdf"]
+    );
+}
+
+#[cfg(feature = "discovery")]
+#[tokio::test]
+async fn discovery_domain_pack_retains_host_providers_and_exposes_search() {
+    use eliteforge_agent_capability_tools::{ToolDiscoveryPlugin, tool_discovery_pack};
+
+    let pack = tool_discovery_pack(ToolDiscoveryPlugin::new());
+    assert!(!pack.rebuildable());
+    assert_eq!(plugin_ids(&pack), ["framework.tools.discovery"]);
+    assert_eq!(listed_tools(pack).await, ["tool_search"]);
 }
 
 #[tokio::test]
