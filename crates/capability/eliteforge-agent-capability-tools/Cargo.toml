@@ -2,11 +2,23 @@
 name = "eliteforge-agent-capability-tools"
 version.workspace = true
 edition.workspace = true
-description = "Explicit capability-pack assembly for official local tools"
+description = "Domain capability-pack assembly for official Agent tools"
+
+[features]
+default = []
+web = ["dep:eliteforge-agent-official-plugin-tools-web"]
+media = ["dep:eliteforge-agent-official-plugin-tools-media"]
+discovery = ["dep:eliteforge-agent-official-plugin-tools-discovery"]
 
 [dependencies]
 eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core", version = "0.1.0" }
 eliteforge-agent-official-plugin-tools-local = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-local", version = "0.1.0" }
+eliteforge-agent-official-plugin-tools-agents = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-agents", version = "0.1.0" }
+eliteforge-agent-official-plugin-tools-human = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-human", version = "0.1.0" }
+eliteforge-agent-official-plugin-tools-mcp = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-mcp", version = "0.1.0" }
+eliteforge-agent-official-plugin-tools-web = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-web", version = "0.1.0", optional = true }
+eliteforge-agent-official-plugin-tools-media = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-media", version = "0.1.0", optional = true }
+eliteforge-agent-official-plugin-tools-discovery = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-discovery", version = "0.1.0", optional = true }
 
 [dev-dependencies]
 eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
