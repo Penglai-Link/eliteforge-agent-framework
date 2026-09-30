@@ -3,9 +3,17 @@
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_model_genai::*;
 use std::sync::Arc;
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let artifact_root = std::env::var("ARTIFACT_ROOT").unwrap_or_else(|_| "agent-artifacts".into());
+    let mut artifacts = std::fs::DirBuilder::new();
+    artifacts.recursive(true);
+    #[cfg(unix)]
+    artifacts.mode(0o700);
+    artifacts.create(&artifact_root)?;
     let endpoint = std::env::var("MODEL_ENDPOINT")?;
     let planner = std::env::var("PLANNER_MODEL")?;
     let executor = std::env::var("EXECUTOR_MODEL")?;
@@ -45,8 +53,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ));
     let agent = AgentBuilder::new()
         .plugin(
-            eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new(
+            eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin::new(
                 std::env::var("STATE_DB").unwrap_or_else(|_| "agent.sqlite".into()),
+                artifact_root,
             ),
         )
         .plugin(AgentLoopPlugin::new(WorkflowLoop::new(

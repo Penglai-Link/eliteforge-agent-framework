@@ -1,9 +1,11 @@
 //! Connects to a real HTTP MCP service only when explicitly run.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
+use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
 use eliteforge_agent_official_plugin_tools_mcp::*;
 use std::collections::HashMap;
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 
 struct InspectOnly;
 #[async_trait]
@@ -22,6 +24,11 @@ impl AgentLoop for InspectOnly {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut artifacts = std::fs::DirBuilder::new();
+    artifacts.recursive(true);
+    #[cfg(unix)]
+    artifacts.mode(0o700);
+    artifacts.create("agent-artifacts")?;
     let url = std::env::var("MCP_URL")?;
     let mut headers = HashMap::new();
     if let Ok(token) = std::env::var("MCP_TOKEN") {
@@ -31,7 +38,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let agent = AgentBuilder::new()
-        .plugin(SqliteStoragePlugin::new("agent.sqlite"))
+        .plugin(LocalStoragePlugin::new("agent.sqlite", "agent-artifacts"))
         .plugin(AgentLoopPlugin::new(InspectOnly))
         .plugin(McpToolsPlugin::new(
             "service",

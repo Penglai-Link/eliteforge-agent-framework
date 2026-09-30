@@ -94,8 +94,9 @@ impl AgentLoop for Inspect {
 }
 #[tokio::test]
 async fn mcp_only_package_owns_an_extra_child_and_unselected_mcp_stays_inert() {
-    use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
+    use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let directory = tempfile::tempdir().unwrap();
+    let artifacts = tempfile::tempdir_in(directory.path()).unwrap();
     let manager = CapabilityPackManager::new(directory.path().join("store")).unwrap();
     let source = tempfile::tempdir().unwrap();
     let executable = if cfg!(windows) {
@@ -131,7 +132,7 @@ async fn mcp_only_package_owns_an_extra_child_and_unselected_mcp_stays_inert() {
             .default_models(false)
             .capability_pack(pack)
             .plugin_factory(ConfiguredPluginFactory::from_config(
-                SqliteStoragePlugin::new(&storage),
+                LocalStoragePlugin::new(&storage, artifacts.path()),
             ))
             .plugin_factory(ConfiguredPluginFactory::new(
                 "framework.loop",
@@ -1212,14 +1213,16 @@ impl AgentLoop for StaticSkillLoop {
             usage: Usage::default(),
             steps: 1,
             tool_calls: 1,
+            external_session: None,
         })
     }
 }
 #[tokio::test]
 async fn static_skills_and_resources_package_uses_native_runtime_without_a_backend() {
     use eliteforge_agent_official_plugin_skills::SkillsPlugin;
-    use eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin;
+    use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let directory = tempfile::tempdir().unwrap();
+    let artifacts = tempfile::tempdir_in(directory.path()).unwrap();
     let source = tempfile::tempdir().unwrap();
     let manager = CapabilityPackManager::new(directory.path().join("store")).unwrap();
     std::fs::create_dir_all(source.path().join("skills/pack-skill")).unwrap();
@@ -1246,7 +1249,7 @@ async fn static_skills_and_resources_package_uses_native_runtime_without_a_backe
             .default_models(false)
             .capability_pack(pack)
             .plugin_factory(ConfiguredPluginFactory::from_config(
-                SqliteStoragePlugin::new(directory.path().join("agent.db")),
+                LocalStoragePlugin::new(directory.path().join("agent.db"), artifacts.path()),
             ))
             .plugin_factory(ConfiguredPluginFactory::from_config(
                 SkillsPlugin::sources_only(),

@@ -3,7 +3,7 @@ use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_agui::{
     AgUiOptions, AgUiPlugin, AgUiStream, Event, EventType, ag_ui,
 };
-use eliteforge_agent_state_sqlite::{SqliteOptions, SqliteStateStore};
+use eliteforge_agent_official_plugin_storage_local::{SqliteOptions, SqliteStateStore};
 use eliteforge_agent_test_support::*;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -194,7 +194,8 @@ fn tools(count: Arc<AtomicUsize>, large: bool) -> ToolProviderPlugin {
 }
 #[tokio::test]
 async fn offloaded_tool_results_preserve_reference_and_tool_lifecycle() {
-    use eliteforge_agent_context::{FileArtifactLimits, FileArtifactStore, ToolOutputOffloader};
+    use eliteforge_agent_context::ToolOutputOffloader;
+    use eliteforge_agent_official_plugin_storage_local::{FileArtifactLimits, FileArtifactStore};
     let dir = tempfile::tempdir().unwrap();
     let store =
         Arc::new(FileArtifactStore::open(dir.path(), FileArtifactLimits::default()).unwrap());
@@ -547,6 +548,7 @@ impl AgentLoop for PresentationLoop {
             usage: Usage::default(),
             steps: 0,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }
@@ -677,6 +679,7 @@ impl AgentLoop for CollaborationPresentationLoop {
             usage: Usage::default(),
             steps: 0,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }
@@ -1207,6 +1210,7 @@ impl AgentLoop for AuxiliaryLoop {
             usage: context.usage(),
             steps: 0,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }
@@ -1305,6 +1309,7 @@ impl AgentLoop for ParallelModels {
             usage: context.usage(),
             steps: 2,
             tool_calls: 2,
+            external_session: None,
         })
     }
 }
@@ -1383,6 +1388,7 @@ impl AgentLoop for FinalAfterProgress {
             usage: Usage::default(),
             steps: 1,
             tool_calls: 0,
+            external_session: None,
         })
     }
 }

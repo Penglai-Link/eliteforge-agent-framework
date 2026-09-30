@@ -14,7 +14,6 @@ genai = "=0.7.0-beta.21"
 
 [dev-dependencies]
 eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../../storage/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-storage-local = { path = "../../storage/eliteforge-agent-official-plugin-storage-local" }
 eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }
-eliteforge-agent-state-sqlite = { path = "../../storage/eliteforge-agent-state-sqlite" }
 tokio = { workspace = true, features = ["net", "io-util"] }

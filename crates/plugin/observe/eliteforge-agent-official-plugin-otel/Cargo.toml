@@ -14,5 +14,5 @@ eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test
 tempfile = "3"
 futures.workspace = true
 tokio.workspace = true
-eliteforge-agent-state-sqlite = { path = "../../storage/eliteforge-agent-state-sqlite" }
+eliteforge-agent-official-plugin-storage-local = { path = "../../storage/eliteforge-agent-official-plugin-storage-local" }
 opentelemetry_sdk = { version = "=0.32.0", default-features = false, features = ["trace", "metrics", "testing"] }

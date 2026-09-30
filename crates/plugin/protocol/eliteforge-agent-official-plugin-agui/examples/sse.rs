@@ -2,6 +2,8 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_agui::{AgUiPlugin, AgUiStream};
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 
 struct DemoModel;
 #[async_trait]
@@ -21,10 +23,16 @@ impl ChatModel for DemoModel {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut artifacts = std::fs::DirBuilder::new();
+    artifacts.recursive(true);
+    #[cfg(unix)]
+    artifacts.mode(0o700);
+    artifacts.create("agent-artifacts")?;
     let agent = AgentBuilder::new()
         .plugin(
-            eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new(
+            eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin::new(
                 "agent.sqlite",
+                "agent-artifacts",
             ),
         )
         .plugin(ChatModelPlugin::new(DemoModel))

@@ -1,10 +1,14 @@
 //! An offline SDK example: chat streaming, storage and nested middleware callbacks.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_memory::SqliteConversationStore;
-use eliteforge_agent_state_sqlite::SqliteStateStore;
+use eliteforge_agent_official_plugin_storage_local::{
+    FileArtifactLimits, FileArtifactStore, SqliteConversationStore, SqliteLongTermMemory,
+    SqliteStateStore, SqliteSummaryStore,
+};
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 
 struct DemoChat(String);
 struct ToolResources;
@@ -127,7 +131,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut backend = TypedBackend::default();
     if selected.contains("demo.summaries") {
         let store = Arc::new(
-            eliteforge_agent_context::SqliteSummaryStore::open("summary.db", Default::default())
+            SqliteSummaryStore::open("summary.db", Default::default())
                 .await?,
         );
         backend.summary_store("demo.summaries", store.clone())?;
@@ -139,12 +143,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     if selected.contains("demo.artifacts") {
-        std::fs::create_dir_all("artifacts")?;
+        let mut artifacts = std::fs::DirBuilder::new();
+        artifacts.recursive(true);
+        #[cfg(unix)]
+        artifacts.mode(0o700);
+        artifacts.create("artifacts")?;
         backend.artifact_store(
             "demo.artifacts",
-            Arc::new(eliteforge_agent_context::FileArtifactStore::open(
+            Arc::new(FileArtifactStore::open(
                 "artifacts",
-                eliteforge_agent_context::FileArtifactLimits {
+                FileArtifactLimits {
                     max_artifact_bytes: 32 * 1024 * 1024,
                     ..Default::default()
                 },
@@ -169,7 +177,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         backend.long_term_memory(
             "demo.memory",
             Arc::new(
-                eliteforge_agent_memory::SqliteLongTermMemory::open(
+                SqliteLongTermMemory::open(
                     "memory.db",
                     Default::default(),
                 )
@@ -354,7 +362,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ctx.host_call("host.extension.invoke", request).await.is_ok() {
                 return Err(RpcFault::new("nested scope reset model-call allowance"));
             }
-            return Ok(RunResult { output: "quota preserved".into(), content: Content::from("quota preserved"), structured: None, interactions: vec![], status: RunStatus::Completed, usage: Default::default(), steps: 1, tool_calls: 0 });
+            return Ok(RunResult { output: "quota preserved".into(), content: Content::from("quota preserved"), structured: None, interactions: vec![], status: RunStatus::Completed, usage: Default::default(), steps: 1, tool_calls: 0, external_session: None });
         }
         if serde_json::from_value::<Content>(params["request"]["input"].clone()).is_ok_and(|input| input.text() == "remote-wait") || !params["resume"].is_null() {
             return remote_wait(params, ctx).await;
@@ -364,7 +372,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if ctx.host_call("host.extension.invoke",json!({"implementation":"demo.chat","operation":"generate","params":null})).await.is_ok(){return Err(RpcFault::new("undeclared implementation dependency was allowed"));}
         let response:ChatResponse=serde_json::from_value(ctx.host_call("host.model.invoke",json!({"model":ModelRef::new("demo","offline"),"request":ChatRequest{messages:vec![Message::user("nested")],tools:vec![],options:Default::default(),extensions:Default::default()},"stage":"plugin"})).await?).map_err(|e|RpcFault::new(e.to_string()))?;
         let _=params;
-        Ok(RunResult{output:response.content.text(),content:response.content,structured:None,interactions:vec![],status:RunStatus::Completed,usage:response.usage,steps:1,tool_calls:0})
+        Ok(RunResult{output:response.content.text(),content:response.content,structured:None,interactions:vec![],status:RunStatus::Completed,usage:response.usage,steps:1,tool_calls:0,external_session:None})
     })?;
     backend.method(
         "demo.custom",
@@ -487,5 +495,6 @@ async fn remote_wait(params: Value, ctx: BackendCallContext) -> Result<RunResult
         usage: Usage::default(),
         steps: 1,
         tool_calls: 0,
+        external_session: None,
     })
 }
