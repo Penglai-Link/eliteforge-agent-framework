@@ -10,6 +10,7 @@ pub mod context_preparation;
 pub mod conversation;
 pub mod dag;
 pub mod errors;
+pub mod external;
 pub mod hooks;
 pub mod interaction;
 pub mod long_term;
@@ -36,6 +37,7 @@ pub use eliteforge_agent_plugin_core::{
     PluginReadyContext,
 };
 pub use errors::*;
+pub use external::*;
 pub use hooks::*;
 pub use interaction::*;
 pub use long_term::*;

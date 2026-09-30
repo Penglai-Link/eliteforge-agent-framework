@@ -56,6 +56,7 @@ pub enum ModelOperation {
     SpeechRecognition,
     SpeechSynthesis,
     Realtime,
+    ContentDetection,
 }
 
 #[derive(Clone, Default)]
@@ -272,6 +273,10 @@ pub struct ImageGenerationRequest {
     pub prompt: String,
     pub size: Option<String>,
     pub count: u32,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub provider_options: BTreeMap<String, serde_json::Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageGenerationResponse {
@@ -286,6 +291,43 @@ pub trait ImageGenerationModel: Send + Sync {
         model: &str,
         request: ImageGenerationRequest,
     ) -> Result<ImageGenerationResponse, ModelError>;
+    async fn submit(
+        &self,
+        model: &str,
+        request: ImageGenerationRequest,
+    ) -> Result<ImageJob, ModelError> {
+        let response = self.generate(model, request).await?;
+        Ok(ImageJob {
+            model: response.model,
+            protocol: "custom".into(),
+            id: String::new(),
+            status: ModelJobStatus::Completed,
+            progress: Some(1.0),
+            images: response.images,
+            error: None,
+        })
+    }
+    async fn query(&self, job: &ImageJob) -> Result<ImageJob, ModelError> {
+        if job.status == ModelJobStatus::Completed {
+            Ok(job.clone())
+        } else {
+            Err(ModelError::Fatal("image job querying is unsupported".into()))
+        }
+    }
+    async fn cancel(&self, _job: &ImageJob) -> Result<(), ModelError> {
+        Err(ModelError::Fatal("image cancellation is unsupported".into()))
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageJob {
+    pub model: ModelRef,
+    pub protocol: String,
+    pub id: String,
+    pub status: ModelJobStatus,
+    pub progress: Option<f64>,
+    pub images: Vec<MediaContent>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,6 +344,26 @@ pub enum ModelJobStatus {
     Completed,
     Failed,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentDetectionRequest {
+    pub choice: ModelChoice,
+    pub content: Content,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentDetectionResponse {
+    pub model: ModelRef,
+    pub result: serde_json::Value,
+}
+#[crate::extension_point]
+#[async_trait]
+pub trait ContentDetectionModel: Send + Sync {
+    async fn detect(
+        &self,
+        model: &str,
+        request: ContentDetectionRequest,
+    ) -> Result<ContentDetectionResponse, ModelError>;
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoJob {
@@ -473,6 +535,9 @@ pub trait ModelOperations: Send + Sync {
         &self,
         request: ImageGenerationRequest,
     ) -> Result<ImageGenerationResponse, AgentError>;
+    async fn submit_image(&self, request: ImageGenerationRequest) -> Result<ImageJob, AgentError>;
+    async fn query_image(&self, job: &ImageJob) -> Result<ImageJob, AgentError>;
+    async fn cancel_image(&self, job: &ImageJob) -> Result<(), AgentError>;
     async fn submit_video(&self, request: VideoGenerationRequest) -> Result<VideoJob, AgentError>;
     async fn query_video(&self, job: &VideoJob) -> Result<VideoJob, AgentError>;
     async fn cancel_video(&self, job: &VideoJob) -> Result<(), AgentError>;
@@ -488,6 +553,10 @@ pub trait ModelOperations: Send + Sync {
         &self,
         request: RealtimeRequest,
     ) -> Result<Arc<dyn RealtimeSession>, AgentError>;
+    async fn detect_content(
+        &self,
+        request: ContentDetectionRequest,
+    ) -> Result<ContentDetectionResponse, AgentError>;
 }
 
 /// An individual model/operation binding. Protocol names remain extensible.
@@ -535,12 +604,14 @@ registration!(VideoGenerationModel, [Text], [Video]);
 registration!(SpeechRecognitionModel, [Audio], [Text]);
 registration!(SpeechSynthesisModel, [Text], [Audio]);
 registration!(RealtimeModel, [Text, Audio], [Text, Audio]);
+registration!(ContentDetectionModel, [Text, Image], [Text]);
 pub type EmbeddingModelService = ModelRegistration<dyn EmbeddingModel>;
 pub type RerankModelService = ModelRegistration<dyn RerankModel>;
 pub type ImageGenerationModelService = ModelRegistration<dyn ImageGenerationModel>;
 pub type VideoGenerationModelService = ModelRegistration<dyn VideoGenerationModel>;
 pub type SpeechRecognitionModelService = ModelRegistration<dyn SpeechRecognitionModel>;
 pub type SpeechSynthesisModelService = ModelRegistration<dyn SpeechSynthesisModel>;
+pub type ContentDetectionModelService = ModelRegistration<dyn ContentDetectionModel>;
 
 macro_rules! model_registration_plugin {
     ($name:ident, $service:ty, $contract:ident, $prefix:literal) => {
@@ -624,11 +695,26 @@ model_registration_plugin!(
     RealtimeModel,
     "model.realtime"
 );
+model_registration_plugin!(
+    ContentDetectionModelPlugin,
+    ContentDetectionModelService,
+    ContentDetectionModel,
+    "model.content-detection"
+);
 
 pub struct CapabilityCatalog<T: ?Sized> {
     bindings: BTreeMap<ModelRef, ModelRegistration<T>>,
     default: Option<ModelRef>,
     stages: BTreeMap<String, ModelRef>,
+}
+impl<T: ?Sized> Clone for CapabilityCatalog<T> {
+    fn clone(&self) -> Self {
+        Self {
+            bindings: self.bindings.clone(),
+            default: self.default.clone(),
+            stages: self.stages.clone(),
+        }
+    }
 }
 impl<T: ?Sized> CapabilityCatalog<T> {
     pub fn new(bindings: Vec<ModelRegistration<T>>) -> Result<Self, AgentError> {
