@@ -86,8 +86,18 @@ unique_plugin!(
     "framework.conversations"
 );
 unique_plugin!(AgentLoopPlugin, AgentLoop, LoopService, "framework.loop");
-unique_plugin!(ExternalAgentPlugin, ExternalAgent, ExternalAgentService, "framework.external-agent");
-unique_plugin!(ModelCatalogStorePlugin, ModelCatalogStore, ModelCatalogStoreService, "framework.model-catalog-store");
+unique_plugin!(
+    ExternalAgentPlugin,
+    ExternalAgent,
+    ExternalAgentService,
+    "framework.external-agent"
+);
+unique_plugin!(
+    ModelCatalogStorePlugin,
+    ModelCatalogStore,
+    ModelCatalogStoreService,
+    "framework.model-catalog-store"
+);
 unique_plugin!(
     LongTermMemoryPlugin,
     LongTermMemory,
