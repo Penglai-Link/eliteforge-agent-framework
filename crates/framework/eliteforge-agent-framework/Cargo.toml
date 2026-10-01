@@ -28,7 +28,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 [dev-dependencies]
 eliteforge-agent-capability-test-fixture = { path = "../../testing/eliteforge-agent-capability-test-fixture" }
 eliteforge-agent-context = { path = "../../plugin/context/eliteforge-agent-context" }
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/storage/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-storage-local = { path = "../../plugin/storage/eliteforge-agent-official-plugin-storage-local" }
 eliteforge-agent-test-support = { path = "../../testing/eliteforge-agent-test-support" }
 
 eliteforge-agent-official-plugin-tools-local = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-local" }

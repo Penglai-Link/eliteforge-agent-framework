@@ -126,6 +126,8 @@ impl LocalArtifactStore {
     }
 }
 
+// Tests sit beside the metadata logic; trait implementations follow below.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +135,12 @@ mod tests {
 
     async fn store() -> (tempfile::TempDir, LocalArtifactStore) {
         let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
         let files =
             FileArtifactStore::open(directory.path(), FileArtifactLimits::default()).unwrap();
         let store = LocalArtifactStore::open(directory.path().join("agent.db"), files)

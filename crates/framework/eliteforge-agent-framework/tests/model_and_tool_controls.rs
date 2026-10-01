@@ -358,21 +358,22 @@ async fn temporary_exposure_can_collapse_and_reexpand_without_revoking_authority
         agent.run(request).await.unwrap().output,
         "temporary exposure restored"
     );
-    let identities = seen.lock().unwrap();
-    assert_eq!(identities.len(), 3);
-    assert_eq!(
-        identities
-            .iter()
-            .map(|identity| &identity.invocation_id)
-            .collect::<std::collections::HashSet<_>>()
-            .len(),
-        3
-    );
+    {
+        let identities = seen.lock().unwrap();
+        assert_eq!(identities.len(), 3);
+        assert_eq!(
+            identities
+                .iter()
+                .map(|identity| &identity.invocation_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+    }
     assert!(
         extensions.get::<ToolCallIdentity>().is_none(),
         "call identity must not leak into the parent run"
     );
-    drop(identities);
     agent.close().await;
 }
 

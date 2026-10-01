@@ -9,9 +9,19 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+fn private_tempdir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    dir
+}
+
 #[tokio::test]
 async fn atomic_artifact_roundtrip_bounds_and_path_rejection() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let store = FileArtifactStore::open(
         dir.path(),
         FileArtifactLimits {
@@ -92,7 +102,7 @@ async fn atomic_artifact_roundtrip_bounds_and_path_rejection() {
 #[tokio::test]
 async fn artifact_reads_reject_symlinks_and_non_regular_files() {
     use std::os::unix::fs::symlink;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let outside = tempfile::NamedTempFile::new().unwrap();
     let id = ArtifactId::parse(uuid::Uuid::new_v4().to_string()).unwrap();
     symlink(outside.path(), dir.path().join(id.as_str())).unwrap();
@@ -115,7 +125,7 @@ async fn artifact_reads_reject_symlinks_and_non_regular_files() {
 
 #[tokio::test]
 async fn offload_publishes_original_before_projection_and_preserves_semantics() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let store =
         Arc::new(FileArtifactStore::open(dir.path(), FileArtifactLimits::default()).unwrap());
     let offloader = ToolOutputOffloader::new(store.clone(), 256, 32).unwrap();
@@ -158,7 +168,7 @@ async fn offload_publishes_original_before_projection_and_preserves_semantics() 
 #[tokio::test]
 async fn structured_only_and_combined_payloads_are_externalized_losslessly() {
     for large_content in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_tempdir();
         let store =
             Arc::new(FileArtifactStore::open(dir.path(), FileArtifactLimits::default()).unwrap());
         let offloader = ToolOutputOffloader::new(store.clone(), 1024, 64).unwrap();
@@ -249,7 +259,7 @@ impl ChatModel for ReferenceModel {
 
 #[tokio::test]
 async fn loop_persists_reference_instead_of_large_structured_data() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = private_tempdir();
     let artifacts =
         Arc::new(FileArtifactStore::open(dir.path(), FileArtifactLimits::default()).unwrap());
     let conversations = TestConversationStore::default();
@@ -364,7 +374,7 @@ fn offload_agent_builder(
 }
 #[tokio::test]
 async fn workflow_offload_failure_ends_run_without_automatic_tool_replay() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_tempdir();
     let state = Arc::new(
         SqliteStateStore::open(directory.path().join("state.db"), SqliteOptions::default())
             .await
@@ -407,9 +417,14 @@ async fn workflow_offload_failure_ends_run_without_automatic_tool_replay() {
 }
 #[tokio::test]
 async fn completed_workflow_replays_offloaded_reference_without_rerunning_tool() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_tempdir();
     let artifacts_dir = directory.path().join("artifacts");
     std::fs::create_dir(&artifacts_dir).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifacts_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let artifacts =
         Arc::new(FileArtifactStore::open(&artifacts_dir, FileArtifactLimits::default()).unwrap());
     let state = Arc::new(
@@ -466,7 +481,7 @@ async fn completed_workflow_replays_offloaded_reference_without_rerunning_tool()
             .unwrap()
             .eof()
     );
-    let other_dir = tempfile::tempdir().unwrap();
+    let other_dir = private_tempdir();
     let other_store =
         FileArtifactStore::open(other_dir.path(), FileArtifactLimits::default()).unwrap();
     assert!(
@@ -511,7 +526,7 @@ impl ConversationSession for RejectToolSession {
 }
 #[tokio::test]
 async fn history_failure_after_artifact_publish_preserves_original_without_replay() {
-    let directory = tempfile::tempdir().unwrap();
+    let directory = private_tempdir();
     let artifacts =
         Arc::new(FileArtifactStore::open(directory.path(), FileArtifactLimits::default()).unwrap());
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));

@@ -327,6 +327,18 @@ impl AgentBuilder {
                 Some(Arc::new(
                     ModelInvoker::new((*model_runtime.snapshot().chat).clone(), strategy)?
                         .with_runtime(model_runtime.clone())
+                        .with_recovery(
+                            registry
+                                .get::<ModelRecoveryPolicy>()
+                                .map_or_else(ModelRecoveryPolicy::default, |policy| {
+                                    (*policy).clone()
+                                }),
+                            registry
+                                .all::<ModelCatalogRefreshService>()
+                                .iter()
+                                .map(|service| service.0.clone())
+                                .collect(),
+                        )
                         .with_middleware(
                             registry
                                 .all::<ModelMiddlewareService>()

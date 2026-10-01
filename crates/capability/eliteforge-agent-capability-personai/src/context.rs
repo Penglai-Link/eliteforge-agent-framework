@@ -24,6 +24,11 @@ impl std::fmt::Debug for AccountContext {
 pub trait PersonAiContextProvider: Send + Sync {
     fn current(&self) -> Option<Arc<AccountContext>>;
     fn subscribe(&self) -> watch::Receiver<Option<Arc<AccountContext>>>;
+    /// Connection closure differs from account changes: even queries using a
+    /// retained job binding must stop when its host connection is closed.
+    fn is_closed(&self) -> bool {
+        false
+    }
 }
 
 /// A simple host-owned provider. Publish a higher revision after changing credentials.

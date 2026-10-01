@@ -12,6 +12,9 @@ use std::{
 pub struct ModelRuntimeUpdate {
     pub account_scope: String,
     pub revision: u64,
+    /// Monotonic publication sequence for a shared connection, including
+    /// account invalidations. Zero is reserved for unversioned static updates.
+    pub generation: u64,
     pub chat: Vec<ModelConnection>,
     pub embedding: Vec<EmbeddingModelService>,
     pub rerank: Vec<RerankModelService>,
@@ -33,6 +36,7 @@ impl ModelRuntimeUpdate {
         Self {
             account_scope: account_scope.into(),
             revision,
+            generation: 0,
             chat,
             embedding: Vec::new(),
             rerank: Vec::new(),
@@ -64,27 +68,41 @@ pub struct ModelRuntimeSnapshot {
 }
 impl ModelRuntimeSnapshot {
     fn build(update: ModelRuntimeUpdate) -> Result<Self, AgentError> {
+        Self::build_with_routing(update, false)
+    }
+    fn build_dynamic(update: ModelRuntimeUpdate) -> Result<Self, AgentError> {
+        Self::build_with_routing(update, true)
+    }
+    fn build_with_routing(
+        update: ModelRuntimeUpdate,
+        allow_unavailable: bool,
+    ) -> Result<Self, AgentError> {
+        macro_rules! catalog {
+            ($field:ident, $operation:ident) => {{
+                let catalog = CapabilityCatalog::new(update.$field)?;
+                if allow_unavailable {
+                    catalog.with_dynamic_routing(ModelOperation::$operation, &update.routing)
+                } else {
+                    catalog.with_routing(ModelOperation::$operation, &update.routing)?
+                }
+            }};
+        }
         let chat = Arc::new(ModelCatalog::new(update.chat)?);
-        let embedding = CapabilityCatalog::new(update.embedding)?
-            .with_routing(ModelOperation::Embedding, &update.routing)?;
+        let embedding = catalog!(embedding, Embedding);
         let mut spaces = BTreeMap::new();
         for space in update.spaces {
             if space.dimensions == 0
                 || space.revision.trim().is_empty()
                 || space.preprocessing.trim().is_empty()
-                || embedding.get(&space.model).is_none()
+                || space.model.connection.trim().is_empty()
+                || space.model.model.trim().is_empty()
+                || (!allow_unavailable && embedding.get(&space.model).is_none())
                 || spaces.insert(space.model.clone(), space).is_some()
             {
                 return Err(AgentError::InvalidConfiguration(
                     "invalid, unregistered or duplicate embedding space".into(),
                 ));
             }
-        }
-        macro_rules! catalog {
-            ($field:ident, $operation:ident) => {
-                CapabilityCatalog::new(update.$field)?
-                    .with_routing(ModelOperation::$operation, &update.routing)?
-            };
         }
         Ok(Self {
             account_scope: update.account_scope,
@@ -126,7 +144,7 @@ impl ModelRuntime {
             .clone()
     }
     pub fn replace(&self, update: ModelRuntimeUpdate) -> Result<(), AgentError> {
-        let next = Arc::new(ModelRuntimeSnapshot::build(update.clone())?);
+        let next = Arc::new(ModelRuntimeSnapshot::build_dynamic(update.clone())?);
         let mut partitions = self
             .partitions
             .lock()
@@ -150,13 +168,15 @@ impl ModelRuntime {
         self.replace_connection_inner(connection_id, None, update)
             .map(|_| ())
     }
-    fn replace_base(&self, update: ModelRuntimeUpdate) -> Result<(), AgentError> {
+    // Registry services belong to the Agent, separate from the host's initial
+    // bindings in __base and independently refreshed provider partitions.
+    fn replace_registry(&self, update: ModelRuntimeUpdate) -> Result<(), AgentError> {
         let mut partitions = self
             .partitions
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         let mut next_partitions = partitions.clone();
-        next_partitions.insert("__base".into(), update);
+        next_partitions.insert("__registry".into(), update);
         let next = Arc::new(ModelRuntimeSnapshot::build(Self::combine(
             &next_partitions,
         ))?);
@@ -189,7 +209,7 @@ impl ModelRuntime {
         update: ModelRuntimeUpdate,
     ) -> Result<bool, AgentError> {
         if connection_id.trim().is_empty()
-            || connection_id == "__base"
+            || matches!(connection_id, "__base" | "__registry")
             || update.chat.iter().any(|item| item.id != connection_id)
             || update
                 .embedding
@@ -223,6 +243,10 @@ impl ModelRuntime {
                 .detection
                 .iter()
                 .any(|item| item.model.connection != connection_id)
+            || update
+                .spaces
+                .iter()
+                .any(|space| space.model.connection != connection_id)
         {
             return Err(AgentError::InvalidConfiguration(
                 "model update contains another connection".into(),
@@ -232,6 +256,12 @@ impl ModelRuntime {
             .partitions
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if partitions
+            .get(connection_id)
+            .is_some_and(|current| current.generation > update.generation)
+        {
+            return Ok(false);
+        }
         if let Some((scope, revision)) = expected {
             if update.account_scope != scope || update.revision < revision {
                 return Err(AgentError::InvalidConfiguration(
@@ -247,7 +277,7 @@ impl ModelRuntime {
         }
         let mut next_partitions = partitions.clone();
         next_partitions.insert(connection_id.into(), update);
-        let next = Arc::new(ModelRuntimeSnapshot::build(Self::combine(
+        let next = Arc::new(ModelRuntimeSnapshot::build_dynamic(Self::combine(
             &next_partitions,
         ))?);
         let mut current = self
@@ -377,10 +407,12 @@ impl ModelRuntime {
             .map(|routing| (*routing).clone())
             .unwrap_or_default();
         if let Some(existing) = registry.get::<ModelRuntimeService>() {
-            existing.0.replace_base(update)?;
+            existing.0.replace_registry(update)?;
             return Ok(existing.0.clone());
         }
-        Self::new(update)
+        let runtime = Self::new(ModelRuntimeUpdate::new("", 0, Vec::new()))?;
+        runtime.replace_registry(update)?;
+        Ok(runtime)
     }
 }
 

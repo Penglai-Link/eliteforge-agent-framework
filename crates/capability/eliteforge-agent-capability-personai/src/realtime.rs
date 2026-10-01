@@ -84,7 +84,7 @@ impl RealtimeModel for PersonAiRealtimeAdapter {
             }),
         )?;
         websocket
-            .send(Message::Text(start.into()))
+            .send(Message::Text(start))
             .await
             .map_err(|error| ModelError::Transient(error.to_string()))?;
         let (command_tx, mut command_rx) = mpsc::channel::<Value>(32);
@@ -98,7 +98,7 @@ impl RealtimeModel for PersonAiRealtimeAdapter {
                     command = command_rx.recv() => match command {
                         Some(command) => match encrypted(&public_key, &command) {
                             Ok(payload) => {
-                                if let Err(error) = websocket.send(Message::Text(payload.into())).await {
+                                if let Err(error) = websocket.send(Message::Text(payload)).await {
                                     let _ = event_tx.send(RealtimeEvent::Error(error.to_string())).await;
                                     break;
                                 }
@@ -112,10 +112,11 @@ impl RealtimeModel for PersonAiRealtimeAdapter {
                     },
                     incoming = websocket.next() => match incoming {
                         Some(Ok(Message::Text(text))) => {
-                            if let Ok(value) = serde_json::from_str::<Value>(&text) {
-                                if let Some(event) = map_event(&value) {
-                                    if event_tx.send(event).await.is_err() { break; }
-                                }
+                            if let Ok(value) = serde_json::from_str::<Value>(&text)
+                                && let Some(event) = map_event(&value)
+                                && event_tx.send(event).await.is_err()
+                            {
+                                break;
                             }
                         }
                         Some(Ok(Message::Close(_))) | None => break,
@@ -240,8 +241,7 @@ mod tests {
                 json!({
                     "type":"realtime_event", "event":{"delta":"transcribed"}
                 })
-                .to_string()
-                .into(),
+                .to_string(),
             ))
             .await
             .unwrap();

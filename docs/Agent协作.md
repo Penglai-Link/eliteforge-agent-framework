@@ -1,6 +1,8 @@
-# Agent 协作：子 Agent 与 Threads
+# Agent 协作设计：子 Agent 与独立会话
 
-Framework 现在提供两种不同的协作语义，并通过官方工具暴露给模型：
+## 目标与边界
+
+Framework 提供两种不同的协作方式，并通过官方工具暴露给模型。子 Agent 属于父运行的执行树；Thread 是可独立寻址的会话。应用可替换协作运行时，不需要修改工具 Schema 或模型适配器。
 
 ```mermaid
 flowchart LR
@@ -53,7 +55,7 @@ Agent 进程内的 bounded registry（最多 128 个 Thread）；它复用已安
 运行的限制策略并建立独立账本；模型提供的 `max_steps` 和 `max_total_tokens` 只能继续收紧，
 默认 runtime 还会再次限制 token ceiling，模型不能自行放大运行预算。
 
-## 为什么两种都要有
+## 语义对比
 
 | 能力 | 子 Agent | Thread |
 | --- | --- | --- |
@@ -77,9 +79,9 @@ Framework 在发起协作的 `RunContext` 上发布 `AgentEvent::Collaboration`�
 AG-UI 将子 Agent 映射为原生 `SUBAGENT_STARTED / SUBAGENT_FINISHED / SUBAGENT_ERROR`；独立
 Thread 与父运行不是嵌套关系，因此映射为 `framework.thread.*` CUSTOM 事件。生命周期事件不含
 任务正文、Thread 消息或用户答案；完整结果仍由工具结果承载，暂停所需的提示和响应 Schema
-通过 Interaction 数据提供。详细字段见[AG-UI 事件](agui.md#事件映射)。
+通过 Interaction 数据提供。详细字段见[AG-UI 事件](AG-UI事件协议.md#事件映射)。
 
-## 启用
+## 装配方式
 
 官方能力包默认安装协作工具；不需要时可以关闭：
 
@@ -89,8 +91,8 @@ use eliteforge_agent_official_capability_pack::EliteForgeOfficialCapabilityPack;
 
 let agent = AgentBuilder::new()
     .capability_pack(
-        EliteForgeOfficialCapabilityPack::new("agent.sqlite")
-            .agent_tools(true),
+        EliteForgeOfficialCapabilityPack::new("agent.sqlite", "agent-artifacts")
+            .agent_tools(false),
     )
     .build()
     .await?;
@@ -99,3 +101,9 @@ let agent = AgentBuilder::new()
 官方插件 crate 也可以单独安装：`eliteforge-agent-official-plugin-tools-agents`。
 工具运行时通过当前 `RunContext` 的 `AgentCollaborationService` 查找协作实现，因此上层应用
 可以替换默认实现，而不用修改工具 Schema 或模型适配器。
+
+## 注意事项
+
+- `agent_spawn` 会等待子 Agent 返回，不适合交给它承载长期后台任务。
+- 默认 Thread registry 只在当前 Agent 进程内有效；跨进程恢复、身份授权和队列由上层应用实现。
+- Thread 答案必须通过 `thread_answer` 提交，以保留原始交互校验和恢复位置。

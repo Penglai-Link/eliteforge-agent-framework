@@ -15,10 +15,10 @@ use eliteforge_agent_core::{
     EmbeddingResponse, EmbeddingVector, ImageGenerationModel, ImageGenerationRequest,
     ImageGenerationResponse, ImageJob, MediaContent, MediaSource, Modality, ModelCatalogEntry,
     ModelCatalogSnapshot, ModelConnection, ModelDescriptor, ModelError, ModelJobStatus,
-    ModelOperation, ModelRef, ModelRegistration, OperationCapabilities, RealtimeModel,
-    ResourceReference, Role, SpeechRecognitionModel, SpeechRecognitionRequest,
-    SpeechRecognitionResponse, ToolCall, Usage, VideoGenerationModel, VideoGenerationRequest,
-    VideoJob,
+    ModelOperation, ModelRef, ModelRegistration, OperationCapabilities, ProviderErrorCategory,
+    ProviderModelError, RealtimeModel, ResourceReference, Role, SpeechRecognitionModel,
+    SpeechRecognitionRequest, SpeechRecognitionResponse, ToolCall, Usage, VideoGenerationModel,
+    VideoGenerationRequest, VideoJob,
 };
 use eliteforge_agent_framework::ModelRuntimeUpdate;
 use reqwest::Method;
@@ -34,6 +34,7 @@ pub struct PersonAiModels {
     services: Arc<PersonAiServices>,
     context: Arc<dyn PersonAiContextProvider>,
     api: Arc<AuthorizedClientApi>,
+    pub(crate) refresh: Arc<tokio::sync::Notify>,
 }
 
 impl PersonAiModels {
@@ -48,6 +49,7 @@ impl PersonAiModels {
             services,
             context,
             api: Arc::new(AuthorizedClientApi::new(server_base_url)?),
+            refresh: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -58,6 +60,7 @@ impl PersonAiModels {
             context: self.context.clone(),
             api: self.api.clone(),
             account,
+            refresh: self.refresh.clone(),
         })
     }
 
@@ -350,9 +353,31 @@ pub struct BoundPersonAiModels {
     context: Arc<dyn PersonAiContextProvider>,
     api: Arc<AuthorizedClientApi>,
     account: Arc<AccountContext>,
+    refresh: Arc<tokio::sync::Notify>,
 }
 
 impl BoundPersonAiModels {
+    fn ensure_open(&self) -> Result<(), ModelError> {
+        if self.context.is_closed() {
+            return Err(ModelError::Provider(Box::new(ProviderModelError {
+                provider: "personai".into(),
+                category: ProviderErrorCategory::AccountChanged,
+                http_status: None,
+                business_code: None,
+                error_type: None,
+                model: None,
+                message: "PersonAI connection is closed".into(),
+            })));
+        }
+        Ok(())
+    }
+    fn provider_error(&self, error: ServerApiError, model: &str) -> ModelError {
+        let error = map_error(error).with_model(self.model_ref(model));
+        if error.is_unavailable() {
+            self.refresh.notify_one();
+        }
+        error
+    }
     pub fn account_scope(&self) -> &str {
         &self.account.account_scope
     }
@@ -371,9 +396,15 @@ impl BoundPersonAiModels {
         {
             Ok(())
         } else {
-            Err(ModelError::Fatal(
-                "PersonAI account context changed; select a model from the current catalog".into(),
-            ))
+            Err(ModelError::Provider(Box::new(ProviderModelError {
+                provider: "personai".into(),
+                category: ProviderErrorCategory::AccountChanged,
+                http_status: None,
+                business_code: None,
+                error_type: None,
+                model: None,
+                message: "PersonAI account context changed or connection closed".into(),
+            })))
         }
     }
 
@@ -406,7 +437,7 @@ impl BoundPersonAiModels {
             }
             ProtocolType::Responses => self.services.responses.create(context, &raw).await,
         }
-        .map_err(map_error)?;
+        .map_err(|error| self.provider_error(error, model_id))?;
         let parsed = match protocol {
             ProtocolType::ChatCompletions => parse_chat_response(response)?,
             ProtocolType::Responses => parse_responses_response(response)?,
@@ -462,7 +493,7 @@ impl BoundPersonAiModels {
         loop {
             tokio::select! {
                 result = &mut future, if !completed => {
-                    result.map_err(map_error)?;
+                    result.map_err(|error| self.provider_error(error, model_id))?;
                     completed = true;
                 }
                 chunk = receiver.recv() => match chunk {
@@ -665,7 +696,7 @@ impl EmbeddingModel for BoundPersonAiModels {
             .embeddings
             .create(&self.account.authorization, &raw)
             .await
-            .map_err(map_error)?;
+            .map_err(|error| self.provider_error(error, model))?;
         let vectors = response["data"]
             .as_array()
             .ok_or_else(|| {
@@ -733,7 +764,7 @@ impl ImageGenerationModel for BoundPersonAiModels {
                 .multimedia
                 .generate_image(&self.account.authorization, &sdk_request)
                 .await
-                .map_err(map_error)?
+                .map_err(|error| self.provider_error(error, model))?
         } else {
             let mut body = serde_json::to_value(&sdk_request)
                 .map_err(|error| ModelError::Fatal(error.to_string()))?;
@@ -757,7 +788,7 @@ impl ImageGenerationModel for BoundPersonAiModels {
                     "/images/generations",
                     &self.account.authorization,
                 )
-                .map_err(map_error)?
+                .map_err(|error| self.provider_error(error, model))?
                 .json(&body);
             self.api
                 .execute_for_object::<multimedia::MultimediaTaskResponse>(
@@ -766,20 +797,22 @@ impl ImageGenerationModel for BoundPersonAiModels {
                     "PersonAI image generation",
                 )
                 .await
-                .map_err(map_error)?
+                .map_err(|error| self.provider_error(error, model))?
         };
         Ok(self.image_job(model, response))
     }
 
     async fn query(&self, job: &ImageJob) -> Result<ImageJob, ModelError> {
+        self.ensure_open()
+            .map_err(|error| error.with_model(job.model.clone()))?;
         let response = self
             .services
             .multimedia
             .get_task(&self.account.authorization, &job.id)
             .await
-            .map_err(map_error)?;
+            .map_err(|error| self.provider_error(error, &job.model.model))?;
         let mut updated = self.image_job(&job.model.model, response);
-        updated.binding_id = job.binding_id.clone();
+        updated.binding_id = job.binding_id;
         Ok(updated)
     }
 
@@ -858,19 +891,21 @@ impl VideoGenerationModel for BoundPersonAiModels {
             .multimedia
             .generate_video(&self.account.authorization, &sdk_request)
             .await
-            .map_err(map_error)?;
+            .map_err(|error| self.provider_error(error, model))?;
         Ok(self.video_job(model, response))
     }
 
     async fn query(&self, job: &VideoJob) -> Result<VideoJob, ModelError> {
+        self.ensure_open()
+            .map_err(|error| error.with_model(job.model.clone()))?;
         let response = self
             .services
             .multimedia
             .get_task(&self.account.authorization, &job.id)
             .await
-            .map_err(map_error)?;
+            .map_err(|error| self.provider_error(error, &job.model.model))?;
         let mut updated = self.video_job(&job.model.model, response);
-        updated.binding_id = job.binding_id.clone();
+        updated.binding_id = job.binding_id;
         Ok(updated)
     }
 
@@ -966,7 +1001,7 @@ impl ContentDetectionModel for BoundPersonAiModels {
                     },
                 )
                 .await
-                .map_err(map_error)?
+                .map_err(|error| self.provider_error(error, model))?
         } else {
             self.services
                 .multimedia
@@ -979,7 +1014,7 @@ impl ContentDetectionModel for BoundPersonAiModels {
                     },
                 )
                 .await
-                .map_err(map_error)?
+                .map_err(|error| self.provider_error(error, model))?
         };
         let segments: Vec<Value> = result
             .segment_labels
@@ -1045,7 +1080,7 @@ impl SpeechRecognitionModel for BoundPersonAiModels {
                 request.language.as_deref(),
             )
             .await
-            .map_err(map_error)?;
+            .map_err(|error| self.provider_error(error, model))?;
         Ok(SpeechRecognitionResponse {
             model: self.model_ref(model),
             text,
@@ -1064,16 +1099,59 @@ fn job_status(status: i32) -> ModelJobStatus {
 }
 
 fn map_error(error: ServerApiError) -> ModelError {
-    match error {
+    use ProviderErrorCategory as Category;
+    let mut detail = ProviderModelError {
+        provider: "personai".into(),
+        category: Category::Other,
+        http_status: None,
+        business_code: None,
+        error_type: None,
+        model: None,
+        message: error.to_string(),
+    };
+    match &error {
         ServerApiError::Gateway {
-            status: 502 | 503 | 504,
-            ..
-        } => ModelError::Transient(error.to_string()),
-        ServerApiError::Http(_) | ServerApiError::WebSocket(_) => {
-            ModelError::Transient(error.to_string())
+            status,
+            message,
+            error_type,
+        } => {
+            detail.http_status = Some(*status);
+            detail.message = message.clone();
+            detail.error_type = Some(error_type.clone());
+            detail.category = match (*status, error_type.as_str()) {
+                (401, _) => Category::Authentication,
+                (403, _) => Category::Permission,
+                (404, "gateway_error" | "model_not_found") => Category::Unavailable,
+                (429, "gateway_error") => Category::Quota,
+                (502..=504, _) => Category::Transient,
+                _ => Category::Other,
+            };
         }
-        _ => ModelError::Fatal(error.to_string()),
+        ServerApiError::Business { code, message } => {
+            detail.business_code = Some(*code);
+            detail.message = message.clone();
+            detail.category = match code {
+                401 => Category::Authentication,
+                403 => Category::Permission,
+                429 => Category::Quota,
+                _ => Category::Other,
+            };
+        }
+        ServerApiError::DecryptFailed | ServerApiError::DeviceUnbound => {
+            detail.category = Category::Authentication;
+        }
+        ServerApiError::Http(error) => {
+            detail.http_status = error.status().map(|status| status.as_u16());
+            detail.category = if error.is_connect() || error.is_timeout() {
+                Category::Transient
+            } else {
+                Category::Other
+            };
+        }
+        ServerApiError::WebSocket(_) => detail.category = Category::Transient,
+        _ => {}
     }
+    ModelError::Provider(Box::new(detail))
 }
 
 fn chat_completions_request(model: &str, request: &ChatRequest) -> Result<Value, ModelError> {
@@ -1269,6 +1347,7 @@ fn parse_responses_response(response: Value) -> Result<ChatResponse, ModelError>
         .as_str()
         .unwrap_or_default()
         .to_string();
+    let has_output_text = !text.is_empty();
     let mut calls = Vec::new();
     if let Some(output) = response["output"].as_array() {
         for item in output {
@@ -1282,12 +1361,10 @@ fn parse_responses_response(response: Value) -> Result<ChatResponse, ModelError>
                     item["name"].as_str().unwrap_or_default(),
                     arguments,
                 ));
-            } else if text.is_empty() {
-                if let Some(content) = item["content"].as_array() {
-                    for part in content {
-                        if let Some(fragment) = part["text"].as_str() {
-                            text.push_str(fragment);
-                        }
+            } else if !has_output_text && let Some(content) = item["content"].as_array() {
+                for part in content {
+                    if let Some(fragment) = part["text"].as_str() {
+                        text.push_str(fragment);
                     }
                 }
             }
@@ -1313,6 +1390,64 @@ mod tests {
         net::TcpListener,
         sync::{Mutex, oneshot},
     };
+
+    #[test]
+    fn provider_errors_preserve_codes_without_treating_every_404_as_model_removal() {
+        for (status, kind, expected) in [
+            (401, "gateway_error", ProviderErrorCategory::Authentication),
+            (403, "gateway_error", ProviderErrorCategory::Permission),
+            (404, "gateway_error", ProviderErrorCategory::Unavailable),
+            (404, "invalid_request_error", ProviderErrorCategory::Other),
+            (429, "gateway_error", ProviderErrorCategory::Quota),
+            (502, "gateway_error", ProviderErrorCategory::Transient),
+        ] {
+            let error = map_error(ServerApiError::gateway(status, "original message", kind))
+                .with_model(ModelRef::new("personai", "p/model"));
+            assert_eq!(
+                error.is_transient(),
+                expected == ProviderErrorCategory::Transient
+            );
+            assert_eq!(
+                error.is_unavailable(),
+                expected == ProviderErrorCategory::Unavailable
+            );
+            let ModelError::Provider(detail) = error else {
+                panic!("structured error expected")
+            };
+            assert_eq!(detail.category, expected);
+            assert_eq!(detail.http_status, Some(status));
+            assert_eq!(detail.error_type.as_deref(), Some(kind));
+            assert_eq!(detail.message, "original message");
+            assert_eq!(detail.model, Some(ModelRef::new("personai", "p/model")));
+        }
+        let ModelError::Provider(detail) = map_error(ServerApiError::business(429, "quota")) else {
+            panic!("structured error expected")
+        };
+        assert_eq!(detail.business_code, Some(429));
+        assert_eq!(detail.category, ProviderErrorCategory::Quota);
+    }
+
+    #[test]
+    fn responses_preserve_text_from_every_output_message_without_duplicating_summary() {
+        let output = json!([
+            {"type":"message","content":[{"type":"output_text","text":"first "}]},
+            {"type":"function_call","call_id":"call-1","name":"lookup","arguments":"{}"},
+            {"type":"message","content":[
+                {"type":"output_text","text":"second "},
+                {"type":"output_text","text":"third"}
+            ]}
+        ]);
+        for summary in [None, Some(""), Some("first second third")] {
+            let mut raw = json!({"output": output.clone()});
+            if let Some(summary) = summary {
+                raw["output_text"] = summary.into();
+            }
+            let parsed = parse_responses_response(raw).unwrap();
+            assert_eq!(parsed.content.text(), "first second third");
+            assert_eq!(parsed.tool_calls.len(), 1);
+            assert_eq!(parsed.tool_calls[0].call_name, "lookup");
+        }
+    }
 
     #[derive(Default)]
     struct CollectedStream(Mutex<Vec<String>>);

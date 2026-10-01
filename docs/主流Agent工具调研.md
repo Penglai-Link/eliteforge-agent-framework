@@ -1,14 +1,12 @@
 # 主流 Agent 工具对照与补齐清单
 
-核查日期：2026-09-27。对照 Codex CLI、Claude Code、Nous Research Hermes Agent、Gemini CLI 和
-Qwen Code（用户所说的 qwen-cli 按 `QwenLM/qwen-code` 理解）。以官方文档和实际注册代码为依据。
-Framework 基线为当前目录重组分支的工作区。用户已确认：**任务清单由上层应用负责，LSP 与 P2 暂缓；其余 P0/P1 开始实现。**
-上游清单保留作参考，下面的范围决定本次开发内容；实现进度见[工具补齐进度](tool-capability-progress.md)。
+核查日期：2026-09-27。本文对照 Codex CLI、Claude Code、Nous Research Hermes Agent、Gemini CLI 和 Qwen Code 的官方文档及实际注册代码。Qwen Code 对应仓库 `QwenLM/qwen-code`。
+下文区分上游工具清单、Framework 当前实现和明确的上层应用职责；实现依据见[实现状态与验收证据](实现状态与验收证据.md)。
 
 ## 结论
 
-现有工具覆盖文件读写、基础搜索、命令后台执行、用户问答、子 Agent／Threads、Skills、可选记忆和 MCP 工具调用。
-初次核查的缺口包括交互式命令、编辑与搜索、Web、媒体、MCP 资源和工具发现；本轮实现情况见下表和进度文档。业务任务清单由宿主负责，LSP 暂缓。
+Framework 工具覆盖文件读写、搜索、命令后台执行、用户问答、子 Agent／Threads、Skills、可选记忆和 MCP 工具调用。
+当前 Framework 已提供交互式命令、多文件编辑、代码搜索、Web/媒体、MCP 资源和工具发现等能力；业务任务清单由上层应用负责，LSP 暂未支持。
 工具名称相近不代表语义一致；尤其不能把单文件字符串替换当作多文件补丁，把模型多模态输入当作本地图片读取工具。
 
 先完善 `tools-local`，再增加按职责划分的可选工具插件。文件、命令、网络和语言服务仍由宿主显式配置权限与依赖。
@@ -21,7 +19,7 @@ Framework 基线为当前目录重组分支的工作区。用户已确认：**�
 权限规则、配置开关、模型能力和插件依赖都会影响工具是否进入模型上下文。
 命令行 Slash Commands、SDK 方法、模型服务端工具和 Agent 可调用工具分别看待。
 
-| 项目 | 本次依据 | 版本边界 |
+| 项目 | 核查依据 | 版本边界 |
 | --- | --- | --- |
 | Codex CLI | [工具注册](https://github.com/openai/codex/blob/6e1ab4d294cdf1d2606a91bf1acf6de0f0959c7a/codex-rs/core/src/tools/spec_plan.rs)、[命令工具定义](https://github.com/openai/codex/blob/6e1ab4d294cdf1d2606a91bf1acf6de0f0959c7a/codex-rs/core/src/tools/handlers/shell_spec.rs) | 读取的源码快照 `6e1ab4d294cdf1d2606a91bf1acf6de0f0959c7a`；工具暴露受配置、模型、环境和 feature 控制 |
 | Claude Code | [官方 Tools reference](https://code.claude.com/docs/en/tools-reference) | 当日文档快照；文档说明各项的版本、平台及配置条件；未从闭源实现推断额外能力 |
@@ -96,7 +94,7 @@ Task 工具受模型和启用配置影响，LSP 需要语言服务，跨会话�
 
 `read_file` 文档支持文本、图片、音频和 PDF；搜索提供 ignore、排除模式、纯文本匹配及输出限制参数。
 见 [官方工具参考](https://geminicli.com/docs/reference/tools/)。
-本次 `createToolRegistry()` 没有注册 `read_many_files`／`get_internal_docs`，因此只标为文档列出，
+核查时的 `createToolRegistry()` 没有注册 `read_many_files`／`get_internal_docs`，因此只标为文档列出，
 不把它们当作已确认的默认独立工具。后台工具名称由
 [shellBackgroundTools.ts](https://github.com/google-gemini/gemini-cli/blob/2fe7c2d3f065dc40ad573d50b2091116f8a4aa18/packages/core/src/tools/shellBackgroundTools.ts)
 核实；实际启用仍受 [注册配置](https://github.com/google-gemini/gemini-cli/blob/2fe7c2d3f065dc40ad573d50b2091116f8a4aa18/packages/core/src/config/config.ts) 控制。
@@ -112,7 +110,7 @@ Task 工具受模型和启用配置影响，LSP 需要语言服务，跨会话�
 | Skills、MCP 与 Web | `skill`、`tool_search`、`tool_call`、`read_mcp_resource`、`web_fetch`；`web_search` 受搜索后端、凭据与运行模式控制 |
 | 可选宿主能力 | `enter_worktree`、`exit_worktree`、`cron_create`、`cron_list`、`cron_delete`、`loop_wakeup`、daemon 的 `create_sub_session`；`exec`、`structured_output`、Goal、Workflow、Artifact、图片和 Omni 媒体工具按模式配置 |
 
-`save_memory` 在名称常量中，但本次常规 `createToolRegistry()` 未见对应注册；不据常量认定默认可调用。
+`save_memory` 在名称常量中，但核查时的常规 `createToolRegistry()` 未见对应注册；不据常量认定默认可调用。
 Omni 工具也可能仅供固定编排器调用，对模型隐藏。
 实际清单以 [config.ts](https://github.com/QwenLM/qwen-code/blob/c662f78bcf2ac6b84565c841b3f845ee68826847/packages/core/src/config/config.ts)
 为准，名称及可选定义见 [tool-names.ts](https://github.com/QwenLM/qwen-code/blob/c662f78bcf2ac6b84565c841b3f845ee68826847/packages/core/src/tools/tool-names.ts)。
@@ -139,36 +137,41 @@ MCP 工具按服务器动态发现，资源工具按服务器声明生成，不�
 SQLite 默认保存记忆，不表示模型默认拥有记忆写入工具。
 默认装配见 [crates/README.md](../crates/README.md#官方能力如何启用)。
 
-## 按语义查漏补缺
+## 当前实现与扩展范围
 
-| 能力 | 当前判断 | 缺口与落点 | 优先级 |
+| 能力 | 当前状态 | 实现或边界 | 状态分类 |
 | --- | --- | --- | --- |
-| 超过 10 秒返回任务 ID、后续读取和停止 | 已实现 | 保留 `system_exec`／`system_exec_task_read`／`system_exec_task_stop`；当前记录只在同一个 Agent 内、同一会话可用 | 已有基线 |
-| 交互式命令与进程管理 | 已实现 | 持续 stdin、PTY、命令清单和受管进程组清理；macOS 行为测试通过，平台边界见进度文档 | P0 |
-| 多文件补丁与编辑冲突 | 已实现 | 多文件增删改／移动、版本前置条件、diff 预览与失败回滚；跨文件可见性和外部竞争边界见文件工具文档 | P0 |
-| 代码搜索与稳定分页 | 已实现 | 完整 glob、ignore／exclude、文本／正则和三种模式；有界扫描、会话快照分页及取消 | P0 |
-| 任务清单和进度 | 上层应用负责 | 不在 Framework 实现 planning 插件；命令 taskId 仅管理实际运行的命令，不承担业务待办清单 | 排除 |
-| MCP 资源 | 已实现 | 列表、模板、读取及模型工具已接入；HTTP／stdio 协议、限额与取消测试通过 | P1 |
-| 工具按需发现 | 已实现 | `tools-discovery` 合并显式授权 Provider，按需公开 Schema；不延迟 Provider lease 或 MCP 网络发现成本 | P1 |
-| Web 搜索／抓取 | 已实现 | 可替换搜索后端、Brave 适配、域名策略与文本／HTML 抓取；有界响应、来源、取消和超时 | P1 |
-| 图片／文档读取 | 已实现 | `tools-media` 返回原生图片媒体块与指定 PDF 页文本，复用 Content 和目录约束；解析限制见使用文档 | P1 |
-| 语言服务 | 暂缓 | 用户明确本轮先不支持 LSP | 排除 |
-| 用户问答形式 | 部分 | 复用 `tools-human`，后续增加无选项问题、多选和异步交互策略；不用再建一套 clarify 插件 | P2 |
-| 后台完成／监测事件 | 部分 | 当前命令可查询，没有专门的输出推送／订阅工具；在 `tools-local` 加有界事件，宿主决定怎样唤醒模型 | P2 |
-| 历史会话检索、Skills 管理 | 部分 | 在 `plugin/memory`、`plugin/skill` 扩展；保留身份、命名空间及可写目录限制；不复制成 `tool/` 下另一套插件 | P2 |
-| Notebook | 缺失 | 可选 Notebook 读取及 cell 编辑工具，复用 `tools-media` 和本地写入约束 | P2 |
-| 浏览器／桌面控制 | 可扩展，未内置 | 可选 `tools-browser` 或 MCP；需宿主提供浏览器／桌面 session、凭据和审批 | P2 |
-| 定时任务、长期监控 | 未内置 | 调度由宿主提供，工具只做配置、查询和停止；明确当前会话唤醒或新会话执行、重启恢复规则 | P2 |
-| 跨会话团队／Worktree | 部分 | 现有 Threads 和取消契约可复用；跨进程 registry、消息队列及工作区切换由宿主 runtime 接入 | 按应用需要 |
-| 程序化工具组合 | 未内置 | 可选 Code Mode，重点是已有工具的批量调用与结果过滤；Shell 已能执行程序，不能把普通 Python 执行另算同等缺口 | 按应用需要 |
+| 超过 10 秒返回任务 ID、后续读取和停止 | 已支持 | `system_exec` 等待超过 10 秒后返回命令 ID；`system_exec_task_read` 读取状态与输出，`system_exec_task_stop` 停止命令。命令记录在 Agent 内按会话隔离 | 已支持 |
+| 交互式命令与进程管理 | 已支持 | 支持持续 stdin、PTY、命令清单和受管进程组清理；平台验收范围见[实现状态与验收证据](实现状态与验收证据.md) | 已支持 |
+| 多文件补丁与编辑冲突 | 已支持 | 支持多文件增删改/移动、版本前置条件、diff 预览和失败回滚；跨文件提交及外部并发修改边界见[本地文件工具](本地文件工具.md) | 已支持 |
+| 代码搜索与稳定分页 | 已支持 | 支持 glob、ignore/exclude、文本/正则和多种查询模式；扫描有界，分页使用会话快照并支持取消 | 已支持 |
+| MCP 资源 | 已支持 | 支持资源列表、模板、读取及模型工具调用；HTTP/stdio 传输、限额和取消测试见[实现状态与验收证据](实现状态与验收证据.md) | 已支持 |
+| 工具按需发现 | 已支持 | `tools-discovery` 汇总应用明确授权的 Provider，按需公开 Schema；Provider 租约和 MCP 网络发现仍在装配时建立 | 已支持 |
+| Web 搜索与抓取 | 已支持 | 支持可替换搜索后端、Brave 适配、域名策略和文本/HTML 抓取；请求有大小、超时和取消限制 | 已支持 |
+| 图片与文档读取 | 已支持 | `tools-media` 返回图片媒体块和指定 PDF 页文本；不提供 OCR、PDF 渲染或浏览器脚本执行 | 已支持 |
+| 用户问答形式 | 可扩展 | 复用 `tools-human`；当前支持带选项问题、文本回答和跳过，不支持多选及无选项问题 | 可扩展 |
+| 历史会话检索 | 可扩展 | 长期记忆检索和 Skills 管理已有独立能力；跨历史会话的全文检索需由应用或专用插件提供 | 可扩展 |
+| Notebook | 可扩展 | 可增加 Notebook 读取和单元格编辑能力，复用媒体读取和本地文件授权 | 可扩展 |
+| 浏览器与桌面控制 | 可扩展 | 可由应用或 MCP 插件接入；宿主需提供浏览器会话、凭据和操作审批 | 可扩展 |
+| 多个 Agent 团队协作 | 可扩展 | 可组合子 Agent、独立 Thread 和 DAG；团队分工及跨进程协作策略需显式实现 | 可扩展 |
+| 程序化工具组合 | 可扩展 | 可选增加 Code Mode，用于批量调用现有工具和筛选结果；普通脚本执行不等于工具编排接口 | 可扩展 |
+| 业务任务清单与进度 | 上层应用负责 | 命令清单只管理实际运行的命令，不表示用户待办或业务工作流状态 | 上层应用负责 |
+| LSP 语言服务 | 上层应用负责 | Framework 当前不提供 LSP 工具；由应用或专用语言服务插件接入 | 上层应用负责 |
+| 后台调度与长期监控 | 上层应用负责 | 当前进程内命令可查询和停止；跨重启调度、唤醒和事件订阅由应用负责 | 上层应用负责 |
+| 定时任务与 Worktree | 上层应用负责 | 调度器、跨进程队列、Git 工作区隔离和生命周期策略由应用部署管理 | 上层应用负责 |
+| 命令与工具沙箱 | 上层应用负责 | Framework 提供目录授权、取消、超时和策略扩展点；操作系统隔离环境由应用配置 | 上层应用负责 |
+| 终端、命令行与 HTTP 产品接口 | 上层应用负责 | Framework 提供 Agent 运行时和事件协议；交互界面、HTTP 路由和命令分发由应用实现 | 上层应用负责 |
+| 文件历史、Diff 与 Rewind | 上层应用负责 | 文件工具可执行有版本校验的编辑；Git 历史、变更界面和撤销流程由应用提供 | 上层应用负责 |
+| 项目与个人设置 | 上层应用负责 | 应用负责读取、合并、授权和保护设置，再把生效配置交给 Framework | 上层应用负责 |
 
-命令任务当前保证及限制见 [tasks.rs](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-local/src/tasks.rs)。
-文件编辑和搜索边界见[文件工具](local-file-tools.md)，新增插件配置见[可选工具插件](optional-tool-plugins.md)。
+
+命令工具的当前保证及限制见 [tasks.rs](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-local/src/tasks.rs)。
+文件编辑和搜索边界见[文件工具](本地文件工具.md)，新增插件配置见[可选工具插件](可选工具插件.md)。
 MCP 边界由 [McpClient 与插件注册](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-mcp/src/lib.rs) 确认。
 
 ## 建议的插件组织
 
-Local、MCP、Discovery、Web 和 Media 已有实现；Browser 是后续可选项。本轮不改变默认 8 插件装配。
+Local、MCP、Discovery、Web 和 Media 已有实现；Browser 是后续可选项。默认装配仍为 8 个进程内插件。
 
 ```text
 crates/plugin/
@@ -218,4 +221,4 @@ flowchart LR
 第二批补 MCP 资源与工具发现、Web、图片／PDF。网络与文档工具要有超时、容量限制和来源信息；
 按需发现后的工具仍经过相同的 Schema 校验、权限与取消链。
 
-上游核查未实测五个 CLI 的运行表现。本轮实现与测试证据单独记录，不将上游能力视为 Framework 已有能力。
+上游核查未实测五个 CLI 的运行表现。Framework 实现与测试证据单独记录，不将上游能力视为 Framework 已有能力。

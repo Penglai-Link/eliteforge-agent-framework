@@ -35,10 +35,11 @@ try {
  const implementations=['demo.chat','demo.state','demo.interactions','demo.conversations','demo.middleware','demo.custom'];
  const build=version=>({package:'demo.pack',version,implementations});
  await api('/api/build',build('1.0.0'));
- browser=await chromium.launch({headless:true});const page=await browser.newPage();const errors=[];page.on('pageerror',error=>errors.push(String(error)));
+ browser=await chromium.launch({headless:process.env.PLAYWRIGHT_HEADLESS!=='false',...(process.env.PLAYWRIGHT_CHANNEL?{channel:process.env.PLAYWRIGHT_CHANNEL}:{})});const page=await browser.newPage();const errors=[];const browserLog=[];page.on('pageerror',error=>errors.push(String(error)));page.on('console',message=>browserLog.push(message.text()));page.on('request',request=>browserLog.push(`${request.method()} ${request.url()}`));page.on('response',response=>browserLog.push(`${response.status()} ${response.url()}`));page.on('requestfailed',request=>browserLog.push(`${request.url()}: ${request.failure()?.errorText}`));
  await page.goto(base);await page.getByRole('button',{name:'挂载插件独立页面'}).click();
- const frame=page.frameLocator('iframe');await frame.locator('#context').filter({hasText:'light / zh-CN'}).waitFor();await frame.getByRole('button',{name:'调用本插件后端'}).click();
- await frame.locator('#result').filter({hasText:'page-only data'}).waitFor().catch(async error=>{throw new Error(`${error}\nPage result: ${await frame.locator('#result').textContent()}\n${log}`)});await frame.locator('#topic').filter({hasText:'page-only'}).waitFor();
+ const frame=page.frameLocator('iframe');await frame.locator('#context').filter({hasText:'light / zh-CN'}).waitFor();
+ if(process.env.PLAYWRIGHT_INTERACTION==='keyboard')await frame.getByRole('button',{name:'调用本插件后端'}).press('Enter');else await frame.getByRole('button',{name:'调用本插件后端'}).click();
+ await frame.locator('#result').filter({hasText:'page-only data'}).waitFor().catch(async error=>{throw new Error(`${error}\nPage result: ${await frame.locator('#result').textContent()}\nBrowser errors: ${JSON.stringify(errors)}\nBrowser log: ${browserLog.join('\n')}\n${log}`)});await frame.locator('#topic').filter({hasText:'page-only'}).waitFor();
  await page.getByRole('button',{name:'切换主题'}).click();await page.getByRole('button',{name:'切换语言'}).click();
  await frame.locator('#context').filter({hasText:'dark / en'}).waitFor();
  const before=await api('/api/catalog');const instance=before.instances[0];
@@ -52,7 +53,7 @@ try {
  for(let attempt=0;;attempt++){const src=await page.locator('iframe').getAttribute('src').catch(()=>null);if(src&&!src.includes(oldSession))break;if(attempt>100)throw new Error('Page did not remount');await wait(100);}
  assert.equal(await oldFrame.evaluate(frame=>frame.isConnected),false);
  const late=await fetch(base+`/api/pages/${oldSession}/call`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({instance,method:'echo',params:'late'})});assert.ok(!late.ok);
- await frame.getByRole('button',{name:'调用本插件后端'}).click();await frame.locator('#topic').filter({hasText:'page-only'}).waitFor();
+ await frame.locator('#context').filter({hasText:'dark / en'}).waitFor();if(process.env.PLAYWRIGHT_INTERACTION==='keyboard')await frame.getByRole('button',{name:'调用本插件后端'}).press('Enter');else await frame.getByRole('button',{name:'调用本插件后端'}).click();await frame.locator('#topic').filter({hasText:'page-only'}).waitFor();
  await page.getByRole('button',{name:'关闭页面'}).click();await page.locator('iframe').waitFor({state:'detached'});
  for(let attempt=0;;attempt++){const catalog=await api('/api/catalog');if(!catalog.usage.some(item=>item.kind==='page'))break;if(attempt>100)throw new Error('Page lease remained');await wait(100);}
  await page.getByRole('button',{name:'扩展点',exact:true}).click();await page.getByRole('cell',{name:'framework.chat-model',exact:true}).waitFor();

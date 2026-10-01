@@ -1,9 +1,9 @@
 //! Explicit block quotas and prompt order. Running this example calls the configured API.
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_model_genai::{AdapterKind, AuthData, GenaiChatAdapter};
-use std::sync::Arc;
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

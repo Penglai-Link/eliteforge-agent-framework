@@ -9,7 +9,7 @@ use eliteforge_agent_official_plugin_agent_external::{
 };
 use serde_json::json;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
     sync::Notify,
 };
@@ -188,4 +188,33 @@ async fn dropping_wait_only_attempts_remote_cancel_with_a_known_run_id() {
     let _ = task.await;
     assert_eq!(cancel_count.load(Ordering::SeqCst), 1);
     server.abort();
+}
+
+#[tokio::test]
+async fn unresponsive_cancel_is_bounded_and_releases_the_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line).await.unwrap();
+        assert!(request_line.contains("/runs/known/cancel"));
+        // Intentionally never respond. EOF proves the cancelled HTTP request
+        // releases its socket, rather than merely abandoning a JoinHandle.
+        let mut remaining = Vec::new();
+        reader.read_to_end(&mut remaining).await.unwrap();
+    });
+    let bridge = JsonAgentBridge::new(&endpoint, reqwest::Client::new()).unwrap();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(7),
+        bridge.cancel("known", &json!({})),
+    )
+    .await
+    .expect("cancel must enforce its own finite cleanup timeout");
+    assert!(result.is_err());
+    tokio::time::timeout(std::time::Duration::from_secs(2), server)
+        .await
+        .expect("timed-out cancellation must release the connection")
+        .unwrap();
 }

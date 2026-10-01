@@ -115,12 +115,12 @@ impl Transport<RoleClient> for ContentLengthTransport {
 }
 impl Drop for ContentLengthTransport {
     fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    let _ = child.kill().await;
-                });
-            }
+        if let Some(mut child) = self.child.take()
+            && let Ok(runtime) = tokio::runtime::Handle::try_current()
+        {
+            runtime.spawn(async move {
+                let _ = child.kill().await;
+            });
         }
     }
 }

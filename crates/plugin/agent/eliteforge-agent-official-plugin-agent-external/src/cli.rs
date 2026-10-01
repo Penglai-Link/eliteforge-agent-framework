@@ -81,7 +81,7 @@ impl ExternalCli {
                     command.arg("--model");
                     command.arg(model_name);
                 }
-                if let Some(working_directory) = self.working_directory.as_deref() {
+                if resume_session_id.is_none() {
                     command.arg("--cd");
                     command.arg(working_directory);
                 }

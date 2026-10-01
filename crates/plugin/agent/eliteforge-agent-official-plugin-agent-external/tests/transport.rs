@@ -17,6 +17,37 @@ fn request() -> ExternalCliRequest {
         session_id: Some("session-1".into()),
     }
 }
+
+#[tokio::test]
+async fn codex_resume_uses_process_directory_without_unsupported_cd_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let command = script(
+        &dir,
+        r#"printf '%s\n' "$@" > argv
+pwd > cwd
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}'"#,
+    );
+    let cli = ExternalCli::new(
+        ExternalCliKind::Codex,
+        command,
+        Some(dir.path().to_string_lossy().into()),
+    );
+    for session_id in [None, Some("session-1".to_string())] {
+        let resumed = session_id.is_some();
+        let mut input = request();
+        input.session_id = session_id;
+        cli.invoke(input, None).await.unwrap();
+        let argv = std::fs::read_to_string(dir.path().join("argv")).unwrap();
+        assert_eq!(argv.lines().any(|arg| arg == "--cd"), !resumed);
+        assert_eq!(argv.lines().any(|arg| arg == "resume"), resumed);
+        assert_eq!(argv.lines().any(|arg| arg == "session-1"), resumed);
+        let cwd = std::fs::read_to_string(dir.path().join("cwd")).unwrap();
+        assert_eq!(
+            std::path::Path::new(cwd.trim()).canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+    }
+}
 #[tokio::test]
 async fn cli_arguments_are_literal_and_native_session_stream_is_preserved() {
     for kind in [ExternalCliKind::Codex, ExternalCliKind::OpenCode] {
@@ -81,10 +112,10 @@ async fn cancelling_invocation_terminates_descendants() {
     let task = tokio::spawn(async move { cli.invoke(request(), None).await });
     let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
-            if let Ok(pid) = std::fs::read_to_string(dir.path().join("child.pid")) {
-                if !pid.trim().is_empty() {
-                    break pid.trim().to_owned();
-                }
+            if let Ok(pid) = std::fs::read_to_string(dir.path().join("child.pid"))
+                && !pid.trim().is_empty()
+            {
+                break pid.trim().to_owned();
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }

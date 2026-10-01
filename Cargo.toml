@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/capability/eliteforge-agent-capability-external",
+    "crates/capability/eliteforge-agent-capability-personai",
     "crates/framework/eliteforge-agent-capability-macros",
     "crates/framework/eliteforge-agent-capability-runtime",
     "crates/framework/eliteforge-agent-context-contracts",
@@ -10,13 +11,11 @@ members = [
     "crates/plugin/context/eliteforge-agent-context",
     "crates/plugin/memory/eliteforge-agent-memory",
     "crates/plugin/model/eliteforge-agent-official-plugin-model-genai",
-    "crates/plugin/model/eliteforge-agent-official-plugin-model-external",
+    "crates/plugin/agent/eliteforge-agent-official-plugin-agent-external",
     "crates/plugin/observe/eliteforge-agent-official-plugin-otel",
     "crates/plugin/protocol/eliteforge-agent-official-plugin-agui",
     "crates/plugin/skill/eliteforge-agent-official-plugin-skills",
-    "crates/plugin/storage/eliteforge-agent-official-plugin-storage-sqlite",
-    "crates/plugin/storage/eliteforge-agent-sqlite-extensions",
-    "crates/plugin/storage/eliteforge-agent-state-sqlite",
+    "crates/plugin/storage/eliteforge-agent-official-plugin-storage-local",
     "crates/plugin/tool/eliteforge-agent-official-plugin-tools-agents",
     "crates/plugin/tool/eliteforge-agent-official-plugin-tools-discovery",
     "crates/plugin/tool/eliteforge-agent-official-plugin-tools-human",

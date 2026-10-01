@@ -310,6 +310,12 @@ mod tests {
 
     fn store() -> (tempfile::TempDir, FileArtifactStore) {
         let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
         let store = FileArtifactStore::open(
             directory.path(),
             FileArtifactLimits {

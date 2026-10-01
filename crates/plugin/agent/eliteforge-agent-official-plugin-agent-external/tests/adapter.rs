@@ -60,3 +60,47 @@ async fn cli_is_external_agent_and_session_is_explicit() {
         .await
         .unwrap();
 }
+
+struct SlowEvents;
+#[async_trait::async_trait]
+impl fw::ExternalAgentEventSink for SlowEvents {
+    async fn emit(&self, _event: fw::ExternalAgentEvent) {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+#[tokio::test]
+async fn fast_cli_and_slow_sink_fail_at_bounded_handoff_without_silent_event_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let command = dir.path().join("fast-agent");
+    std::fs::write(
+        &command,
+        r#"#!/bin/sh
+i=0
+while [ "$i" -lt 3000 ]; do
+  printf '{"type":"item.started","item":{"type":"command_execution","id":"tool-%s"}}\n' "$i"
+  i=$((i + 1))
+done
+sleep 30
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let agent = CliExternalAgent::new(
+        ExternalCli::new(
+            ExternalCliKind::Codex,
+            command.to_string_lossy(),
+            Some(dir.path().to_string_lossy().into()),
+        ),
+        None,
+    );
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        fw::ExternalAgent::run(&agent, request(None), &SlowEvents),
+    )
+    .await
+    .unwrap();
+    match result {
+        Err(error) => assert!(error.to_string().contains("capacity exceeded"), "{error}"),
+        Ok(_) => panic!("overflow must not return success"),
+    }
+}

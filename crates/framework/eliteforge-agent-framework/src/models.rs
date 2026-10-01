@@ -10,6 +10,8 @@ pub struct ModelInvoker {
     strategy: Arc<dyn ModelSelectionStrategy>,
     middleware: Vec<Arc<dyn ModelMiddleware>>,
     assembler: Arc<dyn ContextAssembler>,
+    recovery: ModelRecoveryPolicy,
+    refreshers: Vec<Arc<dyn ModelCatalogRefresh>>,
 }
 impl ModelInvoker {
     pub fn new(
@@ -24,10 +26,21 @@ impl ModelInvoker {
             strategy,
             middleware: Vec::new(),
             assembler: Arc::new(DefaultContextAssembler::default()),
+            recovery: ModelRecoveryPolicy::default(),
+            refreshers: Vec::new(),
         })
     }
     pub fn with_runtime(mut self, runtime: Arc<ModelRuntime>) -> Self {
         self.runtime = Some(runtime);
+        self
+    }
+    pub fn with_recovery(
+        mut self,
+        policy: ModelRecoveryPolicy,
+        refreshers: Vec<Arc<dyn ModelCatalogRefresh>>,
+    ) -> Self {
+        self.recovery = policy;
+        self.refreshers = refreshers;
         self
     }
     pub fn catalog_snapshot(&self) -> Arc<ModelCatalog> {
@@ -48,6 +61,78 @@ impl ModelInvoker {
         &self.catalog
     }
 
+    fn notify_unavailable(&self, model: &ModelRef) {
+        for service in &self.refreshers {
+            if service.connection_id() == model.connection {
+                service.request_refresh();
+            }
+        }
+    }
+
+    async fn recover_unavailable(
+        &self,
+        selected: &ModelRef,
+        messages: &[Message],
+        call: &ModelCall<'_>,
+        context: &RunContext,
+        state: &mut crate::model_recovery::RecoveryState,
+    ) -> Result<Option<(Arc<ModelCatalog>, ModelRef)>, AgentError> {
+        if self.recovery.candidates.is_empty()
+            || (context.model.is_some() && !self.recovery.allow_explicit_model_replacement)
+        {
+            return Ok(None);
+        }
+        state.failed.push(selected.clone());
+        state.check_account(selected)?;
+        if !state.refreshed {
+            state.refreshed = true;
+            if let Some(service) = self
+                .refreshers
+                .iter()
+                .find(|service| service.connection_id() == selected.connection)
+            {
+                let update = tokio::select! {
+                    biased;
+                    _ = context.cancelled() => return Err(AgentError::Cancelled),
+                    result = tokio::time::timeout(call.limits.model_timeout, service.refresh()) => {
+                        result.map_err(|_| ModelError::Transient("model catalog refresh timed out".into()))??
+                    }
+                };
+                state.check_account(selected)?;
+                if let Some(runtime) = &self.runtime {
+                    let accepted = runtime.replace_connection_if_current(
+                        service.connection_id(),
+                        &update.account_scope,
+                        update.revision,
+                        update.clone(),
+                    )?;
+                    if !accepted {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        let catalog = self.catalog_snapshot();
+        for candidate in &self.recovery.candidates {
+            if state.failed.contains(candidate) {
+                continue;
+            }
+            state.check_account(candidate)?;
+            if !catalog.get(candidate).is_some_and(|descriptor| {
+                descriptor.accepts(messages, call.tools, call.options)
+                    && descriptor.input_capacity(call.limits, call.options).is_ok()
+            }) {
+                continue;
+            }
+            context.emit_output(OutputEvent::Custom {
+                name: "framework.model_recovery".into(),
+                value: serde_json::json!({ "from": selected, "to": candidate, "step": call.step }),
+            });
+            return Ok(Some((catalog, candidate.clone())));
+        }
+        Ok(None)
+    }
+
     /// A fixed-model auxiliary call (for example, summarization). It uses the
     /// same validation, middleware, cancellation, usage and durable reservations
     /// as ordinary calls, but does not recursively reduce or inject context and
@@ -60,11 +145,26 @@ impl ModelInvoker {
         limits: &RunLimits,
         context: &RunContext,
     ) -> Result<ChatResponse, AgentError> {
+        let snapshot = self.catalog_snapshot();
+        self.invoke_auxiliary_in_catalog(&snapshot, model, request, stage, limits, context)
+            .await
+    }
+
+    /// Context preparation shares the answer invocation's immutable bindings,
+    /// including its authorization context, even if discovery refreshes meanwhile.
+    pub(crate) async fn invoke_auxiliary_in_catalog(
+        &self,
+        catalog: &ModelCatalog,
+        model: &ModelRef,
+        request: ChatRequest,
+        stage: &str,
+        limits: &RunLimits,
+        context: &RunContext,
+    ) -> Result<ChatResponse, AgentError> {
         limits.validate()?;
         context.check_cancelled()?;
-        let snapshot = self.catalog_snapshot();
-        let catalog = snapshot.as_ref();
         if catalog.get(model).is_none() {
+            self.notify_unavailable(model);
             return Err(
                 ModelError::Unavailable(format!("{}/{}", model.connection, model.model)).into(),
             );
@@ -143,11 +243,12 @@ impl ModelInvoker {
         call.limits.validate()?;
         call.options.validate()?;
         let runtime_snapshot = self.runtime.as_ref().map(|runtime| runtime.snapshot());
-        let catalog_snapshot = runtime_snapshot.as_ref().map_or_else(
+        let mut catalog_snapshot = runtime_snapshot.as_ref().map_or_else(
             || Arc::new(self.catalog.clone()),
             |snapshot| snapshot.chat.clone(),
         );
-        let catalog = catalog_snapshot.as_ref();
+        let mut replacement: Option<ModelRef> = None;
+        let mut recovery = crate::model_recovery::RecoveryState::new(&self.refreshers);
         let mut retries = 0;
         let mut recoveries = 0;
         let mut attempt = 0;
@@ -159,7 +260,7 @@ impl ModelInvoker {
             .chain(&snapshot.messages)
             .cloned()
             .collect();
-        let models = crate::model_call_budget::StepModels {
+        let mut models = crate::model_call_budget::StepModels {
             inner: self,
             catalog_snapshot: catalog_snapshot.clone(),
             limit: call.limits.max_model_calls_per_step,
@@ -167,6 +268,7 @@ impl ModelInvoker {
         };
         let mut overflow: Option<(String, Vec<Message>)> = None;
         loop {
+            let catalog = catalog_snapshot.as_ref();
             context.check_cancelled()?;
             let consumed = context.usage();
             if consumed.input_tokens.saturating_add(consumed.output_tokens)
@@ -175,7 +277,9 @@ impl ModelInvoker {
                 return Err(AgentError::Run("total model token budget exhausted".into()));
             }
             attempt += 1;
-            let selected = if let Some(model) = &context.model {
+            let selected = if let Some(model) = &replacement {
+                model.clone()
+            } else if let Some(model) = &context.model {
                 model.clone()
             } else {
                 self.strategy
@@ -196,6 +300,24 @@ impl ModelInvoker {
                     .await?
             };
             if catalog.get(&selected).is_none() {
+                self.notify_unavailable(&selected);
+                if retries < call.limits.max_model_retries
+                    && let Some((fresh, candidate)) = self
+                        .recover_unavailable(
+                            &selected,
+                            &selection_messages,
+                            &call,
+                            context,
+                            &mut recovery,
+                        )
+                        .await?
+                {
+                    retries += 1;
+                    catalog_snapshot = fresh;
+                    models.catalog_snapshot = catalog_snapshot.clone();
+                    replacement = Some(candidate);
+                    continue;
+                }
                 return Err(ModelError::Unavailable(format!(
                     "{}/{}",
                     selected.connection, selected.model
@@ -342,6 +464,9 @@ impl ModelInvoker {
                 ),
             ) => response.unwrap_or_else(|_| Err(ModelError::Transient("model invocation timed out".into())))
             };
+            if response.as_ref().is_err_and(|error| error.is_unavailable()) {
+                self.notify_unavailable(&selected);
+            }
             previous = Some(selected.clone());
             match response {
                 Ok(mut response) => {
@@ -373,8 +498,32 @@ impl ModelInvoker {
                         .await;
                     return Ok(response);
                 }
-                Err(ModelError::Transient(_))
-                    if !stream.emitted.load(Ordering::Acquire)
+                Err(error)
+                    if error.is_unavailable()
+                        && !stream.emitted.load(Ordering::Acquire)
+                        && retries < call.limits.max_model_retries =>
+                {
+                    let Some((fresh, candidate)) = self
+                        .recover_unavailable(
+                            &selected,
+                            &selection_messages,
+                            &call,
+                            context,
+                            &mut recovery,
+                        )
+                        .await?
+                    else {
+                        return Err(error.into());
+                    };
+                    retries += 1;
+                    catalog_snapshot = fresh;
+                    models.catalog_snapshot = catalog_snapshot.clone();
+                    replacement = Some(candidate);
+                    overflow = None;
+                }
+                Err(ref error)
+                    if error.is_transient()
+                        && !stream.emitted.load(Ordering::Acquire)
                         && retries < call.limits.max_model_retries =>
                 {
                     retries += 1;

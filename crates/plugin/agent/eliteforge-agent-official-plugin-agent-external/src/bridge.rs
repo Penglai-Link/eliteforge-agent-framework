@@ -6,6 +6,10 @@
 use crate::TransportError;
 use serde_json::Value;
 
+// Drop cleanup must not retain a task or socket indefinitely when the bridge
+// accepts a cancellation connection but never responds.
+const CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct JsonAgentBridge {
     endpoint: reqwest::Url,
@@ -85,6 +89,7 @@ impl JsonAgentBridge {
         let response = self
             .client
             .post(self.url(&["runs", run_id, "cancel"])?)
+            .timeout(CANCEL_TIMEOUT)
             .json(body)
             .send()
             .await

@@ -97,6 +97,11 @@ async fn mcp_only_package_owns_an_extra_child_and_unselected_mcp_stays_inert() {
     use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let directory = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir_in(directory.path()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(artifacts.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let manager = CapabilityPackManager::new(directory.path().join("store")).unwrap();
     let source = tempfile::tempdir().unwrap();
     let executable = if cfg!(windows) {
@@ -685,7 +690,9 @@ async fn every_dedicated_model_operation_and_realtime_lease_crosses_the_sidecar(
                 // Exercise binary chunk transport through real stdio and the typed SDK.
                 prompt: "image".repeat(2 * 1024 * 1024),
                 size: None,
-                count: 2
+                count: 2,
+                quality: None,
+                provider_options: Default::default(),
             })
             .await
             .unwrap()
@@ -699,6 +706,12 @@ async fn every_dedicated_model_operation_and_realtime_lease_crosses_the_sidecar(
             prompt: "video".into(),
             seconds: 1,
             size: None,
+            first_frame: None,
+            last_frame: None,
+            reference_images: Vec::new(),
+            reference_videos: Vec::new(),
+            reference_audios: Vec::new(),
+            provider_options: Default::default(),
         })
         .await
         .unwrap();
@@ -1223,6 +1236,11 @@ async fn static_skills_and_resources_package_uses_native_runtime_without_a_backe
     use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let directory = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir_in(directory.path()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(artifacts.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let source = tempfile::tempdir().unwrap();
     let manager = CapabilityPackManager::new(directory.path().join("store")).unwrap();
     std::fs::create_dir_all(source.path().join("skills/pack-skill")).unwrap();

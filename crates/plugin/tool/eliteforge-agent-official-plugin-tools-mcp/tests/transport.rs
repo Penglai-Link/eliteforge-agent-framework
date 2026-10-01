@@ -220,6 +220,11 @@ async fn configured_mcp_plugins_are_discovered_and_closed_through_agent() {
     use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let dir = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir_in(dir.path()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(artifacts.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let (url, stop, task) = http_server(Server::default()).await;
     let config = |namespace| {
         McpConfig::new(
@@ -231,7 +236,10 @@ async fn configured_mcp_plugins_are_discovered_and_closed_through_agent() {
         )
     };
     let agent = AgentBuilder::new()
-        .plugin(LocalStoragePlugin::new(dir.path().join("mcp.db"), artifacts.path()))
+        .plugin(LocalStoragePlugin::new(
+            dir.path().join("mcp.db"),
+            artifacts.path(),
+        ))
         .plugin(AgentLoopPlugin::new(InspectOnly))
         .plugin(McpToolsPlugin::new("first", config("first")))
         .plugin(McpToolsPlugin::new("second", config("second")))
@@ -650,6 +658,11 @@ async fn resource_operations_and_tools_are_agent_owned() {
     use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let dir = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir_in(dir.path()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(artifacts.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let (url, stop, task) = http_server(Server {
         resources: true,
         resources_only: true,
@@ -658,7 +671,10 @@ async fn resource_operations_and_tools_are_agent_owned() {
     .await;
     let agent = AgentBuilder::new()
         .default_models(false)
-        .plugin(LocalStoragePlugin::new(dir.path().join("resources.db"), artifacts.path()))
+        .plugin(LocalStoragePlugin::new(
+            dir.path().join("resources.db"),
+            artifacts.path(),
+        ))
         .plugin(AgentLoopPlugin::new(ReadResourceLoop))
         .plugin(McpToolsPlugin::new(
             "resources",

@@ -100,8 +100,34 @@ impl ErrorReport {
 }
 
 impl ModelError {
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Transient(_))
+            || matches!(self, Self::Provider(error) if error.category == crate::ProviderErrorCategory::Transient)
+    }
+
+    pub fn is_unavailable(&self) -> bool {
+        matches!(self, Self::Unavailable(_))
+            || matches!(self, Self::Provider(error) if error.category == crate::ProviderErrorCategory::Unavailable)
+    }
+
+    pub fn with_model(mut self, model: crate::ModelRef) -> Self {
+        if let Self::Provider(error) = &mut self {
+            error.model = Some(model);
+        }
+        self
+    }
+
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Provider(error) => match error.category {
+                crate::ProviderErrorCategory::Unavailable => "model_unavailable",
+                crate::ProviderErrorCategory::Authentication => "model_authentication",
+                crate::ProviderErrorCategory::Permission => "model_permission",
+                crate::ProviderErrorCategory::Quota => "model_quota",
+                crate::ProviderErrorCategory::Transient => "transient",
+                crate::ProviderErrorCategory::AccountChanged => "model_account_changed",
+                crate::ProviderErrorCategory::Other => "model_provider",
+            },
             Self::Unavailable(_) => "model_unavailable",
             Self::Indeterminate(_) => "model_indeterminate",
             Self::State(_) => "state",

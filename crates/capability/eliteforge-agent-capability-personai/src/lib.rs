@@ -1,11 +1,13 @@
 //! Optional PersonAI integration. Account credentials remain owned by the host.
 
+mod connection;
 mod context;
 mod models;
 mod realtime;
 mod services;
 mod sync;
 
+pub use connection::PersonAiConnection;
 pub use context::{AccountContext, PersonAiContextHandle, PersonAiContextProvider};
 pub use crab_serverapi as sdk;
 pub use models::PersonAiModels;
@@ -14,10 +16,11 @@ pub use sync::{PersonAiModelSync, PersonAiSyncStatus, SyncDomainStatus};
 
 use async_trait::async_trait;
 use eliteforge_agent_core::{
-    CapabilityConfig, CapabilityPack, ModelCatalogStore, Plugin, PluginContext, PluginError,
-    PluginReadyContext,
+    CapabilityConfig, CapabilityPack, Plugin, PluginContext, PluginError, PluginReadyContext,
 };
-use eliteforge_agent_framework::{ModelRuntime, ModelRuntimeService, ModelRuntimeUpdate};
+use eliteforge_agent_framework::{
+    ModelCatalogRefreshService, ModelRuntime, ModelRuntimeService, ModelRuntimeUpdate,
+};
 use std::{sync::Arc, time::Duration};
 
 /// Settings for an optional PersonAI connection. The host supplies live credentials.
@@ -44,60 +47,22 @@ impl PersonAiConfig {
     }
 }
 
-/// Installs typed SDK services, model adapters, and the background catalog sync.
+/// Attaches an initialized host connection without starting another synchronizer.
 pub struct PersonAiCapabilityPack {
-    config: PersonAiConfig,
-    plugin: Arc<PersonAiPlugin>,
-    services: Arc<PersonAiServices>,
-    sync: Arc<PersonAiModelSync>,
+    connection: Arc<PersonAiConnection>,
 }
 
 impl PersonAiCapabilityPack {
-    pub fn new(
-        config: PersonAiConfig,
-        context: Arc<dyn PersonAiContextProvider>,
-    ) -> Result<Self, String> {
-        let services = Arc::new(
-            PersonAiServices::new(&config.server_base_url).map_err(|error| error.to_string())?,
-        );
-        let models = Arc::new(
-            PersonAiModels::new(
-                config.connection_id.clone(),
-                &config.server_base_url,
-                services.clone(),
-                context.clone(),
-            )
-            .map_err(|error| error.to_string())?,
-        );
-        let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![]))
-            .map_err(|error| error.to_string())?;
-        let sync = Arc::new(PersonAiModelSync::new(
-            config.clone(),
-            services.clone(),
-            context,
-            models.clone(),
-            runtime.clone(),
-        ));
-        let plugin = Arc::new(PersonAiPlugin {
-            services: services.clone(),
-            models,
-            runtime,
-            sync: sync.clone(),
-        });
-        Ok(Self {
-            config,
-            plugin,
-            services,
-            sync,
-        })
+    pub fn new(connection: Arc<PersonAiConnection>) -> Self {
+        Self { connection }
     }
 
     /// Host access before this pack is moved into `AgentBuilder::capability_pack`.
     pub fn services(&self) -> Arc<PersonAiServices> {
-        self.services.clone()
+        self.connection.services()
     }
     pub fn sync(&self) -> Arc<PersonAiModelSync> {
-        self.sync.clone()
+        self.connection.sync()
     }
 }
 
@@ -106,10 +71,14 @@ impl CapabilityPack for PersonAiCapabilityPack {
         "framework.personai"
     }
     fn configuration(&self) -> &CapabilityConfig {
-        &self.config
+        &self.connection.config
     }
     fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
-        vec![self.plugin.clone()]
+        vec![Arc::new(PersonAiPlugin {
+            connection: self.connection.clone(),
+            runtime: ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![]))
+                .expect("empty model runtime is valid"),
+        })]
     }
     fn rebuildable(&self) -> bool {
         false
@@ -117,10 +86,8 @@ impl CapabilityPack for PersonAiCapabilityPack {
 }
 
 struct PersonAiPlugin {
-    services: Arc<PersonAiServices>,
-    models: Arc<PersonAiModels>,
+    connection: Arc<PersonAiConnection>,
     runtime: Arc<ModelRuntime>,
-    sync: Arc<PersonAiModelSync>,
 }
 
 #[async_trait]
@@ -130,27 +97,29 @@ impl Plugin for PersonAiPlugin {
     }
 
     async fn install(&self, plugin: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        plugin.provide(self.services.clone())?;
-        plugin.provide(self.models.clone())?;
-        plugin.provide(self.sync.clone())?;
+        if self.connection.is_closed() {
+            return Err(PluginError::message("PersonAI connection is closed"));
+        }
+        plugin.provide(self.connection.clone())?;
+        plugin.provide(self.connection.services.clone())?;
+        plugin.provide(self.connection.models.clone())?;
+        plugin.provide(self.connection.sync.clone())?;
+        plugin.contribute(ModelCatalogRefreshService(self.connection.sync.clone()))?;
         plugin.provide(ModelRuntimeService(self.runtime.clone()))?;
         Ok(())
     }
 
     async fn ready(&self, plugin: &mut PluginReadyContext<'_>) -> Result<(), PluginError> {
-        self.sync
-            .set_store(plugin.extension::<dyn ModelCatalogStore>())
-            .await;
-        let stop = tokio_util::sync::CancellationToken::new();
-        plugin.on_cleanup({
-            let stop = stop.clone();
-            move || stop.cancel()
-        });
-        let handle = self.sync.start(stop.clone());
-        plugin.on_shutdown(move || async move {
-            stop.cancel();
-            handle.await.map_err(|error| error.to_string())
-        });
+        if self.connection.is_closed() {
+            return Err(PluginError::message("PersonAI connection is closed"));
+        }
+        self.connection
+            .sync
+            .attach_runtime(&self.runtime)
+            .map_err(PluginError::message)?;
+        let sync = self.connection.sync.clone();
+        let runtime = self.runtime.clone();
+        plugin.on_cleanup(move || sync.detach_runtime(&runtime));
         Ok(())
     }
 }
@@ -161,14 +130,203 @@ mod tests {
     use eliteforge_agent_core::ToolProvider;
     use eliteforge_agent_plugin_core::PluginContainer;
 
+    struct LocalEcho;
+    #[async_trait]
+    impl eliteforge_agent_core::ChatModel for LocalEcho {
+        async fn generate(
+            &self,
+            model: &str,
+            _: eliteforge_agent_core::ChatRequest,
+            _: &dyn eliteforge_agent_core::ChatStream,
+        ) -> Result<eliteforge_agent_core::ChatResponse, eliteforge_agent_core::ModelError>
+        {
+            Ok(eliteforge_agent_core::ChatResponse::text(model))
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_connection_builds_agents_with_independent_models_and_selection() {
+        use eliteforge_agent_framework::*;
+        let server = sync::tests::MockDiscovery::start().await;
+        let context = Arc::new(PersonAiContextHandle::default());
+        context.publish(AccountContext {
+            account_scope: "alice".into(),
+            revision: 1,
+            authorization: sdk::base::AuthorizedClientContext::new()
+                .with_token("test")
+                .with_product_code("test")
+                .with_product_version("1.0.0"),
+        });
+        let mut config = PersonAiConfig::new(&server.url);
+        config
+            .responses_only_models
+            .push("explicit-responses".into());
+        let connection = PersonAiConnection::connect(config, context.clone(), None)
+            .await
+            .unwrap();
+        let mut agents = Vec::new();
+        for model in ["agent-a", "agent-b"] {
+            agents.push(
+                AgentBuilder::new()
+                    .default_models(false)
+                    .capability_pack(PersonAiCapabilityPack::new(connection.clone()))
+                    .plugin(eliteforge_agent_test_support::TestStoragePlugin::default())
+                    .plugin(ModelConnectionPlugin::new(ModelConnection::new(
+                        "local",
+                        Arc::new(LocalEcho),
+                        vec![ModelDescriptor::new(model)],
+                    )))
+                    .plugin(ModelStrategyPlugin(Arc::new(FixedModelStrategy(
+                        ModelRef::new("local", model),
+                    ))))
+                    .plugin(ModelRoutingPlugin(
+                        ModelRouting::default()
+                            .default_for(
+                                ModelOperation::VideoGeneration,
+                                ModelRef::new("personai", "v1"),
+                            )
+                            .stage_for(
+                                ModelOperation::VideoGeneration,
+                                "render",
+                                ModelRef::new("personai", "v1"),
+                            ),
+                    ))
+                    .build()
+                    .await
+                    .unwrap(),
+            );
+        }
+        // Explicit Responses-only configuration is available during build validation.
+        let explicit = AgentBuilder::new()
+            .default_models(false)
+            .capability_pack(PersonAiCapabilityPack::new(connection.clone()))
+            .plugin(eliteforge_agent_test_support::TestStoragePlugin::default())
+            .plugin(ModelStrategyPlugin(Arc::new(FixedModelStrategy(
+                ModelRef::new("personai", "explicit-responses"),
+            ))))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 8);
+        // A shared publication must reach every attached Agent even when their
+        // default/stage routing references models removed by discovery.
+        *server.video.lock().unwrap() = "[]".into();
+        connection.sync().refresh_now().await.unwrap();
+        for agent in &agents {
+            assert!(agent.models(ModelOperation::VideoGeneration).is_empty());
+            for stage in ["", "render"] {
+                assert!(matches!(
+                    agent
+                        .submit_video(VideoGenerationRequest {
+                            choice: ModelChoice {
+                                model: None,
+                                stage: stage.into()
+                            },
+                            prompt: "clip".into(),
+                            seconds: 2,
+                            size: None,
+                            first_frame: None,
+                            last_frame: None,
+                            reference_images: vec![],
+                            reference_videos: vec![],
+                            reference_audios: vec![],
+                            provider_options: Default::default(),
+                        })
+                        .await,
+                    Err(AgentError::Model(ModelError::Unavailable(_)))
+                ));
+            }
+        }
+        for (agent, own, other) in [
+            (&agents[0], "agent-a", "agent-b"),
+            (&agents[1], "agent-b", "agent-a"),
+        ] {
+            let models = agent.models(ModelOperation::Chat);
+            assert!(models.contains(&ModelRef::new("local", own)));
+            assert!(!models.contains(&ModelRef::new("local", other)));
+            assert!(models.contains(&ModelRef::new("personai", "explicit-responses")));
+            assert_eq!(
+                agent
+                    .run(RunRequest::new(own, "hello"))
+                    .await
+                    .unwrap()
+                    .output,
+                own
+            );
+        }
+        agents[0].close().await;
+        assert!(!connection.is_closed());
+        *server.chat_low.lock().unwrap() = "[]".into();
+        connection.sync().refresh_now().await.unwrap();
+        // No yield or polling: completed refresh is visible to attached Agents.
+        assert!(
+            !agents[1]
+                .models(ModelOperation::Chat)
+                .contains(&ModelRef::new("personai", "p/old"))
+        );
+        assert!(
+            agents[1]
+                .models(ModelOperation::Chat)
+                .contains(&ModelRef::new("local", "agent-b"))
+        );
+        assert_eq!(
+            agents[1]
+                .run(RunRequest::new("after-close", "hello"))
+                .await
+                .unwrap()
+                .output,
+            "agent-b"
+        );
+        context.logout();
+        connection.sync().refresh_now().await.unwrap();
+        assert_eq!(
+            agents[1].models(ModelOperation::Chat),
+            vec![ModelRef::new("local", "agent-b")]
+        );
+        assert!(explicit.models(ModelOperation::Chat).is_empty());
+        agents[1].close().await;
+        explicit.close().await;
+        connection.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn pack_exposes_sdk_services_without_agent_business_tools() {
         let context = Arc::new(PersonAiContextHandle::default());
-        let pack = PersonAiCapabilityPack::new(PersonAiConfig::new("http://127.0.0.1:1"), context)
-            .unwrap();
+        context.publish(AccountContext {
+            account_scope: "test".into(),
+            revision: 1,
+            authorization: sdk::base::AuthorizedClientContext::new()
+                .with_token("test")
+                .with_product_code("test")
+                .with_product_version("1.0.0"),
+        });
+        let server = sync::tests::MockDiscovery::start().await;
+        let connection =
+            PersonAiConnection::connect(PersonAiConfig::new(&server.url), context, None)
+                .await
+                .unwrap();
+        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 8);
+        let pack = PersonAiCapabilityPack::new(connection.clone());
         let host_services = pack.services();
         let host_sync = pack.sync();
         let mut container = PluginContainer::build(pack.plugins()).await.unwrap();
+        let mut second = PluginContainer::build(pack.plugins()).await.unwrap();
+        let first_runtime = container
+            .services()
+            .get::<ModelRuntimeService>()
+            .unwrap()
+            .0
+            .clone();
+        let second_runtime = second
+            .services()
+            .get::<ModelRuntimeService>()
+            .unwrap()
+            .0
+            .clone();
+        assert!(!Arc::ptr_eq(&first_runtime, &second_runtime));
+        assert_eq!(first_runtime.snapshot().chat.models().len(), 1);
+        assert_eq!(second_runtime.snapshot().chat.models().len(), 1);
+        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 8);
         assert!(Arc::ptr_eq(
             &host_services,
             container
@@ -215,5 +373,37 @@ mod tests {
                 .is_empty()
         );
         container.close_async(Duration::from_secs(1)).await;
+        assert!(!connection.is_closed());
+        assert_eq!(second_runtime.snapshot().chat.models().len(), 1);
+        connection.sync().refresh_now().await.unwrap();
+        connection.close().await.unwrap();
+        assert!(connection.models.bind_current().is_err());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !second_runtime.snapshot().chat.models().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        second.close_async(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn initial_discovery_failure_does_not_publish_a_connection() {
+        let server = sync::tests::MockDiscovery::start().await;
+        *server.chat_low.lock().unwrap() = "null".into();
+        let context = Arc::new(PersonAiContextHandle::default());
+        context.publish(AccountContext {
+            account_scope: "test".into(),
+            revision: 1,
+            authorization: sdk::base::AuthorizedClientContext::new()
+                .with_token("test")
+                .with_product_code("test")
+                .with_product_version("1.0.0"),
+        });
+        let result =
+            PersonAiConnection::connect(PersonAiConfig::new(&server.url), context, None).await;
+        assert!(matches!(result, Err(error) if error.contains("chat")));
+        assert!(server.requests.load(std::sync::atomic::Ordering::SeqCst) > 0);
     }
 }

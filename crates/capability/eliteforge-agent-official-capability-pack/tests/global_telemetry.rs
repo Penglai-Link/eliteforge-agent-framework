@@ -14,6 +14,18 @@ use opentelemetry_sdk::{
     trace::{InMemorySpanExporter, SdkTracerProvider},
 };
 
+fn official_pack(path: impl AsRef<std::path::Path>) -> EliteForgeOfficialCapabilityPack {
+    let path = path.as_ref();
+    let artifact_root = path.with_extension("artifacts");
+    std::fs::create_dir_all(&artifact_root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifact_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    EliteForgeOfficialCapabilityPack::new(path, artifact_root)
+}
+
 struct Reply;
 #[async_trait]
 impl ChatModel for Reply {
@@ -32,8 +44,7 @@ async fn default_pack_resolves_global_providers_at_build_and_explicit_telemetry_
     let directory = tempfile::tempdir().unwrap();
     // Providers are configured after the pack has been added to the builder.
     let builder = AgentBuilder::new().capability_pack(
-        EliteForgeOfficialCapabilityPack::new(directory.path().join("global.sqlite"))
-            .model(ChatModelPlugin::new(Reply)),
+        official_pack(directory.path().join("global.sqlite")).model(ChatModelPlugin::new(Reply)),
     );
     let exporter = InMemorySpanExporter::default();
     let traces = SdkTracerProvider::builder()
@@ -81,7 +92,7 @@ async fn default_pack_resolves_global_providers_at_build_and_explicit_telemetry_
         .build();
     let agent = AgentBuilder::new()
         .capability_pack(
-            EliteForgeOfficialCapabilityPack::new(directory.path().join("explicit.sqlite"))
+            official_pack(directory.path().join("explicit.sqlite"))
                 .model(ChatModelPlugin::new(Reply))
                 .telemetry(
                     TelemetryPlugin::new(

@@ -18,6 +18,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aead"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d122413f284cf2d62fb1b7db97e02edb8cda96d769b16e443a4f6195e35662b0"
+dependencies = [
+ "crypto-common",
+ "generic-array",
+]
+
+[[package]]
 name = "aes"
 version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -26,6 +36,20 @@ dependencies = [
  "cfg-if",
  "cipher",
  "cpufeatures 0.2.17",
+]
+
+[[package]]
+name = "aes-gcm"
+version = "0.10.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "831010a0f742e1209b3bcea8fab6a8e149051ba6099432c8cb2cc117dec3ead1"
+dependencies = [
+ "aead",
+ "aes",
+ "cipher",
+ "ctr",
+ "ghash",
+ "subtle",
 ]
 
 [[package]]
@@ -557,6 +581,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "crab-serverapi"
+version = "0.2.0"
+source = "git+https://gitee.com/person-ai/person-ai-index-rust-sdk.git?rev=89a853199f6db4ba6a4003d5930bcdc2e96c6bf2#89a853199f6db4ba6a4003d5930bcdc2e96c6bf2"
+dependencies = [
+ "aes-gcm",
+ "async-trait",
+ "base64 0.22.1",
+ "futures-util",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "sm3",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -606,6 +656,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
+ "rand_core 0.6.4",
  "typenum",
 ]
 
@@ -630,6 +681,15 @@ checksum = "13b588ba4ac1a99f7f2964d24b3d896ddc6bf847ee3855dbd4366f058cfcd331"
 dependencies = [
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "ctr"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
+dependencies = [
+ "cipher",
 ]
 
 [[package]]
@@ -737,6 +797,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid",
+ "pem-rfc7468",
  "zeroize",
 ]
 
@@ -799,6 +860,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
+ "const-oid",
  "crypto-common",
 ]
 
@@ -895,11 +957,9 @@ dependencies = [
  "eliteforge-agent-context",
  "eliteforge-agent-context-contracts",
  "eliteforge-agent-framework",
- "eliteforge-agent-memory",
  "eliteforge-agent-official-plugin-skills",
- "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-official-plugin-tools-mcp",
- "eliteforge-agent-state-sqlite",
  "futures",
  "libc",
  "rmcp",
@@ -916,7 +976,8 @@ name = "eliteforge-agent-capability-external"
 version = "0.1.0"
 dependencies = [
  "eliteforge-agent-core",
- "eliteforge-agent-official-plugin-model-external",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-agent-external",
 ]
 
 [[package]]
@@ -929,6 +990,28 @@ dependencies = [
  "quote",
  "sha2",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "eliteforge-agent-capability-personai"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "crab-serverapi",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-plugin-core",
+ "eliteforge-agent-test-support",
+ "futures",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
+ "rsa",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
 ]
 
 [[package]]
@@ -974,7 +1057,13 @@ dependencies = [
  "async-trait",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-tools-agents",
+ "eliteforge-agent-official-plugin-tools-discovery",
+ "eliteforge-agent-official-plugin-tools-human",
  "eliteforge-agent-official-plugin-tools-local",
+ "eliteforge-agent-official-plugin-tools-mcp",
+ "eliteforge-agent-official-plugin-tools-media",
+ "eliteforge-agent-official-plugin-tools-web",
  "eliteforge-agent-test-support",
  "serde_json",
  "tempfile",
@@ -987,21 +1076,16 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
- "cap-fs-ext",
- "cap-std",
  "eliteforge-agent-context-contracts",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
- "eliteforge-agent-sqlite-extensions",
- "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-test-support",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
- "thiserror 2.0.20",
  "tokio",
- "tokio-rusqlite",
  "tokio-util",
  "uuid",
 ]
@@ -1049,7 +1133,7 @@ dependencies = [
  "eliteforge-agent-core",
  "eliteforge-agent-official-plugin-model-genai",
  "eliteforge-agent-official-plugin-skills",
- "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-official-plugin-tools-local",
  "eliteforge-agent-plugin-core",
  "eliteforge-agent-test-support",
@@ -1070,7 +1154,7 @@ name = "eliteforge-agent-integration-tests"
 version = "0.1.0"
 dependencies = [
  "eliteforge-agent-framework",
- "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "tokio",
 ]
 
@@ -1083,17 +1167,13 @@ dependencies = [
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
  "eliteforge-agent-official-plugin-model-genai",
- "eliteforge-agent-official-plugin-storage-sqlite",
- "eliteforge-agent-sqlite-extensions",
- "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-test-support",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-rusqlite",
  "tokio-util",
- "uuid",
 ]
 
 [[package]]
@@ -1108,7 +1188,7 @@ dependencies = [
  "eliteforge-agent-official-plugin-model-genai",
  "eliteforge-agent-official-plugin-otel",
  "eliteforge-agent-official-plugin-skills",
- "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-official-plugin-tools-agents",
  "eliteforge-agent-official-plugin-tools-discovery",
  "eliteforge-agent-official-plugin-tools-human",
@@ -1123,28 +1203,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "eliteforge-agent-official-plugin-agui"
-version = "0.1.0"
-dependencies = [
- "ag-ui",
- "async-trait",
- "eliteforge-agent-context",
- "eliteforge-agent-core",
- "eliteforge-agent-framework",
- "eliteforge-agent-official-plugin-storage-sqlite",
- "eliteforge-agent-state-sqlite",
- "eliteforge-agent-test-support",
- "futures",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
-]
-
-[[package]]
-name = "eliteforge-agent-official-plugin-model-external"
+name = "eliteforge-agent-official-plugin-agent-external"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -1158,14 +1217,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "eliteforge-agent-official-plugin-agui"
+version = "0.1.0"
+dependencies = [
+ "ag-ui",
+ "async-trait",
+ "eliteforge-agent-context",
+ "eliteforge-agent-core",
+ "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-storage-local",
+ "eliteforge-agent-test-support",
+ "futures",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+]
+
+[[package]]
 name = "eliteforge-agent-official-plugin-model-genai"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
- "eliteforge-agent-official-plugin-storage-sqlite",
- "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-test-support",
  "futures",
  "genai",
@@ -1181,7 +1259,7 @@ dependencies = [
  "async-trait",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
- "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-test-support",
  "futures",
  "opentelemetry",
@@ -1198,7 +1276,7 @@ dependencies = [
  "async-trait",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
- "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-test-support",
  "serde",
  "serde_json",
@@ -1209,23 +1287,28 @@ dependencies = [
 ]
 
 [[package]]
-name = "eliteforge-agent-official-plugin-storage-sqlite"
+name = "eliteforge-agent-official-plugin-storage-local"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "eliteforge-agent-context",
+ "cap-fs-ext",
+ "cap-std",
+ "eliteforge-agent-context-contracts",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
- "eliteforge-agent-memory",
  "eliteforge-agent-official-plugin-agui",
  "eliteforge-agent-official-plugin-tools-human",
- "eliteforge-agent-sqlite-extensions",
- "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-test-support",
+ "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "thiserror 2.0.20",
  "tokio",
+ "tokio-rusqlite",
  "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -1297,7 +1380,7 @@ dependencies = [
  "axum",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
- "eliteforge-agent-official-plugin-storage-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "http",
  "libc",
  "reqwest 0.13.4",
@@ -1355,41 +1438,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "eliteforge-agent-sqlite-extensions"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "rusqlite",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "eliteforge-agent-state-sqlite"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "eliteforge-agent-core",
- "eliteforge-agent-framework",
- "eliteforge-agent-memory",
- "eliteforge-agent-official-plugin-storage-sqlite",
- "eliteforge-agent-sqlite-extensions",
- "eliteforge-agent-test-support",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-rusqlite",
-]
-
-[[package]]
 name = "eliteforge-agent-test-support"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-framework",
- "eliteforge-agent-memory",
- "eliteforge-agent-state-sqlite",
+ "eliteforge-agent-official-plugin-storage-local",
  "serde_json",
  "tempfile",
  "uuid",
@@ -1797,6 +1851,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ghash"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
+dependencies = [
+ "opaque-debug",
+ "polyval",
+]
+
+[[package]]
 name = "gif"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1973,6 +2037,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -2454,12 +2519,21 @@ name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+dependencies = [
+ "spin",
+]
 
 [[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libm"
+version = "0.2.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libsqlite3-sys"
@@ -2747,6 +2821,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint-dig"
+version = "0.8.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e661dda6640fad38e827a6d4a310ff4763082116fe217f279885c97f511bb0b7"
+dependencies = [
+ "lazy_static",
+ "libm",
+ "num-integer",
+ "num-iter",
+ "num-traits",
+ "rand 0.8.8",
+ "smallvec",
+ "zeroize",
+]
+
+[[package]]
 name = "num-cmp"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2804,6 +2894,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+ "libm",
 ]
 
 [[package]]
@@ -2811,6 +2902,12 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "opaque-debug"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "openssl-probe"
@@ -2907,6 +3004,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pem-rfc7468"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
+dependencies = [
+ "base64ct",
+]
+
+[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2982,6 +3088,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
+name = "pkcs1"
+version = "0.7.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
+dependencies = [
+ "der",
+ "pkcs8",
+ "spki",
+]
+
+[[package]]
 name = "pkcs8"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3008,6 +3125,18 @@ dependencies = [
  "fdeflate",
  "flate2",
  "miniz_oxide 0.8.9",
+]
+
+[[package]]
+name = "polyval"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d1fe60d06143b2430aa532c94cfe9e29783047f06c0d7fd359a9a51b729fa25"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "opaque-debug",
+ "universal-hash",
 ]
 
 [[package]]
@@ -3207,6 +3336,8 @@ version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e058c7de0b26af77780c769414d6257830bb240f3c38477dbc2c16e5f54d6d4c"
 dependencies = [
+ "libc",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.4",
 ]
 
@@ -3216,7 +3347,7 @@ version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b9ef1d0d795eb7d84685bca4f72f3649f064e6641543d3a8c415898726a57b41"
 dependencies = [
- "rand_chacha",
+ "rand_chacha 0.9.0",
  "rand_core 0.9.5",
 ]
 
@@ -3229,6 +3360,16 @@ dependencies = [
  "chacha20",
  "getrandom 0.4.3",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "rand_chacha"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
+dependencies = [
+ "ppv-lite86",
+ "rand_core 0.6.4",
 ]
 
 [[package]]
@@ -3363,8 +3504,10 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "encoding_rs",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -3373,10 +3516,13 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -3484,6 +3630,26 @@ dependencies = [
  "tower-service",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "rsa"
+version = "0.9.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
+dependencies = [
+ "const-oid",
+ "digest",
+ "num-bigint-dig",
+ "num-integer",
+ "num-traits",
+ "pkcs1",
+ "pkcs8",
+ "rand_core 0.6.4",
+ "signature",
+ "spki",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]
@@ -3900,6 +4066,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a978451301f4db1d02937a4ab3ccce137717b81826e79b7d49ffe3244a13c3b8"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3948,6 +4125,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
+ "digest",
  "rand_core 0.6.4",
 ]
 
@@ -3986,6 +4164,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
+name = "sm3"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebb9a3b702d0a7e33bc4d85a14456633d2b165c2ad839c5fd9a8417c1ab15860"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "smallvec"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4000,6 +4187,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "spki"
@@ -4290,6 +4483,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
@@ -4338,6 +4532,22 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite",
 ]
 
 [[package]]
@@ -4451,6 +4661,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 
 [[package]]
+name = "tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.8.8",
+ "rustls",
+ "rustls-pki-types",
+ "sha1",
+ "thiserror 1.0.69",
+ "utf-8",
+]
+
+[[package]]
 name = "type1-encoding-parser"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4521,6 +4751,16 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
+
+[[package]]
+name = "universal-hash"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc1de2c688dc15305988b563c3854064043356019f97a4b46276fe734c4f07ea"
+dependencies = [
+ "crypto-common",
+ "subtle",
+]
 
 [[package]]
 name = "unsafe-libyaml-norway"

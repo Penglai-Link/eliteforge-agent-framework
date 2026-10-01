@@ -2,9 +2,21 @@ use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_capability_pack::{
     EliteForgeOfficialCapabilityPack, agui::AgUiStream, human::AskUserPresentation,
-    mcp::DiscoverMcpTools, model::GenaiPlugin, storage::SqliteStoragePlugin,
+    mcp::DiscoverMcpTools, model::GenaiPlugin, storage::LocalStoragePlugin,
 };
 use serde_json::{Value, json};
+
+fn official_pack(path: impl AsRef<std::path::Path>) -> EliteForgeOfficialCapabilityPack {
+    let path = path.as_ref();
+    let artifact_root = path.with_extension("artifacts");
+    std::fs::create_dir_all(&artifact_root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifact_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    EliteForgeOfficialCapabilityPack::new(path, artifact_root)
+}
 
 struct AskThenReply;
 #[async_trait]
@@ -57,7 +69,7 @@ async fn official_pack_supports_agent_output_questions_and_persistent_resume() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("agent.sqlite");
     let pack = || {
-        EliteForgeOfficialCapabilityPack::new(&path)
+        official_pack(&path)
             .without_skills()
             .model(ChatModelPlugin::new(AskThenReply))
     };
@@ -147,7 +159,7 @@ async fn pack_installs_explicit_genai_even_when_framework_auto_models_are_disabl
     let agent = AgentBuilder::new()
         .default_models(false)
         .capability_pack(
-            EliteForgeOfficialCapabilityPack::new(directory.path().join("agent.sqlite"))
+            official_pack(directory.path().join("agent.sqlite"))
                 .model(GenaiPlugin::new("configured-chat").connection("gateway")),
         )
         .build()
@@ -168,36 +180,34 @@ fn official_pack_registers_skills_by_default_and_can_disable_them() {
             .map(|plugin| plugin.id().to_owned())
             .collect::<Vec<_>>()
     };
+    let pack_ids = |pack: EliteForgeOfficialCapabilityPack| {
+        pack.included_packs()
+            .into_iter()
+            .map(|included| included.id().to_owned())
+            .collect::<Vec<_>>()
+    };
 
     assert!(
-        plugin_ids(EliteForgeOfficialCapabilityPack::new(
-            directory.path().join("default.sqlite"),
-        ))
-        .iter()
-        .any(|id| id == "skills.default")
+        plugin_ids(official_pack(directory.path().join("default.sqlite")))
+            .iter()
+            .any(|id| id == "skills.default")
     );
     assert!(
-        plugin_ids(EliteForgeOfficialCapabilityPack::new(
-            directory.path().join("agent-tools.sqlite"),
-        ))
-        .iter()
-        .any(|id| id == "tools.agents")
+        pack_ids(official_pack(directory.path().join("agent-tools.sqlite")))
+            .iter()
+            .any(|id| id == "framework.tool-pack.agent-collaboration")
     );
     assert!(
-        !plugin_ids(
-            EliteForgeOfficialCapabilityPack::new(directory.path().join("disabled.sqlite"))
-                .without_skills(),
+        !plugin_ids(official_pack(directory.path().join("disabled.sqlite")).without_skills())
+            .iter()
+            .any(|id| id == "skills.default")
+    );
+    assert!(
+        !pack_ids(
+            official_pack(directory.path().join("disabled-agents.sqlite")).agent_tools(false)
         )
         .iter()
-        .any(|id| id == "skills.default")
-    );
-    assert!(
-        !plugin_ids(
-            EliteForgeOfficialCapabilityPack::new(directory.path().join("disabled-agents.sqlite"))
-                .agent_tools(false),
-        )
-        .iter()
-        .any(|id| id == "tools.agents")
+        .any(|id| id == "framework.tool-pack.agent-collaboration")
     );
 }
 
@@ -240,11 +250,9 @@ async fn official_pack_enables_local_tools_only_when_explicitly_configured() {
 
     let directory = tempfile::tempdir().unwrap();
     for enabled in [false, true] {
-        let mut pack = EliteForgeOfficialCapabilityPack::new(
-            directory.path().join(format!("catalog-{enabled}.sqlite")),
-        )
-        .without_skills()
-        .model(ChatModelPlugin::new(LocalToolCatalog { enabled }));
+        let mut pack = official_pack(directory.path().join(format!("catalog-{enabled}.sqlite")))
+            .without_skills()
+            .model(ChatModelPlugin::new(LocalToolCatalog { enabled }));
         if enabled {
             pack = pack
                 .read_only_filesystem(FileSystemToolsConfig::new(directory.path()))
@@ -290,13 +298,23 @@ async fn defaults_can_be_explicitly_replaced_or_disabled() {
     let agent = AgentBuilder::new()
         .default_models(false)
         .capability_pack(
-            EliteForgeOfficialCapabilityPack::new(&original)
+            official_pack(&original)
                 .without_model()
                 .without_agui()
                 .human_interaction(false)
                 .agent_tools(false)
                 .without_skills()
-                .storage(SqliteStoragePlugin::new(&replacement)),
+                .storage(LocalStoragePlugin::new(&replacement, {
+                    let root = replacement.with_extension("artifacts");
+                    std::fs::create_dir_all(&root).unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+                            .unwrap();
+                    }
+                    root
+                })),
         )
         .plugin(ChatModelPlugin::new(PlainReply))
         .build()
@@ -355,11 +373,9 @@ async fn optional_features_compile_without_implicitly_installing_their_plugins()
     use eliteforge_agent_official_capability_pack::{discovery::*, media::*, web::*};
     let root = tempfile::tempdir().unwrap();
     for enabled in [false, true] {
-        let mut pack = EliteForgeOfficialCapabilityPack::new(
-            root.path().join(format!("optional-{enabled}.sqlite")),
-        )
-        .without_skills()
-        .model(ChatModelPlugin::new(OptionalCatalog { enabled }));
+        let mut pack = official_pack(root.path().join(format!("optional-{enabled}.sqlite")))
+            .without_skills()
+            .model(ChatModelPlugin::new(OptionalCatalog { enabled }));
         if enabled {
             pack = pack
                 .web(

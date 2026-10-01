@@ -349,6 +349,7 @@ mod tests {
                 usage: Usage::default(),
                 steps: 0,
                 tool_calls: 0,
+                external_session: None,
             })
         }
     }

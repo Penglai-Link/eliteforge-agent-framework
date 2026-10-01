@@ -202,8 +202,36 @@ impl ChatResponse {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderErrorCategory {
+    Unavailable,
+    Authentication,
+    Permission,
+    Quota,
+    Transient,
+    AccountChanged,
+    Other,
+}
+
+/// Structured provider failure. Messages are raw and must pass through the
+/// host's redaction policy before export, just like other model errors.
+#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
+#[error("{provider} model error: {message}")]
+pub struct ProviderModelError {
+    pub provider: String,
+    pub category: ProviderErrorCategory,
+    pub http_status: Option<u16>,
+    pub business_code: Option<i32>,
+    pub error_type: Option<String>,
+    pub model: Option<crate::ModelRef>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum ModelError {
+    #[error(transparent)]
+    Provider(Box<ProviderModelError>),
     #[error("model is unavailable: {0}")]
     Unavailable(String),
     #[error("operation result is unknown: {0}")]

@@ -1,4 +1,8 @@
-# MCP 资源
+# MCP 资源接入设计
+
+## 目标与边界
+
+本文说明 MCP 服务器提供资源和资源模板时，Framework 如何将其接入 Agent 工具调用链。资源 URI 由 MCP 服务器解释；插件不把 URI 当成本地路径，也不负责应用身份授权。
 
 配置的 MCP 服务器声明 `resources` 能力后，插件在其命名空间中增加三个工具：
 
@@ -34,9 +38,9 @@ let content = agent.execute(McpResources {
 HTTP SSE 可在解码前拒绝超大帧，表现为请求错误；已解码的超大资源返回大小限制错误。
 stdio／普通 HTTP JSON 解码时的峰值内存仍由 SDK 决定，返回大小限制不等同于流式内存隔离。
 
-资源订阅和 MCP prompts 不在本轮范围内。通用工具按需发现另见[工具补齐进度](tool-capability-progress.md)。
+资源订阅和 MCP prompts 尚未提供。通用工具按需发现另见[可选工具插件](可选工具插件.md)。
 
-## 宿主连接和 STDIO framing
+## 连接生命周期与传输注意事项
 
 宿主可使用公共 `McpClient::connect`、`discover` 和返回的 `ToolBinding`，
 把执行器放入运行级 `ToolLease`。必须从连接建立起就管理取消和关闭，

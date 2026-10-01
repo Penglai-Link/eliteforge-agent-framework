@@ -1,6 +1,6 @@
 //! Official plugin configuration in one AgentBuilder::capability_pack call.
 //!
-//! Defaults include Genai, SQLite, human interaction, agent collaboration,
+//! Defaults include Genai, local storage, human interaction, agent collaboration,
 //! Skills, AG-UI, MCP and telemetry. Local filesystem/command packs are opt-in.
 //! Plugins run in the host process; only configured external services or commands
 //! create child processes. Resource acquisition and shutdown belong to the Agent.
@@ -13,7 +13,7 @@ pub use eliteforge_agent_official_plugin_agui as agui;
 pub use eliteforge_agent_official_plugin_model_genai as model;
 pub use eliteforge_agent_official_plugin_otel as telemetry;
 pub use eliteforge_agent_official_plugin_skills as skills;
-pub use eliteforge_agent_official_plugin_storage_sqlite as storage;
+pub use eliteforge_agent_official_plugin_storage_local as storage;
 pub use eliteforge_agent_official_plugin_tools_agents as agents;
 pub use eliteforge_agent_official_plugin_tools_human as human;
 pub use eliteforge_agent_official_plugin_tools_mcp as mcp;
@@ -31,7 +31,7 @@ pub use eliteforge_agent_official_plugin_tools_web as web;
 /// ID through AgentBuilder::plugin is an error, not an override.
 pub struct EliteForgeOfficialCapabilityPack {
     model: Option<Arc<dyn Plugin>>,
-    storage: Arc<storage::SqliteStoragePlugin>,
+    storage: Arc<storage::LocalStoragePlugin>,
     model_factory: Option<ConfiguredPluginFactory>,
     human_interaction: bool,
     agent_tools: bool,
@@ -51,15 +51,15 @@ pub struct EliteForgeOfficialCapabilityPack {
 }
 
 impl EliteForgeOfficialCapabilityPack {
-    /// Register the eight default in-process plugins. MCP starts with no servers; telemetry
+    /// Register the default in-process capabilities. MCP starts with no servers; telemetry
     /// reads the host's global providers during installation.
-    pub fn new(database: impl Into<PathBuf>) -> Self {
+    pub fn new(database: impl Into<PathBuf>, artifact_root: impl Into<PathBuf>) -> Self {
         Self {
             model: None,
             model_factory: Some(ConfiguredPluginFactory::from_config(
                 model::GenaiPlugin::default(),
             )),
-            storage: Arc::new(storage::SqliteStoragePlugin::new(database)),
+            storage: Arc::new(storage::LocalStoragePlugin::new(database, artifact_root)),
             human_interaction: true,
             agent_tools: true,
             skills: Some(Arc::new(skills::SkillsPlugin::default())),
@@ -98,8 +98,8 @@ impl EliteForgeOfficialCapabilityPack {
         self
     }
 
-    /// Replace the pack's SQLite configuration, including its database path.
-    pub fn storage(mut self, plugin: storage::SqliteStoragePlugin) -> Self {
+    /// Replace the pack's local storage configuration.
+    pub fn storage(mut self, plugin: storage::LocalStoragePlugin) -> Self {
         self.storage = Arc::new(plugin);
         self
     }
@@ -202,14 +202,43 @@ impl CapabilityPack for EliteForgeOfficialCapabilityPack {
     }
     fn included_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
         let mut packs: Vec<Arc<dyn CapabilityPack>> = Vec::new();
+        let mut local = tools::LocalToolsConfig::default();
+        let mut has_local = false;
         if let Some(config) = &self.read_only_filesystem {
-            packs.push(Arc::new(tools::read_only_filesystem_pack(config.clone())));
+            local = local.read_only_filesystem(config.clone());
+            has_local = true;
         }
         if let Some(config) = &self.write_filesystem {
-            packs.push(Arc::new(tools::write_filesystem_pack(config.clone())));
+            local = local.write_filesystem(config.clone());
+            has_local = true;
         }
         if let Some(config) = &self.system_commands {
-            packs.push(Arc::new(tools::system_command_pack(config.clone())));
+            local = local.system_commands(config.clone());
+            has_local = true;
+        }
+        if has_local {
+            packs.push(Arc::new(tools::local_tools_pack(local)));
+        }
+        if self.human_interaction {
+            packs.push(Arc::new(tools::human_interaction_pack()));
+        }
+        if self.agent_tools {
+            packs.push(Arc::new(tools::agent_collaboration_pack()));
+        }
+        packs.push(Arc::new(tools::mcp_tools_pack(
+            self.mcp.iter().map(|plugin| (**plugin).clone()),
+        )));
+        #[cfg(feature = "web")]
+        if let Some(plugin) = &self.web {
+            packs.push(Arc::new(tools::web_tools_pack((**plugin).clone())));
+        }
+        #[cfg(feature = "media")]
+        if let Some(config) = &self.media {
+            packs.push(Arc::new(tools::media_tools_pack(config.clone())));
+        }
+        #[cfg(feature = "discovery")]
+        if let Some(plugin) = &self.discovery {
+            packs.push(Arc::new(tools::tool_discovery_pack((**plugin).clone())));
         }
         packs
     }
@@ -218,23 +247,13 @@ impl CapabilityPack for EliteForgeOfficialCapabilityPack {
     }
     fn retained_plugins(&self) -> Vec<Arc<dyn Plugin>> {
         #[allow(unused_mut)] // Optional features append retained provider instances.
-        let mut plugins: Vec<Arc<dyn Plugin>> = self.model.iter().cloned().collect();
-        #[cfg(feature = "web")]
-        plugins.extend(self.web.iter().cloned().map(|p| p as Arc<dyn Plugin>));
-        #[cfg(feature = "discovery")]
-        plugins.extend(self.discovery.iter().cloned().map(|p| p as Arc<dyn Plugin>));
-        plugins
+        self.model.iter().cloned().collect()
     }
     fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
         let telemetry = if self.telemetry.is_empty() {
             vec![Arc::new(telemetry::TelemetryPlugin::default())]
         } else {
             self.telemetry.clone()
-        };
-        let mcp = if self.mcp.is_empty() {
-            vec![Arc::new(mcp::McpToolsPlugin::default())]
-        } else {
-            self.mcp.clone()
         };
         let mut plugins: Vec<Arc<dyn Plugin>> = telemetry
             .into_iter()
@@ -247,36 +266,11 @@ impl CapabilityPack for EliteForgeOfficialCapabilityPack {
         if let Some(model) = &self.model {
             plugins.push(model.clone());
         }
-        if self.human_interaction {
-            plugins.push(Arc::new(human::HumanInteractionPlugin));
-        }
-        if self.agent_tools {
-            plugins.push(Arc::new(agents::AgentToolsPlugin));
-        }
         if let Some(skills) = &self.skills {
             plugins.push(ConfiguredPluginFactory::from_config((**skills).clone()).plugin());
         }
         if let Some(agui) = &self.agui {
             plugins.push(ConfiguredPluginFactory::from_config((**agui).clone()).plugin());
-        }
-        plugins.extend(
-            mcp.into_iter()
-                .map(|plugin| ConfiguredPluginFactory::from_config((*plugin).clone()).plugin()),
-        );
-        #[cfg(feature = "web")]
-        if let Some(plugin) = &self.web {
-            plugins.push(plugin.clone());
-        }
-        #[cfg(feature = "media")]
-        if let Some(config) = &self.media {
-            plugins.push(
-                ConfiguredPluginFactory::from_config(media::MediaToolsPlugin::new(config.clone()))
-                    .plugin(),
-            );
-        }
-        #[cfg(feature = "discovery")]
-        if let Some(plugin) = &self.discovery {
-            plugins.push(plugin.clone());
         }
         plugins
     }

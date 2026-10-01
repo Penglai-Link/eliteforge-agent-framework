@@ -72,6 +72,179 @@ fn code(events: &[Event]) -> Option<&str> {
 }
 
 struct Streaming;
+
+struct ControlledExternal {
+    prefix: &'static str,
+    final_text: &'static str,
+    release: Arc<Notify>,
+    fail: bool,
+}
+
+#[async_trait]
+impl ExternalAgent for ControlledExternal {
+    async fn run(
+        &self,
+        _: ExternalAgentRequest,
+        sink: &dyn ExternalAgentEventSink,
+    ) -> Result<ExternalAgentResult, AgentError> {
+        sink.emit(ExternalAgentEvent::ReasoningDelta("thinking".into()))
+            .await;
+        if !self.prefix.is_empty() {
+            sink.emit(ExternalAgentEvent::TextDelta(self.prefix.into()))
+                .await;
+        }
+        sink.emit(ExternalAgentEvent::Status("running".into()))
+            .await;
+        sink.emit(ExternalAgentEvent::Tool {
+            name: "external-tool".into(),
+            detail: json!({}),
+        })
+        .await;
+        sink.emit(ExternalAgentEvent::Approval {
+            detail: json!({"pending":true}),
+        })
+        .await;
+        self.release.notified().await;
+        if self.fail {
+            return Err(AgentError::Run("external failure".into()));
+        }
+        Ok(ExternalAgentResult {
+            content: self.final_text.into(),
+            structured: None,
+            session: Some(ExternalSessionRef {
+                session_id: "external-session".into(),
+                run_id: None,
+            }),
+            usage: Usage::default(),
+        })
+    }
+}
+
+async fn external_agent(
+    prefix: &'static str,
+    final_text: &'static str,
+    fail: bool,
+) -> (Agent, Arc<Notify>) {
+    let release = Arc::new(Notify::new());
+    let agent = AgentBuilder::new()
+        .default_models(false)
+        .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
+        .plugin(ExternalAgentPlugin::new(ControlledExternal {
+            prefix,
+            final_text,
+            fail,
+            release: release.clone(),
+        }))
+        .plugin(
+            AgUiPlugin::new(AgUiOptions {
+                include_reasoning: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .build()
+        .await
+        .unwrap();
+    (agent, release)
+}
+
+#[tokio::test]
+async fn external_deltas_and_observations_arrive_before_completion() {
+    let (agent, release) = external_agent("hello", "hello world", false).await;
+    let (handle, mut stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("external", "task"))
+        .unwrap();
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = stream.recv().await.expect("stream ended before external completion");
+            let observed = matches!(&event, Event::Custom(custom) if custom.name == "framework.external_agent");
+            events.push(event);
+            if observed { break; }
+        }
+    }).await.unwrap();
+    assert_eq!(text(&events), "hello");
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, Event::ReasoningMessageContent(_)))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::RunFinished(_)))
+    );
+    release.notify_one();
+    let (result, tail) = complete(agent, handle, stream).await;
+    assert_eq!(result.unwrap().output, "hello world");
+    events.extend(tail);
+    assert_eq!(text(&events), "hello world");
+    assert_eq!(types(&events, EventType::TextMessageStart), 1);
+    assert_eq!(events.iter().filter(|event| matches!(event, Event::Custom(custom) if custom.name == "framework.external_agent")).count(), 4);
+    assert_eq!(types(&events, EventType::ToolCallStart), 0);
+    validate_client(&events).await;
+}
+
+#[tokio::test]
+async fn external_final_text_handles_identical_different_and_no_prefix() {
+    for (prefix, final_text, expected, messages) in [
+        ("answer", "answer", "answer", 1),
+        ("working", "answer", "workinganswer", 2),
+        ("", "answer", "answer", 1),
+    ] {
+        let (agent, release) = external_agent(prefix, final_text, false).await;
+        release.notify_one();
+        let (handle, stream) = agent
+            .start_with_output::<AgUiStream>(RunRequest::new("external", "task"))
+            .unwrap();
+        let (result, events) = complete(agent, handle, stream).await;
+        assert_eq!(result.unwrap().output, final_text);
+        assert_eq!(text(&events), expected);
+        assert_eq!(types(&events, EventType::TextMessageStart), messages);
+        assert_eq!(types(&events, EventType::TextMessageEnd), messages);
+        validate_client(&events).await;
+    }
+}
+
+#[tokio::test]
+async fn external_failure_cancel_and_timeout_close_streamed_messages() {
+    for mode in ["failure", "cancel", "timeout"] {
+        let (agent, release) = external_agent("partial", "answer", mode == "failure").await;
+        let mut request = RunRequest::new("external", "task");
+        if mode == "timeout" {
+            request.limits.run_timeout = Duration::from_millis(100);
+        }
+        let (handle, mut stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
+        let mut events = Vec::new();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = stream.recv().await.unwrap();
+                let text = matches!(event, Event::TextMessageContent(_));
+                events.push(event);
+                if text {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        match mode {
+            "failure" => release.notify_one(),
+            "cancel" => agent.cancel(&handle).unwrap(),
+            _ => {}
+        }
+        let (result, tail) = complete(agent, handle, stream).await;
+        assert!(result.is_err());
+        events.extend(tail);
+        assert_eq!(
+            types(&events, EventType::TextMessageEnd),
+            1,
+            "{mode}: {events:?}"
+        );
+        assert_eq!(types(&events, EventType::RunError), 1, "{mode}: {events:?}");
+    }
+}
+
 #[async_trait]
 impl ChatModel for Streaming {
     async fn generate(
@@ -197,6 +370,11 @@ async fn offloaded_tool_results_preserve_reference_and_tool_lifecycle() {
     use eliteforge_agent_context::ToolOutputOffloader;
     use eliteforge_agent_official_plugin_storage_local::{FileArtifactLimits, FileArtifactStore};
     let dir = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
     let store =
         Arc::new(FileArtifactStore::open(dir.path(), FileArtifactLimits::default()).unwrap());
     let plugin = AgUiPlugin::default();

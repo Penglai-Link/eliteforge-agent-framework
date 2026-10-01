@@ -21,4 +21,4 @@ This directory vendors the sqlite-vec v0.1.9 loadable SQLite extension for optio
 | `macos-x86_64` | `53ad76e400786515e2edcaed2f01271dda846316390b761fadbd2dcf56aa4713` | `vec0.dylib` | `d39d33d16d302d57440d9a9cdbe3cc095e8324aa96b979b5171f545a6346996d` |
 | `windows-x86_64` | `51581189d52066b4dfc6631f6d7a3eab7dedc2260656ab09ca97ab3fb8165983` | `vec0.dll` | `fcf98662a7ad9dce394b96a88f91032047823831b951c76636787c312a6476e6` |
 
-Resources are selected and loaded by the eliteforge-agent-sqlite-extensions Rust crate.
+Resources are selected and loaded by the eliteforge-agent-official-plugin-storage-local Rust crate.

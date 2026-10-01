@@ -73,6 +73,7 @@ impl VideoGenerationModel for DemoMedia {
             model: ModelRef::new("demo", model),
             protocol: "demo/video".into(),
             id: "one".into(),
+            binding_id: None,
             status: ModelJobStatus::Queued,
             progress: None,
             output: None,

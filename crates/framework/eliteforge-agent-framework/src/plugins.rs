@@ -45,6 +45,10 @@ impl Plugin for DefaultsPlugin {
                 .is_empty()
             && context
                 .services()
+                .get::<ModelRuntimeService>()
+                .is_none_or(|service| service.0.snapshot().chat.models().is_empty())
+            && context
+                .services()
                 .get::<LoopService>()
                 .is_some_and(|s| s.0.requires_model())
         {

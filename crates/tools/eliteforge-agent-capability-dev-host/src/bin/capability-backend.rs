@@ -6,9 +6,9 @@ use eliteforge_agent_official_plugin_storage_local::{
     SqliteStateStore, SqliteSummaryStore,
 };
 use serde_json::{Value, json};
-use std::{path::PathBuf, sync::Arc};
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
+use std::{path::PathBuf, sync::Arc};
 
 struct DemoChat(String);
 struct ToolResources;
@@ -130,10 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut backend = TypedBackend::default();
     if selected.contains("demo.summaries") {
-        let store = Arc::new(
-            SqliteSummaryStore::open("summary.db", Default::default())
-                .await?,
-        );
+        let store = Arc::new(SqliteSummaryStore::open("summary.db", Default::default()).await?);
         backend.summary_store("demo.summaries", store.clone())?;
         backend.on_shutdown(move || async move {
             store
@@ -176,13 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if selected.contains("demo.memory") {
         backend.long_term_memory(
             "demo.memory",
-            Arc::new(
-                SqliteLongTermMemory::open(
-                    "memory.db",
-                    Default::default(),
-                )
-                .await?,
-            ),
+            Arc::new(SqliteLongTermMemory::open("memory.db", Default::default()).await?),
         )?;
     }
     backend.method("demo.discovery", "discover", |_: Value, _| async {

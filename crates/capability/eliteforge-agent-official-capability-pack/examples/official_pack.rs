@@ -1,4 +1,4 @@
-//! Offline official-pack example with SQLite and AG-UI output.
+//! Offline official-pack example with local storage and AG-UI output.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_capability_pack::{
@@ -26,9 +26,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let database = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "agent.sqlite".into());
+    let artifact_root = std::path::Path::new(&database).with_extension("artifacts");
+    std::fs::create_dir_all(&artifact_root)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifact_root, std::fs::Permissions::from_mode(0o700))?;
+    }
     let agent = AgentBuilder::new()
         .capability_pack(
-            EliteForgeOfficialCapabilityPack::new(database).model(ChatModelPlugin::new(DemoModel)),
+            EliteForgeOfficialCapabilityPack::new(database, artifact_root)
+                .model(ChatModelPlugin::new(DemoModel)),
         )
         .build()
         .await?;

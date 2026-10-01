@@ -1,9 +1,11 @@
-# AG-UI 事件
+# AG-UI 事件协议设计
+
+## 目标与边界
 
 `eliteforge-agent-official-plugin-agui` 把当前执行的 Framework 实时事件转换为 AG-UI 事件，
 并提供 SSE 编码。它是输出插件，不负责 HTTP 路由、鉴权、浏览器连接或事件回放。
 
-[Framework 架构](architecture.md)说明运行身份、执行生命周期和通用事件发布管线；本文只说明
+[Framework 架构](框架架构总览.md)说明运行身份、执行生命周期和通用事件发布管线；本文只说明
 AG-UI 如何接收、转换和输出这些事件。
 
 ## 接入
@@ -127,7 +129,7 @@ sequenceDiagram
 协作生命周期事件不携带委派任务正文、Thread 消息或用户答案。暂停交互只携带界面收集答案所需的
 `InteractionRequest`。
 
-## 边界与失败
+## 注意事项
 
 - 每次执行尝试都有独立的 AG-UI 通道；恢复会得到新的 `executionId` 和输出流。
 - 通道溢出、事件超限或协议顺序错误会结束该 AG-UI 流并发送 `RUN_ERROR`，不会取消 Agent、重试工具或改变 `agent.wait(handle)` 的结果。

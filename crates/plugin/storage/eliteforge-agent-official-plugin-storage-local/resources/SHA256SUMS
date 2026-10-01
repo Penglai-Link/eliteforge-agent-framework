@@ -21,7 +21,7 @@ eaa13777fe39cdcc7b5afeacc7097fd0170a9bff5b09f39254bd8543c621d3e4  sqlite-simple/
 27c700ca34cd5935ff934459f1f9c107cdefef7e54250de5a1c6646e05f21a4f  sqlite-simple/v0.7.1/windows-x86_64/simple.dll
 a38070a94d4afd9cd710e3ce67bd1de78097cfe1784c1f0109ac95d3c196bfdc  sqlite-vec/v0.1.9/LICENSE-APACHE
 6ce72bbe12d975bd5286e5ab0a064c069693300c47bccbc57bec18485f1621ea  sqlite-vec/v0.1.9/LICENSE-MIT
-de6c4704e77c1c720c3577858569a758f1fcd6deb2e6fff87e22745df7c18026  sqlite-vec/v0.1.9/README.md
+8af144a93ad2808a1e90ff01ca5d09e15a662da5f7f9d85a0811dc2eb3d79f1f  sqlite-vec/v0.1.9/README.md
 3083712f52da27a172469b34d1b82fe8388f2c76bc822b85ceaaed9f8e460c74  sqlite-vec/v0.1.9/android-aarch64/vec0.so
 35a19b53870192306f2f0b1dfc148101fa1f7e0409a65ea998078b390f514177  sqlite-vec/v0.1.9/android-armv7a/vec0.so
 e218b3c4b1f7dd237b5e7becfe04a2522cb5c4b64773bd9ff2d7b386ca7f200b  sqlite-vec/v0.1.9/android-i686/vec0.so

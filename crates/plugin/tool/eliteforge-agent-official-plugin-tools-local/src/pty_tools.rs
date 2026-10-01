@@ -115,7 +115,7 @@ impl PtyTools {
                 };
                 serde_json::to_value(self.service.start(PtyStart {
                     owner,
-                    invocation_id: invocation_id,
+                    invocation_id,
                     command,
                     args,
                     program,

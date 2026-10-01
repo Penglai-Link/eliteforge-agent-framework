@@ -198,6 +198,55 @@ async fn duplicate_bindings_and_invalid_defaults_fail_at_build_ambiguity_at_call
 }
 
 #[tokio::test]
+async fn retired_embedding_with_host_space_is_unavailable_and_can_reappear() {
+    let adapter = Arc::new(Embedder::default());
+    let model = ModelRef::new("local", "a");
+    let space = EmbeddingSpace {
+        model: model.clone(),
+        revision: "v1".into(),
+        dimensions: 3,
+        preprocessing: "plain/v1".into(),
+    };
+    let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
+    let mut update = ModelRuntimeUpdate::new("alice", 1, vec![]);
+    update
+        .embedding
+        .push(EmbeddingModelService::new(model.clone(), adapter.clone()));
+    runtime.replace_connection("local", update.clone()).unwrap();
+    let agent = TestBuilder::default()
+        .plugin(ModelRuntimePlugin::new(runtime.clone()))
+        .plugin(ChatModelPlugin::new(Echo))
+        .plugin(Register(
+            "index.space".into(),
+            EmbeddingSpaceService(space.clone()),
+        ))
+        .plugin(ModelRoutingPlugin(
+            ModelRouting::default().default_for(ModelOperation::Embedding, model.clone()),
+        ))
+        .build()
+        .await
+        .unwrap();
+    runtime
+        .replace_connection("local", ModelRuntimeUpdate::new("", 0, vec![]))
+        .unwrap();
+    assert!(agent.models(ModelOperation::Embedding).is_empty());
+    assert!(matches!(
+        agent.embed(EmbeddingRequest::texts(["q"])).await,
+        Err(AgentError::Model(ModelError::Unavailable(_)))
+    ));
+    assert!(adapter.calls.lock().unwrap().is_empty());
+    runtime.replace_connection("local", update).unwrap();
+    let response = agent.embed(EmbeddingRequest::texts(["q"])).await.unwrap();
+    assert_eq!(response.model, model);
+    assert_eq!(response.vectors[0].values.len(), space.dimensions);
+    assert_eq!(
+        adapter.calls.lock().unwrap()[0].dimensions,
+        Some(space.dimensions)
+    );
+    agent.close().await;
+}
+
+#[tokio::test]
 async fn multimodal_chat_filters_candidates_and_explicit_incompatible_choice_never_falls_back() {
     let agent = TestBuilder::default()
         .plugin(ModelConnectionPlugin::new(ModelConnection::new(

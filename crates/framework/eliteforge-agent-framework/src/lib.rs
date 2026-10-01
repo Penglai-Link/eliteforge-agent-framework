@@ -19,8 +19,10 @@ pub use react::*;
 pub mod workflow;
 pub use workflow::*;
 mod model_execution;
+mod model_recovery;
 mod model_runtime;
 pub use model_execution::TranscriptProjection;
+pub use model_recovery::*;
 pub use model_runtime::*;
 #[cfg(test)]
 mod tests;

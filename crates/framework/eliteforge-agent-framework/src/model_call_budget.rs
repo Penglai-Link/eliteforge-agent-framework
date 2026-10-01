@@ -2,7 +2,7 @@
 use crate::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 pub(crate) struct StepModels<'a> {
-    pub inner: &'a dyn ChatExecutor,
+    pub inner: &'a ModelInvoker,
     pub catalog_snapshot: std::sync::Arc<ModelCatalog>,
     pub limit: Option<usize>,
     pub used: AtomicUsize,
@@ -50,7 +50,14 @@ impl ChatExecutor for StepModels<'_> {
         // Keep one dispatch available for the answer after reduction.
         self.reserve(true)?;
         self.inner
-            .invoke_auxiliary(model, request, stage, limits, context)
+            .invoke_auxiliary_in_catalog(
+                &self.catalog_snapshot,
+                model,
+                request,
+                stage,
+                limits,
+                context,
+            )
             .await
     }
 }

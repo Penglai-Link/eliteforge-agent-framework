@@ -19,6 +19,7 @@ tokio-util.workspace = true
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
 
 [dev-dependencies]
+eliteforge-agent-test-support = { path = "../../testing/eliteforge-agent-test-support", version = "0.1.0" }
 eliteforge-agent-plugin-core = { path = "../../framework/eliteforge-agent-plugin-core", version = "0.1.0" }
 rand = "0.8"
 rsa = "0.9"

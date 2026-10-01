@@ -122,11 +122,11 @@ impl PtyService {
             .collect();
         // Do not consume an incomplete UTF-8 character at a page/read boundary.
         // Invalid bytes still use lossy decoding; a closed stream cannot complete a suffix.
-        if let Err(error) = std::str::from_utf8(&bytes) {
-            if error.error_len().is_none() && (!output.closed || start + (bytes.len() as u64) < end)
-            {
-                bytes.truncate(error.valid_up_to());
-            }
+        if let Err(error) = std::str::from_utf8(&bytes)
+            && error.error_len().is_none()
+            && (!output.closed || start + (bytes.len() as u64) < end)
+        {
+            bytes.truncate(error.valid_up_to());
         }
         Ok(PtySnapshot {
             terminal_id: id.into(),
@@ -303,10 +303,10 @@ impl PtyService {
                         }
                         status
                     });
-                    if status.is_some() {
-                        if let Ok(mut writer) = session.writer.lock() {
-                            writer.take();
-                        }
+                    if status.is_some()
+                        && let Ok(mut writer) = session.writer.lock()
+                    {
+                        writer.take();
                     }
                     let closed = session
                         .output

@@ -32,9 +32,13 @@ impl fw::ExternalAgent for CliExternalAgent {
         request: fw::ExternalAgentRequest,
         sink: &dyn fw::ExternalAgentEventSink,
     ) -> Result<fw::ExternalAgentResult, fw::AgentError> {
-        let (sender, mut receiver) = mpsc::unbounded_channel();
+        let (sender, mut receiver) = mpsc::channel(1024);
+        let overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_overflow = overflow.clone();
         let observed = Arc::new(move |event| {
-            let _ = sender.send(event);
+            if sender.try_send(event).is_err() {
+                callback_overflow.store(true, std::sync::atomic::Ordering::Release);
+            }
         });
         let context = ExternalCliRequest {
             prompt: request.input.protocol_text(),
@@ -47,6 +51,11 @@ impl fw::ExternalAgent for CliExternalAgent {
         let invocation = self.cli.invoke(context, Some(observed));
         tokio::pin!(invocation);
         let result = loop {
+            if overflow.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(fw::AgentError::Run(
+                    "external event queue capacity exceeded".into(),
+                ));
+            }
             tokio::select! {
                 event = receiver.recv() => {
                     if let Some(event) = event {
@@ -58,6 +67,11 @@ impl fw::ExternalAgent for CliExternalAgent {
                 result = &mut invocation => break result,
             }
         };
+        if overflow.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(fw::AgentError::Run(
+                "external event queue capacity exceeded".into(),
+            ));
+        }
         while let Ok(event) = receiver.try_recv() {
             forward_event(event, sink).await;
         }

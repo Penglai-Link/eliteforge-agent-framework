@@ -1,7 +1,9 @@
-# DAG 工作流
+# DAG 工作流技术设计
 
 `DagWorkflowLoop` 是 Framework 提供的默认 DAG 执行器，通过 `AgentLoopPlugin`
 安装。Agent 不指定循环时仍使用普通 ReAct。整个执行器和单个节点类型均可由插件替换。
+
+本文说明 DAG 定义、节点调度、状态提交、恢复及与上层应用的职责边界。节点内的模型和工具调用仍走 Framework 的统一调用链。
 
 ```mermaid
 flowchart LR
@@ -42,7 +44,7 @@ let definition = DagWorkflowDefinition {
     max_parallel_nodes: 2,
 };
 let agent = AgentBuilder::new()
-    .plugin(eliteforge_agent_official_plugin_storage_sqlite::SqliteStoragePlugin::new("agent.sqlite"))
+    .plugin(eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin::new("agent.sqlite", "agent-artifacts"))
     .plugin(model_connection_plugin)
     .plugin(model_strategy_plugin)
     .plugin(AgentLoopPlugin::new(DagWorkflowLoop::new(definition)?))
@@ -139,12 +141,12 @@ route 选择 left                            ├─ join
 ## 可运行示例
 
 ```sh
-cargo run -p eliteforge-agent-state-sqlite --example dag -- /tmp/dag-demo.db -7
-cargo run -p eliteforge-agent-state-sqlite --example dag -- /tmp/dag-demo.db 7
+cargo run -p eliteforge-agent-official-plugin-storage-local --example dag -- /tmp/dag-demo.db -7
+cargo run -p eliteforge-agent-official-plugin-storage-local --example dag -- /tmp/dag-demo.db 7
 ```
 
 示例完全离线，分别输出 7 和 14，并打印未选分支的 `Skipped` 状态。
-正式回归测试位于 `eliteforge-agent-state-sqlite/tests/dag.rs` 和 `tests/crash_recovery.rs`。
+正式回归测试位于 `eliteforge-agent-official-plugin-storage-local/tests/state_dag.rs` 和 `tests/crash_recovery.rs`。
 
 ## 节点中间件与可观测
 
@@ -153,4 +155,4 @@ cargo run -p eliteforge-agent-state-sqlite --example dag -- /tmp/dag-demo.db 7
 模型与工具作为当前节点的子 span；节点取消不依赖事件队列回调完成收尾。
 
 `RunContext::node_execution()` 暴露当前节点的 invocation、attempt 和前次执行身份。
-它们与 `Running` 在同一个事务中提交，详见[接入说明与隐私边界](observability.md)。
+它们与 `Running` 在同一个事务中提交，详见[接入说明与隐私边界](可观测性设计.md)。

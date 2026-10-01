@@ -808,6 +808,23 @@ impl<T: ?Sized> CapabilityCatalog<T> {
         }
         Ok(self)
     }
+    /// Preserve configured choices across discovery updates. A retired default
+    /// or stage model returns `Unavailable` when selected; it must not prevent
+    /// the provider's directory or account invalidation from being published.
+    pub fn with_dynamic_routing(
+        mut self,
+        operation: ModelOperation,
+        routing: &ModelRouting,
+    ) -> Self {
+        self.default = routing.defaults.get(&operation).cloned();
+        self.stages = routing
+            .stages
+            .iter()
+            .filter(|((op, _), _)| *op == operation)
+            .map(|((_, stage), model)| (stage.clone(), model.clone()))
+            .collect();
+        self
+    }
     pub fn select(
         &self,
         choice: &ModelChoice,

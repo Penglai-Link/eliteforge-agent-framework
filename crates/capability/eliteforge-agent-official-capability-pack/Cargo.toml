@@ -6,15 +6,15 @@ edition.workspace = true
 
 [features]
 default = []
-web = ["dep:eliteforge-agent-official-plugin-tools-web"]
-media = ["dep:eliteforge-agent-official-plugin-tools-media"]
-discovery = ["dep:eliteforge-agent-official-plugin-tools-discovery"]
+web = ["dep:eliteforge-agent-official-plugin-tools-web", "eliteforge-agent-capability-tools/web"]
+media = ["dep:eliteforge-agent-official-plugin-tools-media", "eliteforge-agent-capability-tools/media"]
+discovery = ["dep:eliteforge-agent-official-plugin-tools-discovery", "eliteforge-agent-capability-tools/discovery"]
 
 [dependencies]
 eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core" }
 eliteforge-agent-capability-tools = { path = "../eliteforge-agent-capability-tools" }
 eliteforge-agent-official-plugin-model-genai = { path = "../../plugin/model/eliteforge-agent-official-plugin-model-genai" }
-eliteforge-agent-official-plugin-storage-sqlite = { path = "../../plugin/storage/eliteforge-agent-official-plugin-storage-sqlite" }
+eliteforge-agent-official-plugin-storage-local = { path = "../../plugin/storage/eliteforge-agent-official-plugin-storage-local" }
 eliteforge-agent-official-plugin-tools-human = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-human" }
 eliteforge-agent-official-plugin-skills = { path = "../../plugin/skill/eliteforge-agent-official-plugin-skills" }
 eliteforge-agent-official-plugin-agui = { path = "../../plugin/protocol/eliteforge-agent-official-plugin-agui" }

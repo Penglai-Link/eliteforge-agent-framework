@@ -134,3 +134,153 @@ async fn auxiliary_calls_reserve_the_last_dispatch_for_the_answer() {
     assert_eq!(*completed.lock().unwrap(), ["failed"]);
     agent.close().await;
 }
+
+struct AccountBoundModel {
+    revision: usize,
+    current_revision: Arc<std::sync::atomic::AtomicUsize>,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+#[async_trait::async_trait]
+impl ChatModel for AccountBoundModel {
+    async fn generate(
+        &self,
+        model: &str,
+        _: ChatRequest,
+        _: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        if self
+            .current_revision
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != self.revision
+        {
+            return Err(ModelError::Provider(Box::new(ProviderModelError {
+                provider: "test".into(),
+                category: ProviderErrorCategory::AccountChanged,
+                http_status: None,
+                business_code: None,
+                error_type: None,
+                model: None,
+                message: "account changed before dispatch".into(),
+            })));
+        }
+        self.calls.lock().unwrap().push(model.into());
+        Ok(ChatResponse::text("bound answer"))
+    }
+}
+
+struct RefreshDuringPreparation {
+    runtime: Arc<ModelRuntime>,
+    replacement: ModelRuntimeUpdate,
+    current_revision: Arc<std::sync::atomic::AtomicUsize>,
+    completed: Arc<Mutex<Vec<String>>>,
+}
+#[async_trait::async_trait]
+impl ContextPreparationPolicy for RefreshDuringPreparation {
+    async fn prepare(
+        &self,
+        input: &ContextAssemblyInput<'_>,
+        reductions: usize,
+    ) -> Result<ContextPreparation, AgentError> {
+        if reductions > 0 {
+            return DefaultContextAssembler::default()
+                .assemble(input)
+                .await
+                .map(ContextPreparation::Ready);
+        }
+        // Deterministically refresh between capture of the step snapshot and
+        // dispatch of its reduction, as a host account notification would.
+        self.current_revision.store(
+            self.replacement.revision as usize,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        self.runtime
+            .replace_connection("personai", self.replacement.clone())?;
+        Ok(ContextPreparation::Reduce(ContextReductionJob {
+            source_revision: "alice-history".into(),
+            model: ModelRef::new("personai", "summary"),
+            request: ChatRequest {
+                messages: vec![Message::user("private transcript for alice")],
+                options: Default::default(),
+                tools: vec![],
+                extensions: input.run.extensions.clone(),
+            },
+            stage: "summary".into(),
+            limits: input.limits.clone(),
+            completion: Arc::new(Completion(self.completed.clone())),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn auxiliary_reduction_keeps_step_bindings_and_never_uses_a_new_account() {
+    for switch_account in [false, true] {
+        let revision = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let old_calls = Arc::new(Mutex::new(vec![]));
+        let new_calls = Arc::new(Mutex::new(vec![]));
+        let completed = Arc::new(Mutex::new(vec![]));
+        let bindings = |revision_id, calls| {
+            ModelConnection::new(
+                "personai",
+                Arc::new(AccountBoundModel {
+                    revision: revision_id,
+                    current_revision: revision.clone(),
+                    calls,
+                }),
+                vec![
+                    ModelDescriptor::new("main"),
+                    ModelDescriptor::new("summary"),
+                ],
+            )
+        };
+        let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
+        runtime
+            .replace_connection(
+                "personai",
+                ModelRuntimeUpdate::new("alice", 1, vec![bindings(1, old_calls.clone())]),
+            )
+            .unwrap();
+        let next_revision = if switch_account { 2 } else { 1 };
+        let replacement = ModelRuntimeUpdate::new(
+            if switch_account { "bob" } else { "alice" },
+            next_revision as u64,
+            vec![bindings(next_revision, new_calls.clone())],
+        );
+        let agent = TestBuilder::default()
+            .default_models(false)
+            .plugin(ModelRuntimePlugin::new(runtime.clone()))
+            .plugin(ContextAssemblerPlugin::new(PreparingContextAssembler::new(
+                RefreshDuringPreparation {
+                    runtime: runtime.clone(),
+                    replacement,
+                    current_revision: revision,
+                    completed: completed.clone(),
+                },
+                1,
+            )))
+            .build()
+            .await
+            .unwrap();
+        let mut request = RunRequest::new("alice-session", "question");
+        request.model = Some(ModelRef::new("personai", "main"));
+        let result = agent.run(request).await;
+        if switch_account {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("account changed before dispatch")
+            );
+            assert!(old_calls.lock().unwrap().is_empty());
+            assert_eq!(*completed.lock().unwrap(), ["failed"]);
+        } else {
+            assert_eq!(result.unwrap().output, "bound answer");
+            assert_eq!(*old_calls.lock().unwrap(), ["summary", "main"]);
+            assert_eq!(*completed.lock().unwrap(), ["bound answer"]);
+        }
+        assert!(
+            new_calls.lock().unwrap().is_empty(),
+            "an existing invocation used refreshed credentials"
+        );
+        agent.close().await;
+    }
+}
