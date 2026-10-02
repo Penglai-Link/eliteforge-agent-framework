@@ -36,6 +36,9 @@ pub struct ModelDescriptor {
     pub context_window_tokens: Option<usize>,
     /// Host-configured input budget after reserving output capacity. None is unknown.
     pub max_input_tokens: Option<usize>,
+    /// Configured/provider output ceiling, independent of the total window.
+    #[serde(default)]
+    pub max_output_tokens: Option<u32>,
     /// None means unknown, not unsupported.
     pub supports_tools: Option<bool>,
     pub input_modalities: Vec<Modality>,
@@ -50,6 +53,7 @@ impl ModelDescriptor {
             id: id.into(),
             context_window_tokens: None,
             max_input_tokens: None,
+            max_output_tokens: None,
             supports_tools: None,
             input_modalities: vec![Modality::Text],
             output_modalities: vec![Modality::Text],
@@ -81,14 +85,19 @@ impl ModelDescriptor {
             && (tools.is_empty() || self.supports_tools != Some(false))
             && (options.output_schema.is_none() || self.supports_structured_output != Some(false))
     }
+    pub fn output_limit(&self, default: u32, options: &GenerationOptions) -> u32 {
+        options
+            .max_output_tokens
+            .unwrap_or(default)
+            .min(default)
+            .min(self.max_output_tokens.unwrap_or(u32::MAX))
+    }
     pub fn input_capacity(
         &self,
         limits: &RunLimits,
         options: &GenerationOptions,
     ) -> Result<usize, AgentError> {
-        let output = options
-            .max_output_tokens
-            .unwrap_or(limits.max_model_output_tokens) as usize;
+        let output = self.output_limit(limits.max_model_output_tokens, options) as usize;
         let window = match self.context_window_tokens {
             Some(window) => window.checked_sub(output).ok_or_else(|| {
                 AgentError::InvalidConfiguration(
@@ -114,6 +123,15 @@ impl ModelDescriptor {
 #[crate::extension_point(adapter = crate::ChatModelPlugin)]
 #[async_trait]
 pub trait ChatModel: Send + Sync {
+    fn on_failure(&self, _: &Extensions, _: &ModelError) {}
+    /// Explicit credential refresh. The invoker counts any subsequent model attempt.
+    async fn recover_authentication(
+        &self,
+        _: &Extensions,
+        _: &ModelError,
+    ) -> Result<bool, ModelError> {
+        Ok(false)
+    }
     async fn generate(
         &self,
         model_id: &str,

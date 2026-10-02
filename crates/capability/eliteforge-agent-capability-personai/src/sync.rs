@@ -167,6 +167,7 @@ impl ModelCatalogRefresh for PersonAiModelSync {
         {
             return Err(eliteforge_agent_core::ModelError::Provider(Box::new(
                 eliteforge_agent_core::ProviderModelError {
+                    authorization_attempt: None,
                     provider: "personai".into(),
                     category: eliteforge_agent_core::ProviderErrorCategory::AccountChanged,
                     http_status: None,

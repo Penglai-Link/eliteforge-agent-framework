@@ -4,6 +4,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
+#[derive(Clone)]
 pub struct ModelInvoker {
     catalog: ModelCatalog,
     runtime: Option<Arc<ModelRuntime>>,
@@ -59,6 +60,21 @@ impl ModelInvoker {
     }
     pub fn catalog(&self) -> &ModelCatalog {
         &self.catalog
+    }
+
+    fn scoped(&self, context: &RunContext) -> Self {
+        let Some(scope) = context.extensions.get::<ModelExecutionScope>() else {
+            return self.clone();
+        };
+        Self {
+            catalog: (*scope.runtime.snapshot().chat).clone(),
+            runtime: Some(scope.runtime.clone()),
+            strategy: scope.strategy.clone(),
+            recovery: scope.recovery.clone(),
+            refreshers: scope.refreshers.clone(),
+            middleware: self.middleware.clone(),
+            assembler: self.assembler.clone(),
+        }
     }
 
     fn notify_unavailable(&self, model: &ModelRef) {
@@ -119,8 +135,11 @@ impl ModelInvoker {
             }
             state.check_account(candidate)?;
             if !catalog.get(candidate).is_some_and(|descriptor| {
-                descriptor.accepts(messages, call.tools, call.options)
-                    && descriptor.input_capacity(call.limits, call.options).is_ok()
+                let mut options = call.options.clone();
+                options.max_output_tokens =
+                    Some(descriptor.output_limit(call.limits.max_model_output_tokens, &options));
+                descriptor.accepts(messages, call.tools, &options)
+                    && descriptor.input_capacity(call.limits, &options).is_ok()
             }) {
                 continue;
             }
@@ -145,8 +164,10 @@ impl ModelInvoker {
         limits: &RunLimits,
         context: &RunContext,
     ) -> Result<ChatResponse, AgentError> {
-        let snapshot = self.catalog_snapshot();
-        self.invoke_auxiliary_in_catalog(&snapshot, model, request, stage, limits, context)
+        let scoped = self.scoped(context);
+        let snapshot = scoped.catalog_snapshot();
+        scoped
+            .invoke_auxiliary_in_catalog(&snapshot, model, request, stage, limits, context)
             .await
     }
 
@@ -212,11 +233,22 @@ impl ModelInvoker {
                 attempt: 1,
             })
             .await;
-        let mut response = tokio::select! {
+        let request_extensions = request.extensions.clone();
+        let result = tokio::select! {
             biased;
             _ = context.cancelled() => return Err(AgentError::Cancelled),
             result = tokio::time::timeout(limits.model_timeout, next.run(request, &invocation)) => {
-                result.map_err(|_| ModelError::Transient("auxiliary model invocation timed out".into()))??
+                result.unwrap_or_else(|_| Err(ModelError::Indeterminate("auxiliary model invocation timed out".into())))
+            }
+        };
+        let mut response = match result {
+            Ok(response) => response,
+            Err(error) => {
+                catalog
+                    .adapter(model)
+                    .expect("validated model")
+                    .on_failure(&request_extensions, &error);
+                return Err(error.into());
             }
         };
         crate::middleware::validate_model_response(&mut response, &options)?;
@@ -240,6 +272,17 @@ impl ModelInvoker {
         memory: &mut dyn ConversationSession,
         context: &RunContext,
     ) -> Result<ChatResponse, AgentError> {
+        self.scoped(context)
+            .invoke_in_scope(call, memory, context)
+            .await
+    }
+
+    async fn invoke_in_scope(
+        &self,
+        call: ModelCall<'_>,
+        memory: &mut dyn ConversationSession,
+        context: &RunContext,
+    ) -> Result<ChatResponse, AgentError> {
         call.limits.validate()?;
         call.options.validate()?;
         let runtime_snapshot = self.runtime.as_ref().map(|runtime| runtime.snapshot());
@@ -250,6 +293,7 @@ impl ModelInvoker {
         let mut replacement: Option<ModelRef> = None;
         let mut recovery = crate::model_recovery::RecoveryState::new(&self.refreshers);
         let mut retries = 0;
+        let mut authentication_recovered = false;
         let mut recoveries = 0;
         let mut attempt = 0;
         let mut previous = None;
@@ -263,7 +307,13 @@ impl ModelInvoker {
         let mut models = crate::model_call_budget::StepModels {
             inner: self,
             catalog_snapshot: catalog_snapshot.clone(),
-            limit: call.limits.max_model_calls_per_step,
+            limit: match (
+                call.limits.max_model_calls_per_step,
+                context.limits().max_model_calls_per_step,
+            ) {
+                (Some(call), Some(run)) => Some(call.min(run)),
+                (call, run) => call.or(run),
+            },
             used: std::sync::atomic::AtomicUsize::new(0),
         };
         let mut overflow: Option<(String, Vec<Message>)> = None;
@@ -325,6 +375,18 @@ impl ModelInvoker {
                 .into());
             }
             let descriptor = catalog.get(&selected).expect("validated model");
+            let mut selected_options = call.options.clone();
+            selected_options.max_output_tokens = Some(
+                descriptor.output_limit(call.limits.max_model_output_tokens, &selected_options),
+            );
+            let call = ModelCall {
+                stage: call.stage,
+                step: call.step,
+                instructions: call.instructions,
+                tools: call.tools,
+                limits: call.limits,
+                options: &selected_options,
+            };
             let estimator = catalog.connections[&selected.connection]
                 .token_estimator
                 .as_ref();
@@ -462,7 +524,7 @@ impl ModelInvoker {
                     },
                     &invocation_context,
                 ),
-            ) => response.unwrap_or_else(|_| Err(ModelError::Transient("model invocation timed out".into())))
+            ) => response.unwrap_or_else(|_| Err(ModelError::Indeterminate("model invocation timed out".into())))
             };
             if response.as_ref().is_err_and(|error| error.is_unavailable()) {
                 self.notify_unavailable(&selected);
@@ -498,6 +560,37 @@ impl ModelInvoker {
                         .await;
                     return Ok(response);
                 }
+                Err(ModelError::Provider(ref error))
+                    if error.category == ProviderErrorCategory::Authentication
+                        && !authentication_recovered
+                        && !stream.emitted.load(Ordering::Acquire) =>
+                {
+                    authentication_recovered = true;
+                    let authentication_error = ModelError::Provider(error.clone());
+                    let refreshed = tokio::select! {
+                        biased;
+                        _ = context.cancelled() => return Err(AgentError::Cancelled),
+                        result = tokio::time::timeout(call.limits.model_timeout, provider.recover_authentication(&context.extensions, &authentication_error)) => result.unwrap_or_else(|_|Err(ModelError::Fatal("credential refresh timed out".into()))),
+                    };
+                    let refreshed = match refreshed {
+                        Ok(value) => value,
+                        Err(error) => {
+                            provider.on_failure(&context.extensions, &authentication_error);
+                            return Err(error.into());
+                        }
+                    };
+                    if !refreshed {
+                        let error = ModelError::Provider(error.clone());
+                        provider.on_failure(&context.extensions, &error);
+                        return Err(error.into());
+                    }
+                    context
+                        .emit(AgentEvent::ModelRetry {
+                            step: call.step,
+                            attempt,
+                        })
+                        .await;
+                }
                 Err(error)
                     if error.is_unavailable()
                         && !stream.emitted.load(Ordering::Acquire)
@@ -513,6 +606,7 @@ impl ModelInvoker {
                         )
                         .await?
                     else {
+                        provider.on_failure(&context.extensions, &error);
                         return Err(error.into());
                     };
                     retries += 1;
@@ -545,7 +639,10 @@ impl ModelInvoker {
                     overflow = Some((message, attempted_messages));
                     recoveries += 1;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => {
+                    provider.on_failure(&context.extensions, &error);
+                    return Err(error.into());
+                }
             }
         }
     }

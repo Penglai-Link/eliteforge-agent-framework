@@ -121,6 +121,34 @@ impl AgentLoop for ExternalAgentLoop {
             .extensions
             .get::<ExternalSessionRef>()
             .map(|value| (*value).clone());
+        context.check_cancelled()?;
+        if let Some(budget) = context.extensions.get::<ContinuationBudget>()
+            && !budget.admit_step(
+                context.execution_counters.as_ref(),
+                request.limits.max_steps,
+            )
+        {
+            return Err(AgentError::Run("continuation step budget exhausted".into()));
+        }
+        if let Some(counter) = context.extensions.get::<ModelDispatchCounter>() {
+            counter.record_step();
+        }
+        let (mut permit, _) = crate::budget::UsagePermit::reserve_child(
+            context.usage.clone(),
+            context.token_ceiling,
+            context.token_ceiling,
+        )?;
+        context.persist_budget().await?;
+        if let Some(budget) = context.extensions.get::<ContinuationBudget>()
+            && let Err(error) = budget.admit_model_call()
+        {
+            permit.release_unspent();
+            context.persist_budget().await?;
+            return Err(error.into());
+        }
+        if let Some(counter) = context.extensions.get::<ModelDispatchCounter>() {
+            counter.record_opaque();
+        }
         let events = ExternalEvents::new(context);
         let result = external
             .run(
@@ -136,6 +164,10 @@ impl AgentLoop for ExternalAgentLoop {
                 &events,
             )
             .await?;
+        // Zero reported usage is unknown, so the whole reserved allowance
+        // remains charged. Reported usage itself stays honest in RunResult.
+        permit.settle(&result.usage, context.token_ceiling)?;
+        context.persist_budget().await?;
         let output = result.content.text();
         if let Some(session) = &result.session {
             events

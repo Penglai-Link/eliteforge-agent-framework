@@ -1132,6 +1132,7 @@ dependencies = [
  "eliteforge-agent-context",
  "eliteforge-agent-core",
  "eliteforge-agent-official-plugin-model-genai",
+ "eliteforge-agent-official-plugin-model-http",
  "eliteforge-agent-official-plugin-skills",
  "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-official-plugin-tools-local",
@@ -1140,6 +1141,7 @@ dependencies = [
  "futures",
  "jsonschema",
  "petgraph",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tempfile",
@@ -1249,6 +1251,23 @@ dependencies = [
  "genai",
  "serde",
  "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-model-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "crab-serverapi",
+ "eliteforge-agent-core",
+ "hex",
+ "rand 0.8.8",
+ "reqwest 0.12.28",
+ "rsa",
+ "serde",
+ "serde_json",
+ "sha2",
  "tokio",
 ]
 

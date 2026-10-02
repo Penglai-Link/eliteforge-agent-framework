@@ -298,19 +298,26 @@ fn run_identity(run: &RunContext) -> Value {
     json!({"run_id":run.run_id,"execution_id":run.execution_id(),"session_id":run.session_id,"model":run.model,"limits":run.limits,"node":run.node_execution(),"lineage":run.lineage})
 }
 #[async_trait]
-impl ContextProvider for RemoteImplementation {
-    async fn context(&self, run: &RunContext) -> Result<Vec<Message>, AgentError> {
-        self.run_agent("context", run_identity(run), run).await
-    }
-}
-#[async_trait]
 impl ContextContributor for RemoteImplementation {
+    fn kind(&self) -> ContextSourceKind {
+        if self.declaration.extension == "framework.context-provider" {
+            ContextSourceKind::Instruction
+        } else {
+            ContextSourceKind::Data
+        }
+    }
     fn block_id(&self) -> &str {
         self.declaration.metadata["block_id"]
             .as_str()
             .unwrap_or(&self.declaration.id)
     }
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        if ContextContributor::kind(self) == ContextSourceKind::Instruction {
+            let messages = self
+                .run_agent("context", run_identity(input.run), input.run)
+                .await?;
+            return Ok(ContextBlock::instructions(self.block_id(), messages));
+        }
         let services = input.run.extensions.get::<ScopedAgentServices>();
         let mut host = crate::host::RunHost::new(
             input.run,
@@ -838,7 +845,12 @@ impl ContextReducer for RemoteImplementation {
             crate::host::RunHost::new(input.run, None, self.permissions(), &self.declaration.id);
         host.models = Some(input.models);
         host.estimator = Some(input.estimator);
-        self.scoped_agent("reduce",json!({"block":input.block,"budget":input.budget,"model":input.model,"history":input.history,"run":run_identity(input.run),"limits":input.limits,"overflow_recoveries":input.overflow_recoveries}),&mut host).await
+        let mut params = json!({"block":input.block,"budget":input.budget,"model":input.model,"history":input.history,"run":run_identity(input.run),"limits":input.limits,"overflow_recoveries":input.overflow_recoveries});
+        // Preserve the legacy wire shape when no compression was requested.
+        if let Some(directive) = input.compression {
+            params["compression"] = json!(directive);
+        }
+        self.scoped_agent("reduce", params, &mut host).await
     }
 }
 #[async_trait]

@@ -123,13 +123,20 @@ struct HostContext;
 struct HostIdentity(&'static str);
 
 #[async_trait]
-impl ContextProvider for HostContext {
-    async fn context(&self, context: &RunContext) -> Result<Vec<Message>, AgentError> {
+impl ContextContributor for HostContext {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        let context = input.run;
         let host = context.extensions.get::<HostIdentity>().unwrap();
-        Ok(vec![Message::system(format!(
-            "host instruction: {}",
-            host.0
-        ))])
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system(format!("host instruction: {}", host.0))],
+        ))
     }
 }
 
@@ -149,7 +156,7 @@ async fn host_plugins_complete_model_tool_model_flow_and_preserve_both_tool_iden
             "host.tools",
             StaticToolProvider::new(vec![binding("app.page", "app_page", tool.clone())]),
         ))
-        .plugin(ContextProviderPlugin::new("host.context", HostContext))
+        .plugin(ContextContributorPlugin::new("host.context", HostContext))
         .plugin(EventSinkPlugin::new("host.events", events.clone()))
         .build()
         .await
@@ -271,7 +278,7 @@ async fn differently_composed_agents_isolate_models_tools_and_memory_for_the_sam
             "host.tools",
             StaticToolProvider::new(vec![binding("alpha.lookup", "lookup", alpha_tool.clone())]),
         ))
-        .plugin(ContextProviderPlugin::new("alpha.context", HostContext))
+        .plugin(ContextContributorPlugin::new("alpha.context", HostContext))
         .build()
         .await
         .unwrap();

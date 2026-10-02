@@ -126,9 +126,40 @@ pub enum ToolPolicyDecision {
     RequireApproval(Content),
 }
 
+/// Admission of an original provider binding into the run's tool catalog.
+/// Hiding only narrows initial exposure; rejection never discards lease resources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolBindingAdmission {
+    Allow,
+    Hidden,
+    Exclude,
+}
+
 #[crate::extension_point(adapter = crate::ToolPolicyPlugin, contribute)]
 #[async_trait]
 pub trait ToolPolicy: Send + Sync {
+    /// Apply host authorization before duplicate catalog detection. This does
+    /// not execute a tool or request approval; evaluate remains authoritative
+    /// for every invocation, including changes to live permissions.
+    async fn admit_binding(
+        &self,
+        _binding: &ToolBinding,
+        _run: &RunContext,
+    ) -> Result<ToolBindingAdmission, AgentError> {
+        Ok(ToolBindingAdmission::Allow)
+    }
+
+    /// Observe the final validated catalog after every admission policy has
+    /// narrowed it. Hosts may project descriptor metadata; original executors
+    /// and lease ownership remain unchanged.
+    async fn catalog_ready(
+        &self,
+        _bindings: &[ToolBinding],
+        _run: &RunContext,
+    ) -> Result<(), AgentError> {
+        Ok(())
+    }
+
     async fn evaluate(
         &self,
         invocation: &ToolInvocationContext<'_>,

@@ -57,21 +57,84 @@ impl ModelClient {
         }
         Ok(())
     }
+    fn check_token_capacity(
+        &self,
+        estimate: u64,
+        declared: Option<usize>,
+    ) -> Result<(), AgentError> {
+        let configured = self
+            .options
+            .run
+            .as_ref()
+            .map(|run| run.limits().max_context_tokens);
+        let capacity = match (declared, configured) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if capacity.is_some_and(|capacity| estimate > capacity as u64) {
+            return Err(ModelError::ContextOverflow(
+                "typed model input exceeds declared input capacity".into(),
+            )
+            .into());
+        }
+        Ok(())
+    }
     async fn dispatch<T>(
         &self,
         operation: ModelOperation,
         model: &ModelRef,
         future: impl Future<Output = Result<T, ModelError>>,
     ) -> Result<T, AgentError> {
-        if self.options.timeout.is_zero() {
-            return Err(invalid("model timeout must be positive"));
-        }
+        self.dispatch_controlled(operation, model, future, None)
+            .await
+    }
+    async fn dispatch_controlled<T>(
+        &self,
+        operation: ModelOperation,
+        model: &ModelRef,
+        future: impl Future<Output = Result<T, ModelError>>,
+        mut permit: Option<&mut crate::budget::UsagePermit>,
+    ) -> Result<T, AgentError> {
         let _active = self.catalogs.active.read().await;
-        if self.catalogs.stopped.is_cancelled() {
-            return Err(AgentError::Closed);
+        let admission = (|| -> Result<(), AgentError> {
+            if self.options.timeout.is_zero() {
+                return Err(invalid("model timeout must be positive"));
+            }
+            if self.catalogs.stopped.is_cancelled() {
+                return Err(AgentError::Closed);
+            }
+            if self.options.cancellation.is_cancelled() {
+                return Err(AgentError::Cancelled);
+            }
+            if let Some(run) = &self.options.run {
+                run.check_cancelled()?;
+                if matches!(
+                    operation,
+                    ModelOperation::Embedding | ModelOperation::Rerank
+                ) && let Some(budget) = run.extensions.get::<ContinuationBudget>()
+                {
+                    budget.admit_model_call()?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = admission {
+            if let Some(permit) = &mut permit {
+                permit.release_unspent();
+            }
+            if let Some(run) = &self.options.run {
+                run.persist_budget().await?;
+            }
+            return Err(error);
         }
         if let Some(run) = &self.options.run {
-            run.check_cancelled()?;
+            if matches!(
+                operation,
+                ModelOperation::Embedding | ModelOperation::Rerank
+            ) && let Some(counter) = run.extensions.get::<ModelDispatchCounter>()
+            {
+                counter.record();
+            }
             run.emit(AgentEvent::ModelOperationStarted {
                 operation,
                 model: model.clone(),
@@ -83,7 +146,7 @@ impl ModelClient {
             _ = self.catalogs.stopped.cancelled() => Err(AgentError::Closed),
             _ = self.options.cancellation.cancelled() => Err(AgentError::Cancelled),
             result = tokio::time::timeout(self.options.timeout, future) => {
-                result.map_err(|_| ModelError::Transient("model operation timed out".into()))?.map_err(Into::into)
+                result.map_err(|_| ModelError::Indeterminate("model operation timed out".into()))?.map_err(Into::into)
             }
         }
     }
@@ -151,12 +214,8 @@ impl ModelOperations for ModelClient {
         }
         let count = request.inputs.len();
         let dimensions = request.dimensions;
-        let estimate = request
-            .inputs
-            .iter()
-            .map(|c| c.estimated_tokens() as u64)
-            .fold(0u64, u64::saturating_add)
-            .max(1);
+        let estimate = binding.implementation.input_token_estimate(&request);
+        self.check_token_capacity(estimate, binding.implementation.input_capacity())?;
         request.choice.model = Some(binding.model.clone());
         let mut permit = match &self.options.run {
             Some(run) => {
@@ -172,10 +231,11 @@ impl ModelOperations for ModelClient {
             None => None,
         };
         let result = self
-            .dispatch(
+            .dispatch_controlled(
                 ModelOperation::Embedding,
                 &binding.model,
                 binding.implementation.embed(&binding.model.model, request),
+                permit.as_mut(),
             )
             .await;
         let result = (|| -> Result<_, AgentError> {
@@ -231,13 +291,55 @@ impl ModelOperations for ModelClient {
         let max = request.top_n.unwrap_or(count);
         let binding = snapshot.rerank.select(&request.choice, &inputs)?;
         request.choice.model = Some(binding.model.clone());
-        let response = self
-            .dispatch(
+        let estimate = binding.implementation.input_token_estimate(&request);
+        self.check_token_capacity(estimate, binding.implementation.input_capacity())?;
+        let output_reserve = binding.implementation.output_token_reserve();
+        let (mut permit, output_limit) = match &self.options.run {
+            Some(run) => {
+                let (permit, output_limit) = crate::budget::UsagePermit::reserve(
+                    run.usage.clone(),
+                    estimate,
+                    output_reserve,
+                    run.token_ceiling,
+                )?;
+                run.persist_budget().await?;
+                (Some(permit), Some(output_limit))
+            }
+            None => (None, None),
+        };
+        let result = self
+            .dispatch_controlled(
                 ModelOperation::Rerank,
                 &binding.model,
-                binding.implementation.rerank(&binding.model.model, request),
+                binding.implementation.rerank_with_usage(
+                    &binding.model.model,
+                    request,
+                    output_limit,
+                ),
+                permit.as_mut(),
             )
-            .await?;
+            .await;
+        let result = match result {
+            Ok(output) => {
+                let usage = output.usage.unwrap_or_default();
+                if let (Some(permit), Some(run)) = (&mut permit, &self.options.run) {
+                    permit.settle(&usage, run.token_ceiling)?;
+                    run.emit(AgentEvent::ModelUsage {
+                        stage: "rerank".into(),
+                        model: binding.model.clone(),
+                        usage,
+                    })
+                    .await;
+                }
+                Ok(output.response)
+            }
+            Err(error) => Err(error),
+        };
+        drop(permit);
+        if let Some(run) = &self.options.run {
+            run.persist_budget().await?;
+        }
+        let response = result?;
         let mut seen = std::collections::BTreeSet::new();
         if response.model != binding.model
             || response.results.len() > max

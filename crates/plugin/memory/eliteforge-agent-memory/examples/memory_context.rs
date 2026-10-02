@@ -103,9 +103,12 @@ impl MemoryContextPlugin {
         LongTermMemoryPlugin::from_arc(memories.clone())
             .install(context)
             .await?;
-        ContextPlugin::new(
+        ContextContributorPlugin::new(
             "instructions",
-            FixedContext::new("用中文简短回答，结合当前项目资料给出下一步建议。"),
+            FixedInstructions::new(
+                "fixed.instructions",
+                "用中文简短回答，结合当前项目资料给出下一步建议。",
+            ),
         )
         .install(context)
         .await?;

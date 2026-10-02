@@ -20,10 +20,11 @@ use std::{
 
 use async_trait::async_trait;
 use eliteforge_agent_core::{
-    AgentError, CapabilitySkillSource, ContextProvider, ContextService, Message, Plugin,
-    PluginContext, PluginError, PluginReadyContext, Role, RunContext, RunMiddleware, RunNext,
-    RunResult, SkillCatalog, SkillDetail, SkillProvider, SkillResource, SkillSummary, StateStore,
-    ToolLease, ToolProvider, ToolProviderService,
+    AgentError, CapabilitySkillSource, ContextBlock, ContextContributor, ContextContributorService,
+    ContextInput, ContextSourceKind, Message, Plugin, PluginContext, PluginError,
+    PluginReadyContext, Role, RunContext, RunMiddleware, RunNext, RunResult, SkillCatalog,
+    SkillDetail, SkillProvider, SkillResource, SkillSummary, StateStore, ToolLease, ToolProvider,
+    ToolProviderService,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -132,10 +133,10 @@ impl Plugin for SkillsPlugin {
             context.contribute_extension(provider.clone())?;
         }
         let endpoint = Arc::new(SkillsEndpoint { runtime });
-        let context_provider: Arc<dyn ContextProvider> = endpoint.clone();
+        let context_provider: Arc<dyn ContextContributor> = endpoint.clone();
         let tool_provider: Arc<dyn ToolProvider> = endpoint.clone();
         let run_middleware: Arc<dyn RunMiddleware> = endpoint;
-        context.contribute(ContextService(context_provider.clone()))?;
+        context.contribute(ContextContributorService(context_provider.clone()))?;
         context.contribute_extension(context_provider)?;
         context.contribute(ToolProviderService(tool_provider.clone()))?;
         context.contribute_extension(tool_provider)?;
@@ -1004,15 +1005,22 @@ struct SkillsEndpoint {
 }
 
 #[async_trait]
-impl ContextProvider for SkillsEndpoint {
-    async fn context(&self, context: &RunContext) -> Result<Vec<Message>, AgentError> {
+impl ContextContributor for SkillsEndpoint {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        "skills.catalog"
+    }
+    async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        let context = input.run;
         // The initial tool batch of a resumed workflow runs before the next
         // model turn. Once a model turn begins, future resource reads must use
         // the normal skill_load path again.
         self.runtime.finish_recovery(context);
         let snapshot = self.runtime.snapshot(context).await?;
         if snapshot.skills.is_empty() {
-            return Ok(Vec::new());
+            return Ok(ContextBlock::instructions(self.block_id(), Vec::new()));
         }
         let skills = snapshot
             .skills
@@ -1025,9 +1033,12 @@ impl ContextProvider for SkillsEndpoint {
             })
             .collect::<Vec<_>>();
         let metadata = serialize_catalog_for_context(&skills)?;
-        Ok(vec![Message::system(format!(
-            "Available skills are metadata only. Load a skill with `skill_load` before following its instructions. After loading it, use `skill_read_resource` for a listed file when needed. Loading a skill never executes scripts.\n<available_skills>{metadata}</available_skills>"
-        ))])
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system(format!(
+                "Available skills are metadata only. Load a skill with `skill_load` before following its instructions. After loading it, use `skill_read_resource` for a listed file when needed. Loading a skill never executes scripts.\n<available_skills>{metadata}</available_skills>"
+            ))],
+        ))
     }
 }
 

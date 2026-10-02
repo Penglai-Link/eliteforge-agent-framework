@@ -11,7 +11,6 @@ pub struct LoopService(pub Arc<dyn AgentLoop>);
 pub struct ExternalAgentService(pub Arc<dyn ExternalAgent>);
 pub struct ModelCatalogStoreService(pub Arc<dyn ModelCatalogStore>);
 pub struct ToolProviderService(pub Arc<dyn ToolProvider>);
-pub struct ContextService(pub Arc<dyn ContextProvider>);
 pub struct EventService(pub Arc<dyn EventSink>);
 pub struct ContextReducerService(pub Arc<dyn ContextReducer>);
 pub struct ContextAssemblerService(pub Arc<dyn ContextAssembler>);
@@ -157,12 +156,10 @@ macro_rules! contribution_plugin {
 }
 
 contribution_plugin!(ToolProviderPlugin, ToolProvider, ToolProviderService);
-contribution_plugin!(ContextPlugin, ContextProvider, ContextService);
 contribution_plugin!(EventPlugin, EventSink, EventService);
 contribution_plugin!(RunOutputPlugin, RunOutputFactory, RunOutputService);
 contribution_plugin!(WorkflowNodePlugin, WorkflowNode, WorkflowNodeService);
 
-pub type ContextProviderPlugin = ContextPlugin;
 pub type EventSinkPlugin = EventPlugin;
 
 #[derive(Clone, Default)]
@@ -214,29 +211,6 @@ impl Plugin for ToolBindingPlugin {
     }
 }
 
-#[derive(Clone, Default)]
-pub struct FixedContext {
-    messages: Vec<Message>,
-}
-
-impl FixedContext {
-    pub fn new(instructions: impl Into<String>) -> Self {
-        Self {
-            messages: vec![Message::system(instructions.into())],
-        }
-    }
-    pub fn messages(messages: Vec<Message>) -> Self {
-        Self { messages }
-    }
-}
-
-#[async_trait]
-impl ContextProvider for FixedContext {
-    async fn context(&self, _context: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(self.messages.clone())
-    }
-}
-
 pub struct NoopEvents;
 
 #[async_trait]
@@ -265,11 +239,71 @@ contribution_plugin!(
 );
 contribution_plugin!(ToolMiddlewarePlugin, ToolMiddleware, ToolMiddlewareService);
 contribution_plugin!(RunMiddlewarePlugin, RunMiddleware, RunMiddlewareService);
-contribution_plugin!(
-    ContextContributorPlugin,
-    ContextContributor,
-    ContextContributorService
-);
+pub struct ContextContributorPlugin {
+    id: String,
+    implementation: Arc<dyn ContextContributor>,
+}
+impl ContextContributorPlugin {
+    pub fn new(id: impl Into<String>, implementation: impl ContextContributor + 'static) -> Self {
+        Self::from_arc(id, Arc::new(implementation))
+    }
+    pub fn from_arc(id: impl Into<String>, implementation: Arc<dyn ContextContributor>) -> Self {
+        Self {
+            id: id.into(),
+            implementation,
+        }
+    }
+}
+struct RegisteredInstructionSource {
+    id: String,
+    implementation: Arc<dyn ContextContributor>,
+}
+#[async_trait]
+impl ContextContributor for RegisteredInstructionSource {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        &self.id
+    }
+    async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        let mut block = self.implementation.contribute(input).await?;
+        if block.id != self.implementation.block_id() || block.trust != ContextTrust::Instruction {
+            return Err(AgentError::InvalidConfiguration(
+                "instruction source changed its identity or trust".into(),
+            ));
+        }
+        block.id.clone_from(&self.id);
+        Ok(block)
+    }
+}
+#[async_trait]
+impl Plugin for ContextContributorPlugin {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        if self.implementation.kind() == ContextSourceKind::History
+            || [INSTRUCTIONS_BLOCK, HISTORY_BLOCK].contains(&self.id.as_str())
+            || [INSTRUCTIONS_BLOCK, HISTORY_BLOCK].contains(&self.implementation.block_id())
+        {
+            return Err(PluginError::message(
+                "builtin context sources are owned by the SDK",
+            ));
+        }
+        let source: Arc<dyn ContextContributor> =
+            if self.implementation.kind() == ContextSourceKind::Instruction {
+                Arc::new(RegisteredInstructionSource {
+                    id: self.id.clone(),
+                    implementation: self.implementation.clone(),
+                })
+            } else {
+                self.implementation.clone()
+            };
+        context.contribute(ContextContributorService(source.clone()))?;
+        context.contribute_extension(source)
+    }
+}
 
 pub struct ToolPolicyService(pub Arc<dyn ToolPolicy>);
 contribution_plugin!(ToolPolicyPlugin, ToolPolicy, ToolPolicyService);

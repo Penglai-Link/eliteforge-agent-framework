@@ -896,6 +896,7 @@ impl EventSink for Observation {
                     let (outcome, reason) = match &block.outcome {
                         ContextBlockOutcome::Kept => ("kept", None),
                         ContextBlockOutcome::Reduced => ("reduced", None),
+                        ContextBlockOutcome::NoGain => ("no_gain", None),
                         ContextBlockOutcome::Omitted { reason } => ("omitted", Some(reason)),
                         ContextBlockOutcome::Failed { reason } => ("failed", Some(reason)),
                     };

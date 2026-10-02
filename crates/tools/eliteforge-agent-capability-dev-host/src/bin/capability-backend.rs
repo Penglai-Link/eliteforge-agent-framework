@@ -12,6 +12,13 @@ use std::{path::PathBuf, sync::Arc};
 
 struct DemoChat(String);
 struct ToolResources;
+#[derive(serde::Deserialize)]
+struct DemoReductionRequest {
+    block: ContextBlock,
+    budget: ContextBudget,
+    #[serde(default)]
+    compression: Option<ContextCompressionDirective>,
+}
 #[async_trait]
 impl BackendResource for ToolResources {
     async fn call(&self, _: &str, _: Value, _: BackendCallContext) -> Result<Value, RpcFault> {
@@ -189,21 +196,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     backend.method("demo.contributor", "contribute", |_: Value, _| async {
         Ok(ContextBlock::data("remote", "retrieved fact"))
     })?;
-    backend.method("demo.reducer", "reduce", |params: Value, _| async move {
-        let messages = params["block"]["messages"]
-            .as_array()
-            .ok_or_else(|| RpcFault::new("missing messages"))?;
-        let limit = params["budget"]["max_messages"].as_u64().unwrap_or(1) as usize;
-        Ok(messages
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>())
-    })?;
+    backend.method(
+        "demo.reducer",
+        "reduce",
+        |params: DemoReductionRequest, _| async move {
+            if let Some(directive) = params.compression {
+                return Ok(vec![Message::user(format!(
+                    "remote {:?} target {}",
+                    directive.trigger, directive.target_tokens
+                ))]);
+            }
+            Ok(params
+                .block
+                .messages
+                .into_iter()
+                .rev()
+                .take(params.budget.max_messages)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>())
+        },
+    )?;
     backend.method("demo.budget", "allocate", |params: Value, _| async move {
         let available: ContextBudget = serde_json::from_value(params["available"].clone())
             .map_err(|e| RpcFault::new(e.to_string()))?;

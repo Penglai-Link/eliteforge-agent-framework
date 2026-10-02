@@ -1,6 +1,6 @@
 //! Trusted host operations reuse the command-tool process owner and readers.
 use crate::tasks::{CommandRequest, CommandTaskManager};
-use eliteforge_agent_core::ToolError;
+use eliteforge_agent_core::{RunContext, ToolError};
 use std::{collections::BTreeMap, path::PathBuf, time::Duration};
 #[derive(Clone, Debug)]
 pub struct CapturedCommand {
@@ -59,13 +59,47 @@ pub async fn capture_command(spec: CapturedCommand) -> Result<serde_json::Value,
 /// Safe for synchronous adapters called inside or outside a Tokio runtime.
 /// Only waiting is isolated; process control stays in the command-task manager.
 pub fn capture_command_blocking(spec: CapturedCommand) -> Result<serde_json::Value, ToolError> {
+    host_operation_blocking(capture_command(spec))
+}
+/// Compatibility bridge for trusted synchronous host adapters. Asynchronous
+/// runtime adapters should await the same operation directly.
+pub fn host_operation_blocking<F, T>(operation: F) -> Result<T, ToolError>
+where
+    F: std::future::Future<Output = Result<T, ToolError>> + Send + 'static,
+    T: Send + 'static,
+{
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| ToolError::Failed(error.to_string()))?
-            .block_on(capture_command(spec))
+            .block_on(operation)
     })
     .join()
-    .map_err(|_| ToolError::Failed("command capture thread failed".into()))?
+    .map_err(|_| ToolError::Failed("host operation thread failed".into()))?
+}
+
+/// Capture a trusted host command inside an existing run cancellation/deadline.
+/// Dropping the selected capture future uses the existing native process owner's
+/// stop guard; no independent blocking waiter survives the run.
+pub async fn capture_command_in_run(
+    spec: CapturedCommand,
+    run: &RunContext,
+) -> Result<serde_json::Value, ToolError> {
+    run.check_cancelled()
+        .map_err(|error| ToolError::Failed(error.to_string()))?;
+    capture_command_with_cancel(spec, run.cancelled(), run.deadline).await
+}
+/// Integrate the native capture owner with a host's existing cooperative control.
+pub async fn capture_command_with_cancel(
+    spec: CapturedCommand,
+    cancelled: impl std::future::Future<Output = ()> + Send,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value, ToolError> {
+    tokio::select! {
+        biased;
+        _ = cancelled => Err(ToolError::Indeterminate("command capture cancelled; process stop requested".into())),
+        _ = tokio::time::sleep_until(deadline) => Err(ToolError::Indeterminate("command capture deadline exceeded; process stop requested".into())),
+        output = capture_command(spec) => output,
+    }
 }

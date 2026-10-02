@@ -16,8 +16,9 @@ use std::{
 
 use async_trait::async_trait;
 use eliteforge_agent_core::{
-    AgentError, AgentEvent, CapabilityPackBuilder, ContextProvider, EventSink, Message, Plugin,
-    PluginContext, PluginError, RunContext, capability, capability_skills, extension_point,
+    AgentError, AgentEvent, CapabilityPackBuilder, ContextBlock, ContextContributor, ContextInput,
+    ContextSourceKind, EventSink, Message, Plugin, PluginContext, PluginError, RunContext,
+    capability, capability_skills, extension_point,
 };
 
 /// A third-party extension contract used by the framework acceptance suite.
@@ -181,9 +182,18 @@ impl ShopContext {
     factory = ShopContext::from_config
 )]
 #[async_trait]
-impl ContextProvider for ShopContext {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![Message::system(format!("shop:{}", self.label))])
+impl ContextContributor for ShopContext {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system(format!("shop:{}", self.label))],
+        ))
     }
 }
 
@@ -204,9 +214,18 @@ impl Default for PaymentContext {
 
 #[capability(pack = "payment", id = "payment.context", instance = "payment.context")]
 #[async_trait]
-impl ContextProvider for PaymentContext {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![Message::system("payment")])
+impl ContextContributor for PaymentContext {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system("payment")],
+        ))
     }
 }
 
@@ -231,9 +250,18 @@ impl AuditContext {
     factory = AuditContext::from_config
 )]
 #[async_trait]
-impl ContextProvider for AuditContext {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![Message::system(format!("audit:{}", self.label))])
+impl ContextContributor for AuditContext {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system(format!("audit:{}", self.label))],
+        ))
     }
 }
 
@@ -254,9 +282,18 @@ impl OrderedFirst {
     factory = OrderedFirst::from_config
 )]
 #[async_trait]
-impl ContextProvider for OrderedFirst {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![Message::system("ordering:first")])
+impl ContextContributor for OrderedFirst {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system("ordering:first")],
+        ))
     }
 }
 
@@ -278,9 +315,18 @@ impl OrderedSecond {
     factory = OrderedSecond::from_config
 )]
 #[async_trait]
-impl ContextProvider for OrderedSecond {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![Message::system("ordering:second")])
+impl ContextContributor for OrderedSecond {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system("ordering:second")],
+        ))
     }
 }
 
@@ -307,9 +353,18 @@ impl SharedCapability {
     factory = SharedCapability::from_config
 )]
 #[async_trait]
-impl ContextProvider for SharedCapability {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![Message::system(format!("shared:{}", self.label))])
+impl ContextContributor for SharedCapability {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system(format!("shared:{}", self.label))],
+        ))
     }
 }
 
@@ -344,9 +399,15 @@ impl DuplicateOne {
     factory = DuplicateOne::from_config
 )]
 #[async_trait]
-impl ContextProvider for DuplicateOne {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(Vec::new())
+impl ContextContributor for DuplicateOne {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(self.block_id(), Vec::new()))
     }
 }
 
@@ -367,9 +428,15 @@ impl DuplicateTwo {
     factory = DuplicateTwo::from_config
 )]
 #[async_trait]
-impl ContextProvider for DuplicateTwo {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(Vec::new())
+impl ContextContributor for DuplicateTwo {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(self.block_id(), Vec::new()))
     }
 }
 
@@ -393,9 +460,15 @@ impl MissingDependency {
     factory = MissingDependency::from_config
 )]
 #[async_trait]
-impl ContextProvider for MissingDependency {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(Vec::new())
+impl ContextContributor for MissingDependency {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(self.block_id(), Vec::new()))
     }
 }
 
@@ -417,9 +490,15 @@ impl CycleA {
     factory = CycleA::from_config
 )]
 #[async_trait]
-impl ContextProvider for CycleA {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(Vec::new())
+impl ContextContributor for CycleA {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(self.block_id(), Vec::new()))
     }
 }
 
@@ -441,9 +520,15 @@ impl CycleB {
     factory = CycleB::from_config
 )]
 #[async_trait]
-impl ContextProvider for CycleB {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(Vec::new())
+impl ContextContributor for CycleB {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(self.block_id(), Vec::new()))
     }
 }
 
@@ -580,9 +665,15 @@ impl ReservedDefaultId {
     factory = ReservedDefaultId::from_config
 )]
 #[async_trait]
-impl ContextProvider for ReservedDefaultId {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(Vec::new())
+impl ContextContributor for ReservedDefaultId {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(self.block_id(), Vec::new()))
     }
 }
 
@@ -606,8 +697,14 @@ impl ReservedDefaultDependency {
     factory = ReservedDefaultDependency::from_config
 )]
 #[async_trait]
-impl ContextProvider for ReservedDefaultDependency {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(Vec::new())
+impl ContextContributor for ReservedDefaultDependency {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(self.block_id(), Vec::new()))
     }
 }

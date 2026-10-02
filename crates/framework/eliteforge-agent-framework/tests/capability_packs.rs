@@ -83,16 +83,25 @@ impl ChatModel for DeclaredChatModel {
     }
 }
 
-use eliteforge_agent_framework::ContextProvider as AliasedContextProvider;
+use eliteforge_agent_framework::ContextContributor as AliasedContextContributor;
 
 #[derive(Default)]
 struct AliasedDeclaredContext;
 
 #[capability(pack = "aliased-context-provider")]
 #[async_trait]
-impl AliasedContextProvider for AliasedDeclaredContext {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![Message::system("aliased context provider")])
+impl AliasedContextContributor for AliasedDeclaredContext {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system("aliased context provider")],
+        ))
     }
 }
 
@@ -114,7 +123,7 @@ impl AgentLoop for InspectServiceCounts {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push((services.context.len(), services.tools.len()));
+            .push((services.context_sources.len(), services.tools.len()));
         Ok(complete_result())
     }
 }
@@ -130,11 +139,28 @@ impl AgentLoop for InspectContexts {
         services: &AgentServices,
     ) -> Result<RunResult, AgentError> {
         let mut contents = Vec::new();
-        for provider in &services.context {
+        for provider in &services.context_sources {
             contents.extend(
                 provider
-                    .context(context)
+                    .contribute(&ContextInput {
+                        stage: "test",
+                        step: 1,
+                        model: &ModelRef::new("test", "test"),
+                        budget: ContextBudget {
+                            max_tokens: 100_000,
+                            max_messages: 4096,
+                        },
+                        current_input: &Content::default(),
+                        history: &ConversationSnapshot::new(
+                            ConversationKey::new(&context.session_id),
+                            "test",
+                            Vec::new(),
+                        ),
+                        estimator: &ConservativeTokenEstimator,
+                        run: context,
+                    })
                     .await?
+                    .messages
                     .into_iter()
                     .map(|message| message.content.text()),
             );
@@ -1250,7 +1276,7 @@ async fn one_implementation_contributing_two_interfaces_is_created_once() {
     assert_eq!(
         state.factory_count("shared"),
         1,
-        "ContextProvider and EventSink adapters must share their declared instance"
+        "ContextContributor and EventSink adapters must share their declared instance"
     );
     agent
         .run(RunRequest::new("shared", "inspect"))

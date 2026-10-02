@@ -47,9 +47,9 @@ async fn react_workflow_and_dag_share_explicit_layout_and_isolate_node_snapshots
         let source = Source::default();
         let mut builder = TestBuilder::default()
             .plugin(ChatModelPlugin::new(capture.clone()))
-            .plugin(ContextPlugin::new(
+            .plugin(ContextContributorPlugin::new(
                 "system",
-                FixedContext::new("fixed instructions"),
+                FixedInstructions::new("fixed.instructions", "fixed instructions"),
             ))
             .plugin(ContextContributorPlugin::new(
                 "lookup-plugin",

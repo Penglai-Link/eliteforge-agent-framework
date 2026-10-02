@@ -1195,8 +1195,28 @@ impl AgentLoop for StaticSkillLoop {
         services: &AgentServices,
     ) -> Result<RunResult, AgentError> {
         let mut text = String::new();
-        for provider in &services.context {
-            for message in provider.context(run).await? {
+        for provider in &services.context_sources {
+            for message in provider
+                .contribute(&ContextInput {
+                    stage: "test",
+                    step: 1,
+                    model: &ModelRef::new("test", "test"),
+                    budget: ContextBudget {
+                        max_tokens: 100_000,
+                        max_messages: 4096,
+                    },
+                    current_input: &Content::default(),
+                    history: &ConversationSnapshot::new(
+                        ConversationKey::new(&run.session_id),
+                        "test",
+                        Vec::new(),
+                    ),
+                    estimator: &ConservativeTokenEstimator,
+                    run,
+                })
+                .await?
+                .messages
+            {
                 text.push_str(&message.content.text());
             }
         }
@@ -1362,4 +1382,148 @@ async fn nested_extension_callback_scopes_share_the_run_call_budget() {
     request.limits.max_steps = 1;
     assert_eq!(agent.run(request).await.unwrap().output, "quota preserved");
     agent.close().await;
+}
+
+struct CompressionDirectiveLoop(Arc<dyn ContextReducer>);
+#[async_trait]
+impl AgentLoop for CompressionDirectiveLoop {
+    async fn run(
+        &self,
+        request: &RunRequest,
+        run: &RunContext,
+        services: &AgentServices,
+    ) -> Result<RunResult, AgentError> {
+        let directive = match request.input.text().as_str() {
+            "block" => Some(ContextCompressionDirective {
+                trigger: ContextCompressionTrigger::Block,
+                target_tokens: 37,
+            }),
+            "global" => Some(ContextCompressionDirective {
+                trigger: ContextCompressionTrigger::Global,
+                target_tokens: 81,
+            }),
+            _ => None,
+        };
+        let block = ContextBlock::data("remote", "original remote data");
+        let history = ConversationSnapshot::new(
+            ConversationKey::new(&run.session_id),
+            "remote-test-generation",
+            vec![Message::user("current input")],
+        );
+        let model = ModelRef::new("demo", "offline");
+        let messages = self
+            .0
+            .reduce(&ContextReductionInput {
+                block: &block,
+                budget: ContextBudget {
+                    max_tokens: 512,
+                    max_messages: 1,
+                },
+                model: &model,
+                estimator: &ConservativeTokenEstimator,
+                history: &history,
+                run,
+                models: services.models.as_deref().expect("selected SDK models"),
+                limits: &request.limits,
+                overflow_recoveries: 0,
+                compression: directive,
+            })
+            .await?;
+        let content = messages[0].content.clone();
+        Ok(RunResult {
+            output: content.text(),
+            content,
+            structured: None,
+            interactions: vec![],
+            status: RunStatus::Completed,
+            usage: run.usage(),
+            steps: 1,
+            tool_calls: 0,
+            external_session: None,
+        })
+    }
+}
+struct CompressionDirectivePlugin;
+#[async_trait]
+impl Plugin for CompressionDirectivePlugin {
+    fn id(&self) -> &str {
+        "compression-directive-loop"
+    }
+    fn dependencies(&self) -> Vec<String> {
+        vec!["demo.reducer".into()]
+    }
+    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        let reducer = context
+            .extension::<dyn ContextReducer>()
+            .ok_or_else(|| PluginError::message("missing remote reducer"))?;
+        AgentLoopPlugin::new(CompressionDirectiveLoop(reducer))
+            .install(context)
+            .await
+    }
+}
+#[tokio::test]
+async fn remote_reducer_transports_block_global_targets_and_accepts_legacy_no_directive() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = CapabilityPackManager::new(directory.path()).unwrap();
+    install(&manager, "1.0.0");
+    let pack = manager
+        .select(
+            "demo.pack",
+            &"=1.0.0".parse().unwrap(),
+            "compression.agent",
+            "configuration.1",
+            Value::Null,
+        )
+        .unwrap()
+        .implementations([
+            "demo.chat",
+            "demo.state",
+            "demo.interactions",
+            "demo.conversations",
+            "demo.reducer",
+        ])
+        .unwrap();
+    let agent = builder(pack)
+        .plugin_factory(ConfiguredPluginFactory::new(
+            "compression-directive-loop",
+            vec!["demo.reducer".into()],
+            || Ok(Arc::new(CompressionDirectivePlugin)),
+        ))
+        .build()
+        .await
+        .unwrap();
+    for (input, expected) in [
+        ("block", "remote Block target 37"),
+        ("global", "remote Global target 81"),
+        ("none", "original remote data"),
+    ] {
+        let result = agent
+            .run(RunRequest::new(format!("compression-{input}"), input))
+            .await
+            .unwrap();
+        assert_eq!(result.output, expected);
+    }
+    let identity = agent
+        .execute(ListCapabilityInstances)
+        .await
+        .unwrap()
+        .remove(0);
+    let instance = manager.instance(&identity).unwrap();
+    let declaration = instance
+        .pack()
+        .manifest
+        .implementations
+        .iter()
+        .find(|implementation| implementation.id == "demo.reducer")
+        .unwrap()
+        .clone();
+    let remote = RemoteImplementation {
+        instance,
+        declaration,
+    };
+    let legacy = remote.invoke("reduce", json!({"block": ContextBlock::data("remote", "legacy request data"), "budget": ContextBudget { max_tokens: 512, max_messages: 1 }})).await.unwrap();
+    let messages: Vec<Message> = serde_json::from_value(legacy).unwrap();
+    assert_eq!(messages, vec![Message::user("legacy request data")]);
+    assert!(agent.close().await.is_success());
+    assert!(manager.usage().blockers("demo.pack").is_empty());
 }

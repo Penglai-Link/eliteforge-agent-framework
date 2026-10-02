@@ -11,6 +11,7 @@ members = [
     "crates/plugin/context/eliteforge-agent-context",
     "crates/plugin/memory/eliteforge-agent-memory",
     "crates/plugin/model/eliteforge-agent-official-plugin-model-genai",
+    "crates/plugin/model/eliteforge-agent-official-plugin-model-http",
     "crates/plugin/agent/eliteforge-agent-official-plugin-agent-external",
     "crates/plugin/observe/eliteforge-agent-official-plugin-otel",
     "crates/plugin/protocol/eliteforge-agent-official-plugin-agui",

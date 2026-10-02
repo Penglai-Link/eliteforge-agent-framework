@@ -63,11 +63,6 @@ impl Plugin for DefaultsPlugin {
             context.contribute(ToolProviderService(tool_provider.clone()))?;
             context.contribute_extension(tool_provider)?;
         }
-        if context.services().all::<ContextService>().is_empty() {
-            let context_provider: Arc<dyn ContextProvider> = Arc::new(FixedContext::default());
-            context.contribute(ContextService(context_provider.clone()))?;
-            context.contribute_extension(context_provider)?;
-        }
         if context.services().all::<EventService>().is_empty() {
             let event_sink: Arc<dyn EventSink> = Arc::new(NoopEvents);
             context.contribute(EventService(event_sink.clone()))?;

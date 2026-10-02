@@ -158,6 +158,21 @@ impl AgentLoop for ModelExecutionLoop {
             ));
         }
         state.request.limits.validate()?;
+        if request.resume.is_some()
+            && context.lineage.depth == 0
+            && context.node_execution.is_none()
+            && let Some(counter) = context.extensions.get::<ModelDispatchCounter>()
+        {
+            counter.restore(
+                state.request.limits.clone(),
+                state.budget_usage.clone(),
+                state.steps,
+                state.tool_calls,
+                state.child_runs,
+                !checkpoint.status.is_terminal() && matches!(&state.cursor, WorkflowCursor::Model),
+            );
+        }
+
         if checkpoint.status.is_terminal() {
             if let Some(resume) = &request.resume
                 && resume
@@ -255,6 +270,12 @@ impl AgentLoop for ModelExecutionLoop {
                 ));
             }
             state.request.limits.validate()?;
+            if request.resume.is_some() && context.lineage.depth == 0 && context.node_execution.is_none()
+                && let Some(counter) = context.extensions.get::<ModelDispatchCounter>()
+            {
+                counter.restore(state.request.limits.clone(), state.budget_usage.clone(), state.steps, state.tool_calls, state.child_runs, !checkpoint.status.is_terminal() && matches!(&state.cursor, WorkflowCursor::Model));
+            }
+
             state.request.generation.validate()?;
             let mut execution_context = context.clone();
             execution_context.model = state.request.model.clone();
@@ -675,13 +696,7 @@ impl ModelExecutionRuntime<'_> {
             match &self.state.cursor {
                 WorkflowCursor::Model => {
                     if self.state.steps >= self.state.request.limits.max_steps
-                        || self.context.execution_counters.as_ref().is_some_and(|c| {
-                            !crate::budget::ExecutionCounters::admit(
-                                &c.steps,
-                                1,
-                                self.state.request.limits.max_steps,
-                            )
-                        })
+                        || !admit_native_step(self.context, self.state.request.limits.max_steps)
                     {
                         return self
                             .stop(RunStatus::StepLimit, ExecutionStatus::Completed)
@@ -693,10 +708,7 @@ impl ModelExecutionRuntime<'_> {
                     }
                     self.record_steering(steering).await?;
                     let stage = &self.state.definition.stages[self.state.stage];
-                    let mut instructions = stage.instructions.clone();
-                    for provider in &self.services.context {
-                        instructions.extend(provider.context(self.context).await?);
-                    }
+                    let instructions = stage.instructions.clone();
                     if instructions.iter().any(|m| {
                         !matches!(m.role, Role::System | Role::Developer)
                             || !m.tool_calls.is_empty()
@@ -704,7 +716,7 @@ impl ModelExecutionRuntime<'_> {
                             || m.tool_result.is_some()
                     }) {
                         return Err(AgentError::InvalidConfiguration(
-                            "legacy context must provide trusted instructions".into(),
+                            "stage context must provide trusted instructions".into(),
                         ));
                     }
                     let descriptors: Vec<_> = self
@@ -816,13 +828,11 @@ impl ModelExecutionRuntime<'_> {
                                 .await;
                         }
                         let admitted = assistant.tool_calls.len().min(remaining);
-                        if self.context.execution_counters.as_ref().is_some_and(|c| {
-                            !crate::budget::ExecutionCounters::admit(
-                                &c.tools,
-                                admitted,
-                                self.state.request.limits.max_tool_calls,
-                            )
-                        }) {
+                        if !admit_native_tools(
+                            self.context,
+                            self.state.request.limits.max_tool_calls,
+                            admitted,
+                        ) {
                             return self
                                 .stop(RunStatus::ToolCallLimit, ExecutionStatus::Completed)
                                 .await;
@@ -1429,4 +1439,31 @@ impl crate::budget::BudgetJournal for WorkflowBudgetJournal {
             .await?;
         Ok(())
     }
+}
+
+fn admit_native_step(context: &RunContext, local_limit: usize) -> bool {
+    let admitted = if let Some(budget) = context.extensions.get::<ContinuationBudget>() {
+        budget.admit_step(context.execution_counters.as_ref(), local_limit)
+    } else {
+        context.execution_counters.as_ref().is_none_or(|counter| {
+            crate::budget::ExecutionCounters::admit(&counter.steps, 1, local_limit)
+        })
+    };
+    if admitted && let Some(counter) = context.extensions.get::<ModelDispatchCounter>() {
+        counter.record_step();
+    }
+    admitted
+}
+fn admit_native_tools(context: &RunContext, local_limit: usize, amount: usize) -> bool {
+    let admitted = if let Some(budget) = context.extensions.get::<ContinuationBudget>() {
+        budget.admit_tools(context.execution_counters.as_ref(), local_limit, amount)
+    } else {
+        context.execution_counters.as_ref().is_none_or(|counter| {
+            crate::budget::ExecutionCounters::admit(&counter.tools, amount, local_limit)
+        })
+    };
+    if admitted && let Some(counter) = context.extensions.get::<ModelDispatchCounter>() {
+        counter.record_tools(amount);
+    }
+    admitted
 }

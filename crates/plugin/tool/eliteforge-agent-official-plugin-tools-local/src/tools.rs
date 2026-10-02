@@ -69,31 +69,34 @@ pub(crate) fn system_command_bindings(
                 descriptor
             },
             SystemCommandTool {
-                config,
+                config: config.clone(),
                 tasks: tasks.clone(),
             },
         ),
         ToolBinding::new(
             system_command_task_read_descriptor(),
             SystemCommandTaskReadTool {
+                config: config.clone(),
                 tasks: tasks.clone(),
             },
         ),
         ToolBinding::new(
             system_command_task_stop_descriptor(),
             SystemCommandTaskStopTool {
+                config: config.clone(),
                 tasks: tasks.clone(),
             },
         ),
         ToolBinding::new(
             system_command_task_write_descriptor(),
             SystemCommandTaskWriteTool {
+                config: config.clone(),
                 tasks: tasks.clone(),
             },
         ),
         ToolBinding::new(
             system_command_list_descriptor(),
-            SystemCommandListTool { tasks },
+            SystemCommandListTool { tasks, config },
         )
         .parallel_safe(),
     ]
@@ -906,6 +909,23 @@ impl Tool for SystemCommandTool {
             self.config.timeout(),
             self.config.max_output_bytes(),
         )?;
+        // A task may outlive its run only after the caller accepts its taskId.
+        // Dropped/per-tool-timed-out initial waits otherwise leave an orphan.
+        struct PendingCommand {
+            task: std::sync::Arc<crate::tasks::CommandTask>,
+            accepted: bool,
+        }
+        impl Drop for PendingCommand {
+            fn drop(&mut self) {
+                if !self.accepted {
+                    self.task.request_stop();
+                }
+            }
+        }
+        let mut pending = PendingCommand {
+            task: task.clone(),
+            accepted: false,
+        };
         let waiting = async {
             if let Some(progress) = context
                 .extensions
@@ -945,11 +965,14 @@ impl Tool for SystemCommandTool {
         }
         let output = task.view(0, 0, INITIAL_READ_BYTES);
         let is_error = output.is_error();
-        json_output_with_error(output, is_error)
+        let output = json_output_with_error(output, is_error)?;
+        pending.accepted = true;
+        Ok(output)
     }
 }
 
 struct SystemCommandTaskReadTool {
+    config: SystemCommandConfig,
     tasks: CommandTaskManager,
 }
 
@@ -968,6 +991,8 @@ impl Tool for SystemCommandTaskReadTool {
     async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
         let input = parse::<SystemCommandTaskReadInput>(arguments)?;
         let task = self.tasks.get(&context.session_id, &input.task_id)?;
+        self.config
+            .authorize_existing_cwd(task.cwd().and_then(|cwd| cwd.to_str()))?;
         let stdout_cursor = input.stdout_cursor.unwrap_or(0);
         let stderr_cursor = input.stderr_cursor.unwrap_or(0);
         let wait_ms = input
@@ -994,6 +1019,7 @@ impl Tool for SystemCommandTaskReadTool {
 }
 
 struct SystemCommandTaskStopTool {
+    config: SystemCommandConfig,
     tasks: CommandTaskManager,
 }
 
@@ -1016,6 +1042,13 @@ impl Tool for SystemCommandTaskStopTool {
             task.wait_for_terminal(std::time::Duration::from_secs(3))
                 .await;
         }
+        if self
+            .config
+            .authorize_existing_cwd(task.cwd().and_then(|cwd| cwd.to_str()))
+            .is_err()
+        {
+            return json_output(json!({"taskId":input.task_id,"stopRequested":stop_requested}));
+        }
         let output = task
             .view(
                 input.stdout_cursor.unwrap_or(0),
@@ -1032,6 +1065,7 @@ impl Tool for SystemCommandTaskStopTool {
 }
 
 struct SystemCommandTaskWriteTool {
+    config: SystemCommandConfig,
     tasks: CommandTaskManager,
 }
 
@@ -1053,6 +1087,8 @@ impl Tool for SystemCommandTaskWriteTool {
     async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
         let input = parse::<SystemCommandTaskWriteInput>(arguments)?;
         let task = self.tasks.get(&context.session_id, &input.task_id)?;
+        self.config
+            .authorize_existing_cwd(task.cwd().and_then(|cwd| cwd.to_str()))?;
         tokio::select! {
             result = task.write(input.data, input.close_stdin) => result?,
             _ = context.cancellation.cancelled() => {
@@ -1075,6 +1111,7 @@ impl Tool for SystemCommandTaskWriteTool {
 }
 
 struct SystemCommandListTool {
+    config: SystemCommandConfig,
     tasks: CommandTaskManager,
 }
 
@@ -1090,7 +1127,7 @@ impl Tool for SystemCommandListTool {
     async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
         let input = parse::<SystemCommandListInput>(arguments)?;
         json_output_with_error(
-            json!({"commands":self.tasks.list(&context.session_id, input.include_completed)}),
+            json!({"commands":self.tasks.list(&context.session_id, input.include_completed).into_iter().filter(|task| self.config.authorize_existing_cwd(task.cwd.as_deref()).is_ok()).collect::<Vec<_>>()}),
             false,
         )
     }

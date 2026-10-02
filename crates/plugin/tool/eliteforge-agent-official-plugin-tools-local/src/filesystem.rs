@@ -16,7 +16,7 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const DEFAULT_ASYNC_AFTER: Duration = Duration::from_secs(10);
 
 /// Bounds and directory authority for file and search tools.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileSystemToolsConfig {
     root: PathBuf,
     authorized_roots: Option<Vec<PathBuf>>,
@@ -89,7 +89,7 @@ impl FileSystemToolsConfig {
 }
 
 /// Command authority for the system-command capability pack.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemCommandConfig {
     command_authority: CommandAuthority,
     directory_scope: Option<FileSystemToolsConfig>,
@@ -99,7 +99,7 @@ pub struct SystemCommandConfig {
     max_output_bytes: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CommandAuthority {
     All,
     Restricted(BTreeSet<String>),
@@ -260,6 +260,16 @@ impl SystemCommandConfig {
             )),
             None => Ok(cwd.map(PathBuf::from)),
         }
+    }
+
+    pub(crate) fn authorize_existing_cwd(&self, cwd: Option<&str>) -> Result<(), ToolError> {
+        if self.directory_scope.is_some() {
+            let cwd = cwd.ok_or_else(|| {
+                ToolError::Failed("command has no authorized working directory".into())
+            })?;
+            self.resolve_cwd(Some(cwd))?;
+        }
+        Ok(())
     }
 
     pub(crate) fn allows(&self, command: &str) -> bool {

@@ -308,11 +308,28 @@ async fn collect_context(
     context: &RunContext,
 ) -> Result<Vec<String>, AgentError> {
     let mut messages = Vec::new();
-    for provider in &services.context {
+    for provider in &services.context_sources {
         messages.extend(
             provider
-                .context(context)
+                .contribute(&ContextInput {
+                    stage: "test",
+                    step: 1,
+                    model: &ModelRef::new("test", "test"),
+                    budget: ContextBudget {
+                        max_tokens: 100_000,
+                        max_messages: 4096,
+                    },
+                    current_input: &Content::default(),
+                    history: &ConversationSnapshot::new(
+                        ConversationKey::new(&context.session_id),
+                        "test",
+                        Vec::new(),
+                    ),
+                    estimator: &ConservativeTokenEstimator,
+                    run: context,
+                })
                 .await?
+                .messages
                 .into_iter()
                 .map(|message| message.content.text()),
         );

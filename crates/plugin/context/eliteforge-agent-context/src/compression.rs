@@ -101,6 +101,7 @@ impl ModelCompressor {
                 models,
                 limits,
                 overflow_recoveries: 0,
+                compression: None,
             },
             false,
         )
@@ -382,6 +383,8 @@ fn summary_request(
         tools: vec![],
         extensions: context.extensions.clone(),
         options: GenerationOptions {
+            temperature: Some(0.0),
+            top_p: Some(1.0),
             // Bytes conservatively bound tokens; validation below enforces bytes
             // regardless of tokenization or provider conformance.
             max_output_tokens: Some(

@@ -167,10 +167,8 @@ impl ModelNext<'_> {
                 ));
             }
             request.options.max_output_tokens = Some(
-                request
-                    .options
-                    .max_output_tokens
-                    .unwrap_or(self.default_output_tokens),
+                self.descriptor
+                    .output_limit(self.default_output_tokens, &request.options),
             );
             let mut budget = self.budget;
             if let Some(window) = self.descriptor.context_window_tokens {
@@ -207,24 +205,37 @@ impl ModelNext<'_> {
                 self.max_total_tokens.min(self.run.token_ceiling),
             )?;
             request.options.max_output_tokens = Some(output_tokens);
-            validate_model_request(
-                &request,
-                budget,
-                self.descriptor,
-                self.target,
-                self.estimator,
-            )
-            .await?;
-            let final_input_tokens = self
-                .estimator
-                .request(self.target, &request)
-                .await?
-                .min(u64::MAX as usize) as u64;
-            if final_input_tokens > input_tokens {
-                return Err(ModelError::Fatal(
-                    "token estimator increased input cost after reducing output allowance".into(),
-                ));
+            let prepared = async {
+                validate_model_request(
+                    &request,
+                    budget,
+                    self.descriptor,
+                    self.target,
+                    self.estimator,
+                )
+                .await?;
+                let final_input_tokens = self
+                    .estimator
+                    .request(self.target, &request)
+                    .await?
+                    .min(u64::MAX as usize) as u64;
+                if final_input_tokens > input_tokens {
+                    return Err(ModelError::Fatal(
+                        "token estimator increased input cost after reducing output allowance"
+                            .into(),
+                    ));
+                }
+                Ok(final_input_tokens)
             }
+            .await;
+            let final_input_tokens = match prepared {
+                Ok(tokens) => tokens,
+                Err(error) => {
+                    permit.release_unspent();
+                    self.run.persist_budget().await?;
+                    return Err(error);
+                }
+            };
             let report = ModelDispatchReport {
                 model: self.target.clone(),
                 node_execution: self.run.node_execution().cloned(),
@@ -238,7 +249,17 @@ impl ModelNext<'_> {
                 output_token_limit: output_tokens,
             };
             let options = request.options.clone();
+            if let Some(budget) = self.run.extensions.get::<crate::ContinuationBudget>()
+                && let Err(error) = budget.admit_model_call()
+            {
+                permit.release_unspent();
+                self.run.persist_budget().await?;
+                return Err(error);
+            }
             self.run.persist_budget().await?;
+            if let Some(counter) = self.run.extensions.get::<crate::ModelDispatchCounter>() {
+                counter.record();
+            }
             self.run.emit(AgentEvent::ModelDispatched(report)).await;
             request
                 .extensions
@@ -644,6 +665,52 @@ pub struct ToolInvoker {
 impl ToolInvoker {
     pub fn new(middleware: Vec<Arc<dyn ToolMiddleware>>) -> Self {
         Self { middleware }
+    }
+
+    /// Narrow the original provider catalog through the run's installed
+    /// policies. Resources must already belong to RunContext before this call.
+    pub async fn admit_binding(
+        &self,
+        binding: &mut ToolBinding,
+        context: &RunContext,
+    ) -> Result<bool, AgentError> {
+        context.check_cancelled()?;
+        if let Some(services) = context.extensions.get::<ScopedAgentServices>() {
+            for policy in &services.0.tool_policy {
+                let decision = tokio::select! {
+                    biased;
+                    _ = context.cancelled() => return Err(AgentError::Cancelled),
+                    result = tokio::time::timeout_at(context.deadline, policy.admit_binding(binding, context)) =>
+                        result.map_err(|_| AgentError::Run("tool catalog admission timed out".into()))??,
+                };
+                match decision {
+                    ToolBindingAdmission::Allow => {}
+                    ToolBindingAdmission::Hidden => binding.exposed = false,
+                    ToolBindingAdmission::Exclude => return Ok(false),
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Publish only the final catalog, never an intermediate policy decision.
+    pub async fn catalog_ready(
+        &self,
+        bindings: &[ToolBinding],
+        context: &RunContext,
+    ) -> Result<(), AgentError> {
+        context.check_cancelled()?;
+        if let Some(services) = context.extensions.get::<ScopedAgentServices>() {
+            for policy in &services.0.tool_policy {
+                tokio::select! {
+                    biased;
+                    _ = context.cancelled() => return Err(AgentError::Cancelled),
+                    result = tokio::time::timeout_at(context.deadline, policy.catalog_ready(bindings, context)) =>
+                        result.map_err(|_| AgentError::Run("tool catalog observation timed out".into()))??,
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn invoke(

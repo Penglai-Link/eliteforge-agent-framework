@@ -1129,9 +1129,9 @@ async fn telemetry_distinguishes_assembly_from_final_dispatch_after_middleware_w
         )
         .plugin(ModelMiddlewarePlugin::new("rewrite", AddPrivateInput))
         .plugin(ChatModelPlugin::new(capture.clone()))
-        .plugin(ContextPlugin::new(
+        .plugin(ContextContributorPlugin::new(
             "instructions",
-            FixedContext::new("private-instructions"),
+            FixedInstructions::new("fixed.instructions", "private-instructions"),
         ))
         .build()
         .await
@@ -1322,6 +1322,73 @@ async fn auxiliary_summary_dispatch_has_its_own_model_span_and_purpose() {
     assert_eq!(attr(model, "agent.model.sent.message_count"), "1");
     assert_eq!(model.parent_span_id, run.span_context.span_id());
     assert!(!format!("{spans:?}").contains("private-history"));
+    traces.shutdown().unwrap();
+    metrics.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn context_no_gain_exports_explicit_outcome_without_source_payload() {
+    let exporter = InMemorySpanExporter::default();
+    let traces = SdkTracerProvider::builder()
+        .with_simple_exporter(exporter.clone())
+        .build();
+    let metrics = SdkMeterProvider::builder().build();
+    let capture = FinalRequestCapture::default();
+    let body = format!("private-no-gain-source{}", "X".repeat(100));
+    let agent = TestBuilder::default()
+        .plugin(
+            TelemetryPlugin::new("telemetry", &traces, &metrics, TelemetryConfig::default())
+                .unwrap(),
+        )
+        .plugin(ChatModelPlugin::new(capture.clone()))
+        .plugin(ContextContributorPlugin::new(
+            "source",
+            FixedContextContributor(ContextBlock::data("private-block", body.clone())),
+        ))
+        .plugin(ContextLayoutPlugin(ContextLayout(vec![
+            ContextBlockConfig::new(INSTRUCTIONS_BLOCK, BlockBudget::tokens(0)),
+            ContextBlockConfig::new("private-block", BlockBudget::tokens(500))
+                .compress_at(1000, 500),
+            ContextBlockConfig::new(HISTORY_BLOCK, BlockBudget::tokens(1000)),
+        ])))
+        .build()
+        .await
+        .unwrap();
+    agent
+        .run(RunRequest::new("private-session", "private-input"))
+        .await
+        .unwrap();
+    assert!(agent.close().await.is_success());
+    traces.force_flush().unwrap();
+    let spans = exporter.get_finished_spans().unwrap();
+    let run = spans.iter().find(|span| span.name == "agent.run").unwrap();
+    let event = run
+        .events
+        .iter()
+        .find(|event| {
+            event.name == "agent.context.block"
+                && event.attributes.iter().any(|attribute| {
+                    attribute.key.as_str() == "agent.context.block.position"
+                        && attribute.value.to_string() == "1"
+                })
+        })
+        .unwrap();
+    assert!(
+        event
+            .attributes
+            .iter()
+            .any(
+                |attribute| attribute.key.as_str() == "agent.context.block.outcome"
+                    && attribute.value.to_string() == "no_gain"
+            )
+    );
+    assert!(
+        capture.0.lock().unwrap()[0]
+            .messages
+            .iter()
+            .any(|message| message.content.text() == body)
+    );
+    assert!(!format!("{spans:?}").contains("private-"));
     traces.shutdown().unwrap();
     metrics.shutdown().unwrap();
 }

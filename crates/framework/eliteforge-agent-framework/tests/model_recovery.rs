@@ -332,6 +332,7 @@ impl ChatModel for Provider {
             stream.reasoning_delta("already visible").await;
         }
         Err(ModelError::Provider(Box::new(ProviderModelError {
+            authorization_attempt: None,
             provider: "test".into(),
             category: self.category,
             http_status: Some(404),

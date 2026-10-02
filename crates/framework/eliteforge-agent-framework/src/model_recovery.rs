@@ -53,6 +53,7 @@ impl RecoveryState {
                 && (identity.is_none() || service.account_identity() != *identity)
         }) {
             return Err(ModelError::Provider(Box::new(ProviderModelError {
+                authorization_attempt: None,
                 provider: model.connection.clone(),
                 category: ProviderErrorCategory::AccountChanged,
                 http_status: None,
@@ -78,5 +79,34 @@ impl Plugin for ModelRecoveryPlugin {
 
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
         context.provide(self.0.clone())
+    }
+}
+
+/// Authorized model runtime for one run. Hosts may share an Agent without
+/// publishing one workspace/account's candidates into another run's catalog.
+/// This changes bindings and selection only; invocation control remains owned
+/// by ModelInvoker, including middleware, retries and shared step reservations.
+#[derive(Clone)]
+pub struct ModelExecutionScope {
+    pub runtime: Arc<ModelRuntime>,
+    pub strategy: Arc<dyn ModelSelectionStrategy>,
+    pub recovery: ModelRecoveryPolicy,
+    pub refreshers: Vec<Arc<dyn ModelCatalogRefresh>>,
+}
+impl ModelExecutionScope {
+    pub fn new(
+        runtime: Arc<ModelRuntime>,
+        strategy: Arc<dyn ModelSelectionStrategy>,
+    ) -> Result<Self, AgentError> {
+        strategy.validate(&runtime.snapshot().chat)?;
+        Ok(Self {
+            runtime,
+            strategy,
+            recovery: ModelRecoveryPolicy::default(),
+            refreshers: vec![],
+        })
+    }
+    pub fn attach(&self, request: &mut RunRequest) {
+        request.extensions.insert(self.clone());
     }
 }

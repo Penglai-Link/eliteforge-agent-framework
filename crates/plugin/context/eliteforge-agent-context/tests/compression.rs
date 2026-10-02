@@ -285,6 +285,7 @@ impl AgentLoop for PreserveLatest {
                 model: &ModelRef::new("shared", "summary"),
                 estimator: &ConservativeTokenEstimator,
                 overflow_recoveries: 0,
+                compression: None,
             })
             .await?;
         let latest = self
@@ -385,6 +386,7 @@ impl AgentLoop for CachedProjection {
                 models: services.models.as_deref().unwrap(),
                 limits: &request.limits,
                 overflow_recoveries: 0,
+                compression: None,
             })
             .await?;
         assert!(projected.iter().any(|m| m.role == Role::User

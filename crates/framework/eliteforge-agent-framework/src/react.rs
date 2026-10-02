@@ -72,10 +72,20 @@ impl ToolSet {
             by_name: HashMap::new(),
             id_to_name: HashMap::new(),
         };
+        let invoker = context
+            .extensions
+            .get::<ScopedAgentServices>()
+            .map(|services| services.0.tool_invoker.clone())
+            .unwrap_or_else(|| Arc::new(ToolInvoker::default()));
         for provider in providers {
             let mut lease = provider.lease(context).await?;
             context.own_resources(std::mem::take(&mut lease.resources));
-            for binding in &lease.tools {
+            for mut binding in lease.tools {
+                // Keep each original executor and its owner; policies may only
+                // reject admission or narrow exposure before collision checks.
+                if !invoker.admit_binding(&mut binding, context).await? {
+                    continue;
+                }
                 let descriptor = &binding.descriptor;
                 if descriptor.id.trim().is_empty()
                     || descriptor.call_name.is_empty()
@@ -102,6 +112,9 @@ impl ToolSet {
                     .insert(descriptor.id.clone(), descriptor.call_name.clone());
             }
         }
+        let mut admitted: Vec<_> = result.by_name.values().cloned().collect();
+        admitted.sort_by(|a, b| a.descriptor.call_name.cmp(&b.descriptor.call_name));
+        invoker.catalog_ready(&admitted, context).await?;
         Ok(result)
     }
 

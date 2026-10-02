@@ -49,7 +49,7 @@ pub(crate) struct CommandSummary {
     task_id: String,
     command: String,
     args: Vec<String>,
-    cwd: Option<String>,
+    pub(crate) cwd: Option<String>,
     status: CommandTaskStatus,
     exit_code: Option<i32>,
     tty: bool,
@@ -496,6 +496,9 @@ pub(crate) struct CommandTask {
 }
 
 impl CommandTask {
+    pub(crate) fn cwd(&self) -> Option<&std::path::Path> {
+        self.cwd.as_deref()
+    }
     fn summary(&self) -> CommandSummary {
         let state = self.state_tx.borrow().clone();
         CommandSummary {

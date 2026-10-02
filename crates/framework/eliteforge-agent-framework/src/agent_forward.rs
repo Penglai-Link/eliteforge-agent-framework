@@ -210,6 +210,21 @@ impl Agent {
         let generation = self.snapshot();
         generation.budget_usage(run)
     }
+    pub fn execution_snapshot(&self, run: &impl AsRef<RunControl>, result: &RunResult) -> Result<RunExecutionSnapshot, AgentError> {
+        self.snapshot().execution_snapshot(run, result)
+    }
+    pub async fn start_child_owned(&self, request: RunRequest, parent: &RunContext) -> Result<ChildRunHandle, AgentError> {
+        let (generation, lease) = self.admit("task", &request.session_id)?;
+        let mut child = generation.start_child_owned(request, parent).await?;
+        child.handle.as_mut().expect("child handle").occupancy = Some(lease);
+        Ok(child)
+    }
+    pub async fn start_child_with_output_owned<T: Send + 'static>(&self, request: RunRequest, parent: &RunContext) -> Result<(ChildRunHandle, T), AgentError> {
+        let (generation, lease) = self.admit("task", &request.session_id)?;
+        let (mut child, output) = generation.start_child_with_output_owned(request, parent).await?;
+        child.handle.as_mut().expect("child handle").occupancy = Some(lease);
+        Ok((child, output))
+    }
     pub fn events(
         &self,
         handle: &mut RunHandle,

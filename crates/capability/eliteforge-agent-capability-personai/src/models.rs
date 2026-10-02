@@ -360,6 +360,7 @@ impl BoundPersonAiModels {
     fn ensure_open(&self) -> Result<(), ModelError> {
         if self.context.is_closed() {
             return Err(ModelError::Provider(Box::new(ProviderModelError {
+                authorization_attempt: None,
                 provider: "personai".into(),
                 category: ProviderErrorCategory::AccountChanged,
                 http_status: None,
@@ -397,6 +398,7 @@ impl BoundPersonAiModels {
             Ok(())
         } else {
             Err(ModelError::Provider(Box::new(ProviderModelError {
+                authorization_attempt: None,
                 provider: "personai".into(),
                 category: ProviderErrorCategory::AccountChanged,
                 http_status: None,
@@ -1101,6 +1103,7 @@ fn job_status(status: i32) -> ModelJobStatus {
 fn map_error(error: ServerApiError) -> ModelError {
     use ProviderErrorCategory as Category;
     let mut detail = ProviderModelError {
+        authorization_attempt: None,
         provider: "personai".into(),
         category: Category::Other,
         http_status: None,

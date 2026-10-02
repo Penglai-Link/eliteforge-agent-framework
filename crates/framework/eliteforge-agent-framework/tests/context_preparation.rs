@@ -53,6 +53,7 @@ impl ContextPreparationPolicy for Policy {
                 .map(ContextPreparation::Ready);
         }
         Ok(ContextPreparation::Reduce(ContextReductionJob {
+            workflow: None,
             source_revision: "revision-1".into(),
             model: ModelRef::new("model", if self.fail { "failure" } else { "summary" }),
             request: ChatRequest {
@@ -154,6 +155,7 @@ impl ChatModel for AccountBoundModel {
             != self.revision
         {
             return Err(ModelError::Provider(Box::new(ProviderModelError {
+                authorization_attempt: None,
                 provider: "test".into(),
                 category: ProviderErrorCategory::AccountChanged,
                 http_status: None,
@@ -196,6 +198,7 @@ impl ContextPreparationPolicy for RefreshDuringPreparation {
         self.runtime
             .replace_connection("personai", self.replacement.clone())?;
         Ok(ContextPreparation::Reduce(ContextReductionJob {
+            workflow: None,
             source_revision: "alice-history".into(),
             model: ModelRef::new("personai", "summary"),
             request: ChatRequest {

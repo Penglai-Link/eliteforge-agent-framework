@@ -233,6 +233,23 @@ impl EmbeddingSpace {
 #[crate::extension_point]
 #[async_trait]
 pub trait EmbeddingModel: Send + Sync {
+    /// Declared input capacity, excluding generated output; None is unknown.
+    fn input_capacity(&self) -> Option<usize> {
+        None
+    }
+    fn input_token_estimate(&self, request: &EmbeddingRequest) -> u64 {
+        request
+            .inputs
+            .iter()
+            .map(|content| content.estimated_tokens() as u64)
+            .fold(0, u64::saturating_add)
+            .max(1)
+    }
+
+    fn on_failure(&self, _: &ModelError) {}
+    async fn recover_authentication(&self, _: &ModelError) -> Result<bool, ModelError> {
+        Ok(false)
+    }
     async fn embed(
         &self,
         model: &str,
@@ -257,9 +274,47 @@ pub struct RerankResponse {
     pub model: ModelRef,
     pub results: Vec<RankedDocument>,
 }
+pub struct RerankModelOutput {
+    pub response: RerankResponse,
+    pub usage: Option<Usage>,
+}
 #[crate::extension_point]
 #[async_trait]
 pub trait RerankModel: Send + Sync {
+    /// Declared capacity after the adapter's output reserve. None is unknown.
+    fn input_capacity(&self) -> Option<usize> {
+        None
+    }
+
+    fn on_failure(&self, _: &ModelError) {}
+    /// Reserve generated output for chat-based rerankers before dispatch.
+    fn output_token_reserve(&self) -> u32 {
+        0
+    }
+    /// Conservative estimate of the actual provider input, including provider framing.
+    fn input_token_estimate(&self, request: &RerankRequest) -> u64 {
+        request
+            .documents
+            .iter()
+            .chain(std::iter::once(&request.query))
+            .map(|content| content.estimated_tokens() as u64)
+            .fold(0, u64::saturating_add)
+            .max(1)
+    }
+    async fn rerank_with_usage(
+        &self,
+        model: &str,
+        request: RerankRequest,
+        _: Option<u32>,
+    ) -> Result<RerankModelOutput, ModelError> {
+        Ok(RerankModelOutput {
+            response: self.rerank(model, request).await?,
+            usage: None,
+        })
+    }
+    async fn recover_authentication(&self, _: &ModelError) -> Result<bool, ModelError> {
+        Ok(false)
+    }
     async fn rerank(
         &self,
         model: &str,

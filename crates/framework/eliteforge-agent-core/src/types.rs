@@ -187,7 +187,40 @@ pub struct ChatResponse {
     pub model_context: Option<crate::ModelMessageContext>,
 }
 
+/// Optional diagnostics reported by a provider, independent of budget ledger
+/// charges. Missing fields remain unknown, including during aggregation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderMetrics {
+    pub cached_input_tokens: Option<u64>,
+    pub reasoning_tokens: Option<u64>,
+}
+
 impl ChatResponse {
+    /// Preserve existing provider continuation and the summary's structured
+    /// schema. A non-object opaque context cannot carry these optional metrics.
+    pub fn with_provider_metrics(mut self, metrics: ProviderMetrics) -> Self {
+        let context = self
+            .model_context
+            .get_or_insert_with(|| crate::ModelMessageContext {
+                model: crate::ModelRef::new("framework", "provider-metrics"),
+                protocol: "provider-metrics".into(),
+                format: "framework.provider-metrics.v1".into(),
+                data: serde_json::json!({}),
+            });
+        if let Some(data) = context.data.as_object_mut() {
+            data.insert(
+                "frameworkProviderMetrics".into(),
+                serde_json::to_value(metrics).expect("provider metrics serialize"),
+            );
+        }
+        self
+    }
+    pub fn provider_metrics(&self) -> Option<ProviderMetrics> {
+        self.model_context
+            .as_ref()
+            .and_then(|context| context.data.get("frameworkProviderMetrics"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             content: text.into().into(),
@@ -219,6 +252,9 @@ pub enum ProviderErrorCategory {
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[error("{provider} model error: {message}")]
 pub struct ProviderModelError {
+    /// Opaque transport attempt identity, never a credential. Used to bind recovery to the rejected request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_attempt: Option<String>,
     pub provider: String,
     pub category: ProviderErrorCategory,
     pub http_status: Option<u16>,
@@ -268,6 +304,8 @@ pub enum ConversationError {
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum ContextError {
+    #[error("context source refresh required: {source_revision}")]
+    RefreshRequired { source_revision: String },
     #[error("operation result is unknown: {0}")]
     Indeterminate(String),
     #[error("context budget exceeded: {0}")]
@@ -653,12 +691,6 @@ pub trait EventSink: Send + Sync {
     async fn on_event(&self, context: &RunContext, event: &AgentEvent);
 }
 
-#[crate::extension_point(adapter = crate::ContextPlugin, contribute)]
-#[async_trait]
-pub trait ContextProvider: Send + Sync {
-    async fn context(&self, context: &RunContext) -> Result<Vec<Message>, AgentError>;
-}
-
 #[crate::extension_point(single, adapter = crate::AgentLoopPlugin)]
 #[async_trait]
 pub trait AgentLoop: Send + Sync {
@@ -852,7 +884,7 @@ pub struct AgentServices {
     pub state: Option<Arc<dyn crate::StateStore>>,
     pub tool_policy: Vec<Arc<dyn crate::ToolPolicy>>,
     pub tools: Vec<Arc<dyn ToolProvider>>,
-    pub context: Vec<Arc<dyn ContextProvider>>,
+    pub context_sources: Vec<Arc<dyn crate::ContextContributor>>,
 }
 
 /// Stable custom contracts expose data, never Any/TypeId or borrowed service objects.

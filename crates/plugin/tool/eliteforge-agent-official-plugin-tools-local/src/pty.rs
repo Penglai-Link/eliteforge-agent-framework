@@ -144,6 +144,11 @@ impl PtyService {
 }
 impl PtyService {
     pub fn start(&self, request: PtyStart) -> Result<PtySnapshot, ToolError> {
+        self.start_owned(request).map(|(snapshot, _)| snapshot)
+    }
+    /// Whether this call created a process; idempotent replays do not transfer
+    /// an already-accepted session into a new invocation's cancellation scope.
+    pub(crate) fn start_owned(&self, request: PtyStart) -> Result<(PtySnapshot, bool), ToolError> {
         let mut command = PtyCommand::new(&request.program);
         command.args(&request.program_args);
         command.cwd(&request.cwd);
@@ -182,7 +187,7 @@ impl PtyService {
         };
         let (sender, receiver) = mpsc::unbounded_channel();
         Ok((
-            self.spawn(request, command, cols, rows, Some(sender))?,
+            self.spawn(request, command, cols, rows, Some(sender))?.0,
             receiver,
         ))
     }
@@ -193,7 +198,7 @@ impl PtyService {
         cols: u16,
         rows: u16,
         events: Option<UnboundedSender<PtyEvent>>,
-    ) -> Result<PtySnapshot, ToolError> {
+    ) -> Result<(PtySnapshot, bool), ToolError> {
         let mut registry = self.registry.lock().map_err(fail)?;
         if registry.closed {
             return Err(fail("PTY service is closed"));
@@ -214,7 +219,8 @@ impl PtyService {
             let session = registry.sessions.get(&record.terminal_id).ok_or_else(|| {
                 fail("terminal session for this invocation has expired; it was not restarted")
             })?;
-            return Self::snapshot(&record.terminal_id, session, 0);
+            return Self::snapshot(&record.terminal_id, session, 0)
+                .map(|snapshot| (snapshot, false));
         }
         // Completed sessions are reclaimed only when capacity is needed.
         if registry.sessions.len() >= 64
@@ -345,7 +351,11 @@ impl PtyService {
                 },
             );
         }
-        Ok(snapshot)
+        Ok((snapshot, true))
+    }
+    /// Trusted scope validation can inspect cwd without copying retained output.
+    pub fn working_directory(&self, owner: &str, id: &str) -> Result<String, ToolError> {
+        Ok(self.session(owner, id)?.cwd.clone())
     }
     pub fn read(&self, owner: &str, id: &str, cursor: u64) -> Result<PtySnapshot, ToolError> {
         Self::snapshot(id, self.session(owner, id)?.as_ref(), cursor)

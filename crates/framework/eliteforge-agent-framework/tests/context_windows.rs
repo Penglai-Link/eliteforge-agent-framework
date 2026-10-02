@@ -128,16 +128,20 @@ fn output_reserve_is_subtracted_only_from_total_window() {
             .unwrap(),
         500
     );
-    assert!(
-        model
-            .input_capacity(
-                &limits,
-                &GenerationOptions {
-                    max_output_tokens: Some(600),
-                    ..Default::default()
-                }
-            )
-            .is_err()
+    let requested = GenerationOptions {
+        max_output_tokens: Some(600),
+        ..Default::default()
+    };
+    assert_eq!(model.input_capacity(&limits, &requested).unwrap(), 400);
+    let unconstrained = RunLimits {
+        max_model_output_tokens: 600,
+        ..limits.clone()
+    };
+    assert!(model.input_capacity(&unconstrained, &requested).is_err());
+    model.max_output_tokens = Some(100);
+    assert_eq!(
+        model.input_capacity(&unconstrained, &requested).unwrap(),
+        500
     );
 }
 
@@ -168,9 +172,9 @@ async fn layout_order_is_independent_of_registration_order_and_reports_explain_o
     let reports = Reports::default();
     let agent = TestBuilder::default()
         .plugin(ChatModelPlugin::new(capture.clone()))
-        .plugin(ContextPlugin::new(
+        .plugin(ContextContributorPlugin::new(
             "instructions",
-            FixedContext::new("system"),
+            FixedInstructions::new("fixed.instructions", "system"),
         ))
         .plugin(ContextContributorPlugin::new(
             "registered-first",

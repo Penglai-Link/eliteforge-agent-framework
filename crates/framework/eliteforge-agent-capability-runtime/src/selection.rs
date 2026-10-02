@@ -700,7 +700,9 @@ impl Plugin for RemoteMemberPlugin {
             }
             "framework.tool-provider" => multiple!(ToolProviderService, ToolProvider),
             "framework.tool-policy" => multiple!(ToolPolicyService, ToolPolicy),
-            "framework.context-provider" => multiple!(ContextService, ContextProvider),
+            "framework.context-provider" => {
+                multiple!(ContextContributorService, ContextContributor)
+            }
             "framework.context-contributor" => {
                 multiple!(ContextContributorService, ContextContributor)
             }

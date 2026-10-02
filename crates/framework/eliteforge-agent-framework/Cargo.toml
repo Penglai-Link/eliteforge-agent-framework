@@ -33,3 +33,7 @@ eliteforge-agent-test-support = { path = "../../testing/eliteforge-agent-test-su
 
 eliteforge-agent-official-plugin-tools-local = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-local" }
 tempfile = "3"
+
+eliteforge-agent-official-plugin-model-http = { path = "../../plugin/model/eliteforge-agent-official-plugin-model-http" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { workspace = true, features = ["net", "io-util"] }

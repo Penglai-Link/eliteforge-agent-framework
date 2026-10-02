@@ -32,3 +32,13 @@ mod capability_state;
 pub use eliteforge_agent_capability_runtime::*;
 
 mod model_call_budget;
+
+mod model_jobs;
+pub use model_jobs::*;
+
+mod operation_jobs;
+
+pub use operation_jobs::ModelOperationResult;
+
+mod continuation;
+pub use continuation::*;

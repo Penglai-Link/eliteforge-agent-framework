@@ -61,12 +61,26 @@ fn fail(error: impl ToString) -> ToolError {
     ToolError::Failed(error.to_string())
 }
 impl PtyTools {
+    fn authorize_terminal(&self, id: &str) -> Result<(), ToolError> {
+        let cwd = self.service.working_directory(&self.owner, id)?;
+        self.commands.authorize_existing_cwd(Some(&cwd))
+    }
     pub fn execute(
         &self,
         name: &str,
         input: Value,
         invocation_id: Option<String>,
     ) -> Result<Value, ToolError> {
+        self.execute_owned(name, input, invocation_id)
+            .map(|(value, _)| value)
+    }
+    fn execute_owned(
+        &self,
+        name: &str,
+        input: Value,
+        invocation_id: Option<String>,
+    ) -> Result<(Value, Option<String>), ToolError> {
+        let mut started = None;
         let owner = self.owner.clone();
         let value = match name {
             "terminal_start" => {
@@ -113,7 +127,7 @@ impl PtyTools {
                         program_args,
                     )
                 };
-                serde_json::to_value(self.service.start(PtyStart {
+                let (terminal, created) = self.service.start_owned(PtyStart {
                     owner,
                     invocation_id,
                     command,
@@ -122,11 +136,15 @@ impl PtyTools {
                     program_args,
                     cwd,
                     env: input.env,
-                })?)
-                .map_err(fail)?
+                })?;
+                if created {
+                    started = Some(terminal.terminal_id.clone());
+                }
+                serde_json::to_value(terminal).map_err(fail)?
             }
             "terminal_read" => {
                 let input: Read = serde_json::from_value(input).map_err(fail)?;
+                self.authorize_terminal(&input.terminal_id)?;
                 serde_json::to_value(
                     self.service
                         .read(&owner, &input.terminal_id, input.cursor)?,
@@ -135,6 +153,7 @@ impl PtyTools {
             }
             "terminal_write" => {
                 let input: Write = serde_json::from_value(input).map_err(fail)?;
+                self.authorize_terminal(&input.terminal_id)?;
                 self.service
                     .write(&owner, &input.terminal_id, &input.data)?;
                 json!({"terminalId":input.terminal_id,"written":true})
@@ -148,11 +167,22 @@ impl PtyTools {
                 if input != json!({}) {
                     return Err(fail("terminal_list takes no parameters"));
                 }
-                serde_json::to_value(self.service.list(&owner)?).map_err(fail)?
+                serde_json::to_value(
+                    self.service
+                        .list(&owner)?
+                        .into_iter()
+                        .filter(|terminal| {
+                            self.commands
+                                .authorize_existing_cwd(Some(&terminal.cwd))
+                                .is_ok()
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .map_err(fail)?
             }
             _ => return Err(fail("unknown terminal operation")),
         };
-        Ok(value)
+        Ok((value, started))
     }
 }
 
@@ -208,6 +238,56 @@ pub fn terminal_tool_catalog() -> Vec<ToolDescriptor> {
         format!("framework.terminal.{name}"), format!("terminal_{name}"), description, schema
     )).collect()
 }
+// Scope of one awaited invocation, distinct from the persistent terminal owner.
+#[derive(Default)]
+struct TerminalInvocationState {
+    abandoned: bool,
+    accepted: bool,
+    terminal_id: Option<String>,
+}
+struct TerminalInvocation {
+    state: std::sync::Arc<std::sync::Mutex<TerminalInvocationState>>,
+    service: PtyService,
+    owner: String,
+    runtime: tokio::runtime::Handle,
+}
+impl TerminalInvocation {
+    fn new(tools: &PtyTools) -> Self {
+        Self {
+            state: Default::default(),
+            service: tools.service.clone(),
+            owner: tools.owner.clone(),
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+    fn accept(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .accepted = true;
+    }
+}
+impl Drop for TerminalInvocation {
+    fn drop(&mut self) {
+        let terminal = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.accepted {
+                return;
+            }
+            state.abandoned = true;
+            state.terminal_id.clone()
+        };
+        if let Some(id) = terminal {
+            // Stop uses the native service/process owner. It can block in kill/wait,
+            // so a cancelled async caller must not perform it on the runtime thread.
+            let service = self.service.clone();
+            let owner = self.owner.clone();
+            self.runtime.spawn_blocking(move || {
+                let _ = service.stop(&owner, &id);
+            });
+        }
+    }
+}
 struct TerminalBinding {
     name: String,
     tools: PtyTools,
@@ -221,10 +301,44 @@ impl Tool for TerminalBinding {
             .map(|identity| identity.invocation_id.clone());
         let tools = self.tools.clone();
         let name = self.name.clone();
-        let value = tokio::task::spawn_blocking(move || tools.execute(&name, input, invocation_id))
-            .await
-            .map_err(fail)??;
-        crate::tools::json_output(value)
+        let run = context.clone();
+        let lifetime = TerminalInvocation::new(&tools);
+        let invocation_state = lifetime.state.clone();
+        let value = tokio::task::spawn_blocking(move || {
+            if invocation_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .abandoned
+            {
+                return Err(fail("terminal invocation was abandoned before dispatch"));
+            }
+            run.check_cancelled().map_err(fail)?;
+            if tokio::time::Instant::now() >= run.deadline {
+                return Err(fail("terminal deadline exceeded"));
+            }
+            let (value, started) = tools.execute_owned(&name, input, invocation_id)?;
+            let abandoned = {
+                let mut state = invocation_state.lock().unwrap_or_else(|e| e.into_inner());
+                state.terminal_id = started.clone();
+                state.abandoned
+            };
+            if name == "terminal_start"
+                && (abandoned || run.is_cancelled() || tokio::time::Instant::now() >= run.deadline)
+            {
+                if let Some(id) = started.as_deref() {
+                    let _ = tools.service.stop(&tools.owner, id);
+                }
+                return Err(ToolError::Indeterminate(
+                    "terminal start cancelled; process stop requested".into(),
+                ));
+            }
+            Ok(value)
+        })
+        .await
+        .map_err(fail)??;
+        let output = crate::tools::json_output(value)?;
+        lifetime.accept();
+        Ok(output)
     }
 }
 pub(crate) fn bindings(
@@ -268,3 +382,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "pty_tools/cancellation_tests.rs"]
+mod cancellation_tests;

@@ -297,11 +297,26 @@ impl AgentBuilder {
                                 as Arc<dyn ModelSelectionStrategy>
                         })
                 });
+            if registry
+                .all::<ContextContributorService>()
+                .iter()
+                .any(|source| {
+                    source.0.kind() == ContextSourceKind::History
+                        || [INSTRUCTIONS_BLOCK, HISTORY_BLOCK].contains(&source.0.block_id())
+                })
+            {
+                return Err(AgentError::InvalidConfiguration(
+                    "builtin context sources are owned by the SDK".into(),
+                ));
+            }
             if registry.get::<ContextAssemblerService>().is_some()
                 && (registry.get::<ContextLayoutService>().is_some()
                     || registry.get::<ContextBudgetPolicyService>().is_some()
                     || registry.get::<ContextReducerService>().is_some()
-                    || !registry.all::<ContextContributorService>().is_empty())
+                    || registry
+                        .all::<ContextContributorService>()
+                        .iter()
+                        .any(|s| s.0.kind() == ContextSourceKind::Data))
             {
                 return Err(AgentError::InvalidConfiguration(
                     "configure sources, layout and reducers inside a custom ContextAssembler; separate context plugins would be ignored".into(),
@@ -356,6 +371,7 @@ impl AgentBuilder {
                                     registry
                                         .all::<ContextContributorService>()
                                         .iter()
+                                        .filter(|s| s.0.kind() == ContextSourceKind::Data)
                                         .map(|s| s.0.clone())
                                         .collect(),
                                 )?;
@@ -440,9 +456,10 @@ impl AgentBuilder {
                     .iter()
                     .map(|s| s.0.clone())
                     .collect(),
-                context: registry
-                    .all::<ContextService>()
+                context_sources: registry
+                    .all::<ContextContributorService>()
                     .iter()
+                    .filter(|s| s.0.kind() == ContextSourceKind::Instruction)
                     .map(|s| s.0.clone())
                     .collect(),
             };
@@ -1401,6 +1418,106 @@ impl AgentGeneration {
         self.check_owner(run.as_ref())?;
         Ok(run.as_ref().budget_usage())
     }
+    pub fn execution_snapshot(
+        &self,
+        run: &impl AsRef<RunControl>,
+        result: &RunResult,
+    ) -> Result<RunExecutionSnapshot, AgentError> {
+        self.check_owner(run.as_ref())?;
+        let control = run.as_ref();
+        let restored = control.model_dispatches.restored();
+        let limits = restored.as_ref().map_or_else(
+            || control.limits.clone(),
+            |previous| previous.limits.clone(),
+        );
+        let historical_calls_bound = restored
+            .as_ref()
+            .and_then(|previous| previous.call_bound)
+            .or_else(|| {
+                control
+                    .initial_observation
+                    .as_ref()
+                    .and_then(|initial| initial.historical_calls_bound)
+            });
+        let incomplete = control.resumed
+            || control
+                .initial_observation
+                .as_ref()
+                .is_some_and(|initial| initial.incomplete);
+        let overall = limits
+            .max_model_calls_per_step
+            .and_then(|per_step| limits.max_steps.checked_mul(per_step));
+        let model_calls = control.continuation_budget.as_ref().map_or_else(
+            || {
+                if control.resumed {
+                    historical_calls_bound
+                        .and_then(|bound| bound.checked_add(control.model_dispatches.calls()))
+                        .or(overall)
+                        .map(|charged| overall.map_or(charged, |cap| charged.min(cap)))
+                        .unwrap_or_else(|| control.model_dispatches.calls())
+                } else {
+                    control.model_dispatches.calls()
+                }
+            },
+            |budget| budget.calls(),
+        );
+        let mut budget_usage = control.budget_usage();
+        if let Some(previous) = &restored {
+            budget_usage.input_tokens = budget_usage
+                .input_tokens
+                .max(previous.budget_usage.input_tokens);
+            budget_usage.output_tokens = budget_usage
+                .output_tokens
+                .max(previous.budget_usage.output_tokens);
+        }
+        let original_timeout = limits.run_timeout.as_millis().min(u64::MAX as u128) as u64;
+        let incoming_timeout = control.limits.run_timeout.as_millis().min(u64::MAX as u128) as u64;
+        let deadline_unix_ms = control.deadline_unix_ms.min(
+            control
+                .deadline_unix_ms
+                .saturating_sub(incoming_timeout)
+                .saturating_add(original_timeout),
+        );
+        Ok(RunExecutionSnapshot {
+            limits,
+            budget_usage,
+            model_calls,
+            incomplete,
+            historical_calls_bound,
+            child_runs: control
+                .child_runs
+                .load(std::sync::atomic::Ordering::Acquire)
+                .max(restored.as_ref().map_or(0, |previous| previous.child_runs)),
+            steps: control
+                .continuation_budget
+                .as_ref()
+                .map_or_else(
+                    || {
+                        control
+                            .model_dispatches
+                            .steps()
+                            .saturating_add(restored.as_ref().map_or(0, |previous| previous.steps))
+                    },
+                    |budget| budget.steps(),
+                )
+                .max(result.steps),
+            tool_calls: control
+                .continuation_budget
+                .as_ref()
+                .map_or_else(
+                    || {
+                        control
+                            .model_dispatches
+                            .tools()
+                            .saturating_add(restored.as_ref().map_or(0, |previous| previous.tools))
+                    },
+                    |budget| budget.tool_calls(),
+                )
+                .max(result.tool_calls),
+            deadline_unix_ms,
+            opaque: control.model_dispatches.opaque(),
+        })
+    }
     /// The first receiver retains events published since start. Later receivers
     /// subscribe to new events only. Slow consumers can receive Lagged.
     pub fn events(
@@ -1459,6 +1576,33 @@ impl AgentGeneration {
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
             AgentError::Run("AgentGeneration::start requires a Tokio runtime".into())
         })?;
+        if let Some(parent) = parent
+            && let Some(budget) = parent.extensions.get::<ContinuationBudget>()
+        {
+            budget.apply_limits(&mut request.limits);
+            if let Some(cap) = parent.limits().max_model_calls_per_step {
+                request.limits.max_model_calls_per_step = Some(
+                    request
+                        .limits
+                        .max_model_calls_per_step
+                        .map_or(cap, |local| local.min(cap)),
+                );
+            }
+            request.extensions.insert((*budget).clone());
+        }
+        if let Some(journal) = parent.and_then(|parent| {
+            parent
+                .extensions
+                .get::<crate::continuation::ContinuationJournalService>()
+        }) {
+            request.extensions.insert((*journal).clone());
+        }
+        let model_dispatches = parent
+            .and_then(|parent| parent.extensions.get::<ModelDispatchCounter>())
+            .or_else(|| request.extensions.get::<ModelDispatchCounter>())
+            .map(|counter| (*counter).clone())
+            .unwrap_or_default();
+        request.extensions.insert(model_dispatches.clone());
         self.validate_request(&request)?;
         if self.is_closed() {
             return Err(AgentError::Closed);
@@ -1480,6 +1624,25 @@ impl AgentGeneration {
             }
         }
         request.extensions = extensions;
+        // Output preparation and host initialization cannot extend a root's
+        // original absolute continuation deadline.
+        let deadline = if let Some(input) = request.extensions.get::<ContinuationRequest>() {
+            let remaining = input
+                .initial_execution
+                .deadline_unix_ms
+                .saturating_sub(unix_time_ms());
+            if remaining == 0 {
+                return Err(AgentError::Cancelled);
+            }
+            request.limits.run_timeout = request
+                .limits
+                .run_timeout
+                .min(std::time::Duration::from_millis(remaining));
+            tokio::time::Instant::now() + request.limits.run_timeout
+        } else {
+            tokio::time::Instant::now() + request.limits.run_timeout
+        };
+
         if request
             .extensions
             .get::<AgentCollaborationService>()
@@ -1501,10 +1664,15 @@ impl AgentGeneration {
             runs.active
                 .insert(request.session_id.clone(), cancellation.clone());
         }
-        let run_id = request
-            .resume
-            .as_ref()
-            .map_or_else(RunId::new_v4, |resume| resume.run_id);
+        let run_id = request.resume.as_ref().map_or_else(
+            || {
+                request
+                    .extensions
+                    .get::<ChildRunIdentity>()
+                    .map_or_else(RunId::new_v4, |id| id.0)
+            },
+            |resume| resume.run_id,
+        );
         let (events, initial_events) = broadcast::channel(256);
         let steering = Arc::new(Mutex::new(crate::types::SteeringState {
             closed: !self.inner.agent_loop.supports_steering(),
@@ -1515,7 +1683,10 @@ impl AgentGeneration {
             model: request.model.clone(),
             limits: request.limits.clone(),
             node_execution: None,
-            execution_counters: None,
+            execution_counters: request
+                .extensions
+                .get::<ContinuationBudget>()
+                .map(|budget| budget.execution_counters()),
             tool_dispatch_gate: Arc::default(),
             tool_slots: Arc::new(tokio::sync::Semaphore::new(
                 request.limits.max_parallel_tools,
@@ -1545,7 +1716,7 @@ impl AgentGeneration {
                 p.max_child_depth.min(request.limits.max_delegation_depth)
             }),
             children: cancellation.child_token(),
-            deadline: tokio::time::Instant::now() + request.limits.run_timeout,
+            deadline,
             budget_journal: None,
             token_ceiling: request.limits.max_total_tokens,
             resources: Arc::new(Mutex::new(Vec::new())),
@@ -1568,6 +1739,21 @@ impl AgentGeneration {
             context.clone(),
             256,
         ));
+        let run_limits = request.limits.clone();
+        let resumed = request.resume.is_some();
+        let continuation_budget = request.extensions.get::<ContinuationBudget>();
+        let initial_observation = request
+            .extensions
+            .get::<ContinuationRequest>()
+            .map(|input| Arc::new(input.initial_execution.clone()));
+        let child_runs = context.child_runs.clone();
+        let deadline_unix_ms = unix_time_ms().saturating_add(
+            context
+                .deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+        );
         let usage = context.usage.clone();
         let revoked_tools = context.revoked_tools.clone();
         let inner = self.inner.clone();
@@ -1635,6 +1821,13 @@ impl AgentGeneration {
                 run_id,
                 revoked_tools,
                 usage,
+                limits: run_limits,
+                resumed,
+                continuation_budget,
+                initial_observation,
+                child_runs,
+                deadline_unix_ms,
+                model_dispatches,
                 cancellation,
                 steering,
             },
@@ -1669,15 +1862,30 @@ impl AgentGeneration {
 
     async fn run_child_with_id(
         &self,
-        mut request: RunRequest,
+        request: RunRequest,
         parent: &RunContext,
     ) -> Result<ChildRunResult, AgentError> {
+        let handle = self.start_child_owned(request, parent).await?;
+        let run_id = handle.run_id();
+        let result = handle.wait().await?;
+        Ok(ChildRunResult { run_id, result })
+    }
+    /// Native owned child admission. Obtain outputs/events/control before wait.
+    /// Dropping either the handle or wait future cancels the child and retains
+    /// its uncertain allowance until the parent's controlled cleanup completes.
+    pub async fn start_child_owned(
+        &self,
+        mut request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<ChildRunHandle, AgentError> {
         parent.check_cancelled()?;
         if request.resume.is_some() {
             return Err(AgentError::InvalidConfiguration(
-                "child resume requires explicit host orchestration of the existing execution"
-                    .into(),
+                "child resume requires explicit reconciliation of the existing execution".into(),
             ));
+        }
+        if let Some(budget) = parent.extensions.get::<ContinuationBudget>() {
+            budget.apply_limits(&mut request.limits);
         }
         self.validate_request(&request)?;
         if parent.lineage.depth >= parent.max_child_depth {
@@ -1695,9 +1903,15 @@ impl AgentGeneration {
         let (admission, allowance) =
             ChildAdmission::reserve(parent, request.limits.max_total_tokens)?;
         request.limits.max_total_tokens = allowance;
-        // A failed/cancelled storage write may already have committed. Drop
-        // refunds local admission, but do not guess a corrective durable write.
         parent.persist_budget().await?;
+        let child_run_id = RunId::new_v4();
+        request.extensions.insert(ChildRunIdentity(child_run_id));
+        if let Some(journal) = parent
+            .extensions
+            .get::<crate::continuation::ContinuationJournalService>()
+        {
+            journal.0.child_intent(parent, child_run_id).await?;
+        }
         let started = parent.check_cancelled().and_then(|()| {
             let remaining = parent
                 .deadline
@@ -1718,7 +1932,6 @@ impl AgentGeneration {
                 );
             }
         };
-        let child_run_id = handle.run_id;
         parent
             .emit(AgentEvent::Collaboration(Box::new(
                 CollaborationEvent::ChildRunStarted {
@@ -1728,9 +1941,8 @@ impl AgentGeneration {
                 },
             )))
             .await;
-        let mut child_events = ChildEventGuard::new(parent.clone(), child_run_id);
-        let mut permit = admission.dispatched();
-        let usage = handle.control.usage.clone();
+        let child_events = ChildEventGuard::new(parent.clone(), child_run_id);
+        let permit = admission.dispatched();
         let completion = handle.completion.clone();
         let cancel = handle.control.cancellation.clone();
         let fallback = cancel.clone();
@@ -1742,31 +1954,29 @@ impl AgentGeneration {
             Ok(())
         });
         parent.own_resources(scope);
-        let result = handle.wait().await;
-        let charged = usage
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .including_reservations();
-        let settlement = permit.settle_child(&charged, parent.token_ceiling);
-        let result = finish_with_cleanup(result, settlement.map_err(Into::into));
-        let result = finish_with_cleanup(result, parent.persist_budget().await.map_err(Into::into));
-        match &result {
-            Ok(result) => child_events.finish(CollaborationEvent::ChildRunFinished {
-                child_run_id,
-                status: result.status.clone(),
-                interactions: result.interactions.clone(),
-            }),
-            Err(error) => child_events.finish(CollaborationEvent::ChildRunFailed {
-                child_run_id,
-                cancelled: matches!(error.primary(), AgentError::Cancelled),
-                message: error.to_string(),
-            }),
-        }
-        let result = result?;
-        Ok(ChildRunResult {
-            run_id: child_run_id,
-            result,
+        Ok(ChildRunHandle {
+            handle: Some(handle),
+            parent: parent.clone(),
+            permit: Some(permit),
+            child_events,
         })
+    }
+    pub async fn start_child_with_output_owned<T: Send + 'static>(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<(ChildRunHandle, T), AgentError> {
+        if !self
+            .inner
+            .outputs
+            .iter()
+            .any(|output| output.output_type() == std::any::TypeId::of::<T>())
+        {
+            return Err(AgentError::MissingService(std::any::type_name::<T>()));
+        }
+        let mut child = self.start_child_owned(request, parent).await?;
+        let output = self.output(child.handle.as_mut().expect("child handle"))?;
+        Ok((child, output))
     }
 
     /// Reject new runs, cancel existing runs, await their RAII cleanup, and close
@@ -2024,6 +2234,13 @@ pub struct RunControl {
     run_id: RunId,
     revoked_tools: Arc<Mutex<std::collections::BTreeSet<String>>>,
     usage: Arc<Mutex<crate::budget::UsageLedger>>,
+    limits: RunLimits,
+    resumed: bool,
+    continuation_budget: Option<Arc<ContinuationBudget>>,
+    initial_observation: Option<Arc<RunExecutionSnapshot>>,
+    child_runs: Arc<std::sync::atomic::AtomicUsize>,
+    deadline_unix_ms: u64,
+    model_dispatches: ModelDispatchCounter,
     cancellation: CancellationToken,
     steering: Arc<Mutex<crate::types::SteeringState>>,
 }
@@ -2062,6 +2279,63 @@ impl RunControl {
         }
         state.pending.push_back(content);
         Ok(())
+    }
+}
+
+struct ChildRunIdentity(RunId);
+
+/// An owned native child; all accounting and lifetime semantics match run_child.
+pub struct ChildRunHandle {
+    handle: Option<RunHandle>,
+    parent: RunContext,
+    permit: Option<crate::budget::UsagePermit>,
+    child_events: ChildEventGuard,
+}
+impl ChildRunHandle {
+    pub fn run_id(&self) -> RunId {
+        self.child_events.child_run_id
+    }
+    pub fn control(&self) -> RunControl {
+        self.handle.as_ref().expect("child handle").control()
+    }
+    pub fn events(&mut self) -> broadcast::Receiver<EventEnvelope> {
+        self.handle.as_mut().expect("child handle").take_events()
+    }
+    pub async fn wait(mut self) -> Result<RunResult, AgentError> {
+        let handle = self.handle.take().expect("child handle");
+        let usage = handle.control.usage.clone();
+        let result = handle.wait().await;
+        let charged = usage
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .including_reservations();
+        let settlement = self
+            .permit
+            .as_mut()
+            .expect("child permit")
+            .settle_child(&charged, self.parent.token_ceiling);
+        let result = finish_with_cleanup(result, settlement.map_err(Into::into));
+        let result = finish_with_cleanup(
+            result,
+            self.parent.persist_budget().await.map_err(Into::into),
+        );
+        match &result {
+            Ok(result) => self
+                .child_events
+                .finish(CollaborationEvent::ChildRunFinished {
+                    child_run_id: self.run_id(),
+                    status: result.status.clone(),
+                    interactions: result.interactions.clone(),
+                }),
+            Err(error) => self
+                .child_events
+                .finish(CollaborationEvent::ChildRunFailed {
+                    child_run_id: self.run_id(),
+                    cancelled: matches!(error.primary(), AgentError::Cancelled),
+                    message: error.to_string(),
+                }),
+        }
+        result
     }
 }
 

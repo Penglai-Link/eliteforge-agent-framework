@@ -37,9 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 vec![ModelDescriptor::new(std::env::var("MODEL")?)],
             ),
         )
-        .plugin(ContextPlugin::new(
+        .plugin(ContextContributorPlugin::new(
             "prompt",
-            FixedContext::new("用简短的中文回答。"),
+            FixedInstructions::new("fixed.instructions", "用简短的中文回答。"),
         ))
         .plugin(ContextContributorPlugin::new(
             "task-data",

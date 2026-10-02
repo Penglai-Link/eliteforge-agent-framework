@@ -41,9 +41,15 @@ mod context_role {
 
     #[capability(pack = "regression.default-shared")]
     #[async_trait]
-    impl ContextProvider for DefaultShared {
-        async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-            Ok(vec![])
+    impl ContextContributor for DefaultShared {
+        fn kind(&self) -> ContextSourceKind {
+            ContextSourceKind::Instruction
+        }
+        fn block_id(&self) -> &str {
+            std::any::type_name::<Self>()
+        }
+        async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+            Ok(ContextBlock::instructions(self.block_id(), vec![]))
         }
     }
 
@@ -51,12 +57,18 @@ mod context_role {
     #[capability(pack = "regression.explicit-shared", instance = "regression.explicit", config = FixtureConfig, factory = ConfiguredShared::from_config)]
     #[capability(pack = "regression.factory-conflict", instance = "regression.conflict", config = FixtureConfig, factory = ConfiguredShared::from_config)]
     #[async_trait]
-    impl ContextProvider for ConfiguredShared {
-        async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-            Ok(vec![Message::system(format!(
-                "cross-module:{}",
-                self.label
-            ))])
+    impl ContextContributor for ConfiguredShared {
+        fn kind(&self) -> ContextSourceKind {
+            ContextSourceKind::Instruction
+        }
+        fn block_id(&self) -> &str {
+            std::any::type_name::<Self>()
+        }
+        async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+            Ok(ContextBlock::instructions(
+                self.block_id(),
+                vec![Message::system(format!("cross-module:{}", self.label))],
+            ))
         }
     }
 }
@@ -97,9 +109,18 @@ impl RepeatedProvider {
 #[capability(pack = "regression.repeated", id = "regression.repeated.first", instance = "regression.repeated.first", config = FixtureConfig, factory = RepeatedProvider::from_config)]
 #[capability(pack = "regression.repeated", id = "regression.repeated.second", instance = "regression.repeated.second", config = FixtureConfig, factory = RepeatedProvider::from_config)]
 #[async_trait]
-impl ContextProvider for RepeatedProvider {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![Message::system("repeated")])
+impl ContextContributor for RepeatedProvider {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system("repeated")],
+        ))
     }
 }
 
@@ -114,9 +135,15 @@ impl MixedConsumer {
 
 #[capability(pack = "regression.mixed", id = "regression.mixed.a", depends_on = ["regression.manual"], config = FixtureConfig, factory = MixedConsumer::from_config)]
 #[async_trait]
-impl ContextProvider for MixedConsumer {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![])
+impl ContextContributor for MixedConsumer {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(self.block_id(), vec![]))
     }
 }
 
@@ -131,8 +158,14 @@ impl MixedProducer {
 
 #[capability(pack = "regression.mixed", id = "regression.mixed.z", config = FixtureConfig, factory = MixedProducer::from_config)]
 #[async_trait]
-impl ContextProvider for MixedProducer {
-    async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-        Ok(vec![])
+impl ContextContributor for MixedProducer {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        std::any::type_name::<Self>()
+    }
+    async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions(self.block_id(), vec![]))
     }
 }

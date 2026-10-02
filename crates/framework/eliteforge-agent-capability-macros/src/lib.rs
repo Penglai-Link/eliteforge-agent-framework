@@ -24,16 +24,18 @@ use syn::{
 /// ```
 /// use async_trait::async_trait;
 /// use eliteforge_agent_capability_macros::capability;
-/// use eliteforge_agent_core::{AgentError, ContextProvider, Message, RunContext};
+/// use eliteforge_agent_core::{AgentError, ContextContributor, ContextSourceKind, ContextInput, ContextBlock, Message};
 ///
 /// #[derive(Default)]
 /// struct ShopContext;
 ///
 /// #[capability(pack = "shop")]
 /// #[async_trait]
-/// impl ContextProvider for ShopContext {
-///     async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-///         Ok(vec![Message::system("You assist the shop's support team.")])
+/// impl ContextContributor for ShopContext {
+///     fn kind(&self) -> ContextSourceKind { ContextSourceKind::Instruction }
+///     fn block_id(&self) -> &str { "shop.instructions" }
+///     async fn contribute(&self, _: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+///         Ok(ContextBlock::instructions(self.block_id(), vec![Message::system("You assist the shop's support team.")]))
 ///     }
 /// }
 /// ```
@@ -857,7 +859,6 @@ fn parse_dependencies(array: ExprArray) -> Result<Vec<LitStr>> {
 
 #[derive(Clone, Copy)]
 enum CapabilityInterface {
-    ContextProvider,
     ToolProvider,
     EventSink,
     ContextContributor,
@@ -895,7 +896,6 @@ impl CapabilityInterface {
             ));
         };
         match last_segment.ident.to_string().as_str() {
-            "ContextProvider" => Ok(Self::ContextProvider),
             "ToolProvider" => Ok(Self::ToolProvider),
             "EventSink" => Ok(Self::EventSink),
             "ContextContributor" => Ok(Self::ContextContributor),
@@ -927,7 +927,6 @@ impl CapabilityInterface {
 
     fn adapter(self) -> Option<TokenStream2> {
         let adapter = match self {
-            Self::ContextProvider => quote!(::eliteforge_agent_core::ContextPlugin),
             Self::ToolProvider => quote!(::eliteforge_agent_core::ToolProviderPlugin),
             Self::EventSink => quote!(::eliteforge_agent_core::EventPlugin),
             Self::ContextContributor => quote!(::eliteforge_agent_core::ContextContributorPlugin),
@@ -1225,36 +1224,38 @@ mod tests {
     use super::*;
     use quote::quote;
 
-    fn context_provider_impl() -> TokenStream2 {
+    fn instruction_source_impl() -> TokenStream2 {
         quote! {
-            #[async_trait]
-            impl ContextProvider for ShopContext {
-                async fn context(&self, _: &RunContext) -> Result<Vec<Message>, AgentError> {
-                    Ok(Vec::new())
+                #[async_trait]
+                impl ContextContributor for ShopContext {
+        fn kind(&self) -> ContextSourceKind { ContextSourceKind::Instruction }
+        fn block_id(&self) -> &str { std::any::type_name::<Self>() }
+        async fn contribute(&self, _input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+            Ok(ContextBlock::instructions(self.block_id(), Vec::new()))
+        }
                 }
             }
-        }
     }
 
     #[test]
     fn expands_async_trait_impl_and_static_registration() {
         let output = expand(
             quote!(pack = "shop", depends_on = ["storage", "auth"]),
-            context_provider_impl(),
+            instruction_source_impl(),
         )
         .expect("valid capability expands");
         let output = output.to_string();
 
         assert!(output.contains("async_trait"));
         assert!(output.contains("inventory :: submit"));
-        assert!(output.contains("ContextPlugin :: from_arc"));
+        assert!(output.contains("ContextContributorPlugin :: from_arc"));
         assert!(output.contains("CapabilityDescriptor :: new"));
         assert!(output.contains("module_path"));
     }
 
     #[test]
     fn requires_pack() {
-        let error = expand(quote!(), context_provider_impl()).expect_err("pack is required");
+        let error = expand(quote!(), instruction_source_impl()).expect_err("pack is required");
         assert!(
             error.to_string().contains("missing required `pack ="),
             "unexpected error: {error}"
@@ -1265,7 +1266,7 @@ mod tests {
     fn requires_config_and_factory_together() {
         let config_only = expand(
             quote!(pack = "shop", config = ShopConfig),
-            context_provider_impl(),
+            instruction_source_impl(),
         )
         .expect_err("config alone is invalid");
         assert!(
@@ -1276,7 +1277,7 @@ mod tests {
 
         let factory_only = expand(
             quote!(pack = "shop", factory = ShopContext::from_config),
-            context_provider_impl(),
+            instruction_source_impl(),
         )
         .expect_err("factory alone is invalid");
         assert!(
@@ -1301,7 +1302,7 @@ mod tests {
     fn rejects_non_string_dependency() {
         let error = expand(
             quote!(pack = "shop", depends_on = ["storage", dependency_id]),
-            context_provider_impl(),
+            instruction_source_impl(),
         )
         .expect_err("dependency names must be literals");
         assert!(
@@ -1319,7 +1320,7 @@ mod tests {
                 config = ShopConfig,
                 factory = ShopContext::from_config
             ),
-            context_provider_impl(),
+            instruction_source_impl(),
         )
         .expect("configured capability expands")
         .to_string();
@@ -1332,7 +1333,6 @@ mod tests {
     #[test]
     fn maps_every_supported_capability_trait() {
         let cases = [
-            ("ContextProvider", Some("ContextPlugin")),
             ("ToolProvider", Some("ToolProviderPlugin")),
             ("EventSink", Some("EventPlugin")),
             ("ContextContributor", Some("ContextContributorPlugin")),
@@ -1420,9 +1420,9 @@ mod tests {
         let instance = default_instance_key(&pack, &implementation).to_string();
         let factory_signature = default_factory_signature(&pack, &implementation).to_string();
 
-        assert!(!instance.contains("ContextProvider"));
+        assert!(!instance.contains("ContextContributor"));
         assert!(!instance.contains("EventSink"));
-        assert!(!factory_signature.contains("ContextProvider"));
+        assert!(!factory_signature.contains("ContextContributor"));
         assert!(!factory_signature.contains("EventSink"));
     }
 }
