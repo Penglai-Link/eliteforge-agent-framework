@@ -171,6 +171,9 @@ pub struct EmbeddingVector {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingResponse {
     pub model: ModelRef,
+    /// Actual provider-reported model, when present; independent of the logical binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_model: Option<String>,
     pub vectors: Vec<EmbeddingVector>,
     /// Missing usage remains unknown.
     pub input_tokens: Option<u64>,
@@ -583,6 +586,57 @@ impl Default for ModelInvocationOptions {
     }
 }
 impl ModelInvocationOptions {
+    /// Standalone model control data. This does not start an Agent, register a
+    /// session, spawn a task, or create conversation/history/checkpoint state.
+    pub fn for_call(limits: &RunLimits) -> Result<Self, AgentError> {
+        limits.validate()?;
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let (events, _) = tokio::sync::broadcast::channel(1);
+        let identity = RunId::new_v4();
+        let run = RunContext {
+            model: None,
+            limits: limits.clone(),
+            node_execution: None,
+            execution_counters: None,
+            tool_dispatch_gate: Arc::default(),
+            tool_slots: Arc::new(tokio::sync::Semaphore::new(0)),
+            run_id: identity,
+            session_id: String::new(),
+            extensions: Default::default(),
+            budget_journal: None,
+            usage: Arc::default(),
+            token_ceiling: limits.max_total_tokens,
+            resources: Arc::default(),
+            revoked_tools: Arc::default(),
+            execution_id: identity,
+            lineage: RunLineage {
+                root_run_id: identity,
+                parent_run_id: None,
+                depth: 0,
+            },
+            child_runs: Arc::default(),
+            max_child_runs: 0,
+            max_child_depth: 0,
+            children: cancellation.child_token(),
+            deadline: tokio::time::Instant::now() + limits.run_timeout,
+            publication: Arc::default(),
+            sequence: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            observers: None,
+            cancellation: cancellation.clone(),
+            steering: Arc::new(std::sync::Mutex::new(SteeringState {
+                pending: Default::default(),
+                closed: true,
+            })),
+            events,
+            sinks: vec![],
+        };
+        Ok(Self {
+            timeout: limits.model_timeout,
+            cancellation,
+            run: Some(run),
+            ..Self::default()
+        })
+    }
     pub fn for_run(run: &RunContext, limits: &RunLimits) -> Self {
         let mut bounded = run.clone();
         bounded.token_ceiling = bounded.token_ceiling.min(limits.max_total_tokens);

@@ -10,6 +10,6 @@ Provider errors retain HTTP status, business code, message, category and optiona
 
 Input budget estimates include encoded image bytes and native continuation metadata. Rerank estimates use the same native body constructor as dispatch, or the complete chat fallback prompt. Actual provider usage settles reservations; absent usage retains the conservative reservation in Core and remains absent in native product results.
 
-Raw transport methods are integration primitives for adapters executing under a Framework invocation. Products should submit independent work through `ModelJobClient`, as described in [controlled model jobs](../../../../docs/受控模型作业.md).
+Raw transport methods are integration primitives for adapters executing under a Framework invocation. Products execute independent chat, embedding and rerank directly through the existing `ModelClient` / `ModelOperations`, without constructing an Agent or native run, as described in [direct model calls](../../../../docs/受控模型作业.md).
 
 模型 HTTP client 通过 SDK `ModelHttpClient::from_builder` 保留宿主 proxy/connect/pool/timeout 配置并强制禁止自动 redirect；307/308 是终态错误，配置应使用实际模型 endpoint，不能隐式再次 POST。PersonAI 官方 gateway request 加密与 header 仍保留。

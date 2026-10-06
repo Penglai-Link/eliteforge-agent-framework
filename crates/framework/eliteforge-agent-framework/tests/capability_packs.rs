@@ -581,6 +581,7 @@ impl EmbeddingModel for DeclaredEmbeddingModel {
         request: EmbeddingRequest,
     ) -> Result<EmbeddingResponse, ModelError> {
         Ok(EmbeddingResponse {
+            provider_model: None,
             model: ModelRef::new("declared", model),
             vectors: request
                 .inputs

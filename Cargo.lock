@@ -1078,6 +1078,7 @@ dependencies = [
  "base64 0.22.1",
  "eliteforge-agent-context-contracts",
  "eliteforge-agent-core",
+ "image",
  "eliteforge-agent-framework",
  "eliteforge-agent-official-plugin-storage-local",
  "eliteforge-agent-test-support",

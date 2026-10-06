@@ -46,6 +46,7 @@ impl EmbeddingModel for Embedder {
     ) -> Result<EmbeddingResponse, ModelError> {
         self.calls.lock().unwrap().push(request.clone());
         Ok(EmbeddingResponse {
+            provider_model: None,
             model: ModelRef::new("local", model),
             input_tokens: None,
             vectors: (0..request.inputs.len())
@@ -640,6 +641,7 @@ fn invalid_embedding_batches_are_rejected() {
         values: vec![1.0, 2.0],
     };
     let response = EmbeddingResponse {
+        provider_model: None,
         model: ModelRef::new("local", "a"),
         vectors: vec![vector.clone()],
         input_tokens: None,
@@ -663,6 +665,7 @@ fn invalid_embedding_batches_are_rejected() {
         }],
     ] {
         let response = EmbeddingResponse {
+            provider_model: None,
             vectors,
             ..response.clone()
         };

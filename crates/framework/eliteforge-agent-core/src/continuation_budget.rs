@@ -203,6 +203,9 @@ impl ContinuationBudget {
     pub fn calls(&self) -> usize {
         self.calls.load(Ordering::Acquire)
     }
+    pub fn remaining_model_calls(&self) -> usize {
+        self.max_calls.saturating_sub(self.calls())
+    }
     pub fn steps(&self) -> usize {
         self.counters.steps.load(Ordering::Acquire)
     }
@@ -254,5 +257,40 @@ impl PartialEq for RunExecutionSnapshot {
             && self.tool_calls == other.tool_calls
             && self.deadline_unix_ms == other.deadline_unix_ms
             && serde_json::to_value(&self.limits).ok() == serde_json::to_value(&other.limits).ok()
+    }
+}
+
+/// Shared dispatch ceiling for an explicit model invocation scope. This is
+/// accounting data, not a task, Agent run, session, or execution loop.
+#[derive(Clone)]
+pub struct ModelCallLimit {
+    calls: Arc<AtomicUsize>,
+    maximum: usize,
+}
+impl ModelCallLimit {
+    pub fn new(maximum: usize) -> Result<Self, AgentError> {
+        if maximum == 0 {
+            return Err(AgentError::InvalidConfiguration(
+                "model call limit must be positive".into(),
+            ));
+        }
+        Ok(Self {
+            calls: Arc::default(),
+            maximum,
+        })
+    }
+    pub fn admit(&self) -> Result<(), ModelError> {
+        self.calls
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |calls| {
+                (calls < self.maximum).then(|| calls + 1)
+            })
+            .map(|_| ())
+            .map_err(|_| ModelError::Fatal("model call budget exhausted".into()))
+    }
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::Acquire)
+    }
+    pub fn remaining(&self) -> usize {
+        self.maximum.saturating_sub(self.calls())
     }
 }

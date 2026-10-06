@@ -1,11 +1,13 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
+use eliteforge_agent_official_plugin_model_http as http;
 use eliteforge_agent_official_plugin_storage_local::{SqliteOptions, SqliteStateStore};
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Notify;
 
 #[derive(Clone, Default)]
@@ -13,17 +15,21 @@ struct Provider {
     calls: Arc<AtomicUsize>,
     entered: Arc<Notify>,
     stall: bool,
+    transport: Option<Arc<dyn ChatModel>>,
 }
 #[async_trait]
 impl ChatModel for Provider {
     async fn generate(
         &self,
-        _: &str,
-        _: ChatRequest,
-        _: &dyn ChatStream,
+        model: &str,
+        request: ChatRequest,
+        stream: &dyn ChatStream,
     ) -> Result<ChatResponse, ModelError> {
         self.calls.fetch_add(1, Ordering::AcqRel);
         self.entered.notify_one();
+        if let Some(transport) = &self.transport {
+            return transport.generate(model, request, stream).await;
+        }
         if self.stall {
             std::future::pending::<()>().await;
         }
@@ -37,37 +43,138 @@ impl ChatModel for Provider {
         })
     }
 }
-fn job(provider: &Provider) -> ChatModelJob {
-    ChatModelJob {
-        workflow: None,
-        connection: ModelConnection::new(
+struct ActiveHttp(Arc<AtomicUsize>);
+impl Drop for ActiveHttp {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+struct JudgeHttp {
+    adapter: Arc<dyn ChatModel>,
+    calls: Arc<AtomicUsize>,
+    active: Arc<AtomicUsize>,
+    entered: Arc<Notify>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for JudgeHttp {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+impl JudgeHttp {
+    async fn new(stall: bool) -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let active = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(Notify::new());
+        let (recorded, live, started) = (calls.clone(), active.clone(), entered.clone());
+        let task = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let (recorded, live, started) = (recorded.clone(), live.clone(), started.clone());
+                live.fetch_add(1, Ordering::AcqRel);
+                tokio::spawn(async move {
+                    let _active = ActiveHttp(live);
+                    let mut bytes = vec![];
+                    let mut buffer = [0; 4096];
+                    loop {
+                        let count = socket.read(&mut buffer).await.unwrap();
+                        if count == 0 {
+                            return;
+                        }
+                        bytes.extend_from_slice(&buffer[..count]);
+                        if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            let headers = String::from_utf8_lossy(&bytes[..end]);
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|value| value.trim().parse::<usize>().unwrap())
+                                })
+                                .unwrap();
+                            if bytes.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    recorded.fetch_add(1, Ordering::AcqRel);
+                    started.notify_one();
+                    if stall {
+                        let _ = socket.read(&mut buffer).await;
+                        return;
+                    }
+                    let body = json!({"choices":[{"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2}}).to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        let config = serde_json::from_value(json!({"modelCode":"actual","protocol":http::AgentModelProtocol::ChatCompletions,"baseUrl":url,"apiKey":"fixture","modelName":"actual"})).unwrap();
+        let adapter = Arc::new(http::ProtocolChatModel {
+            config,
+            factory: Arc::new(http::FixedModelTransportFactory(Arc::new(
+                http::HttpModelTransport::new(http::ModelHttpClient::new(), &url, "fixture"),
+            ))),
+            streaming: false,
+        });
+        Self {
+            adapter,
+            calls,
+            active,
+            entered,
+            task,
+        }
+    }
+    async fn drained(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while self.active.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("direct HTTP connections must close before runtime teardown");
+    }
+}
+fn model_client(provider: &Provider) -> ModelClient {
+    ModelClient::new(ModelRuntimeUpdate::new(
+        "native",
+        1,
+        vec![ModelConnection::new(
             "native",
             Arc::new(provider.clone()),
             vec![ModelDescriptor::new("actual")],
-        ),
-        model: ModelRef::new("native", "actual"),
-        request: ChatRequest {
-            messages: vec![Message::user("judge")],
-            tools: vec![],
-            options: GenerationOptions {
-                max_output_tokens: Some(16),
-                ..Default::default()
-            },
-            extensions: Default::default(),
-        },
-        limits: RunLimits {
-            max_model_retries: 0,
-            max_context_tokens: 1024,
-            max_model_output_tokens: 16,
+        )],
+    ))
+    .unwrap()
+}
+fn judge_input() -> ChatRequest {
+    ChatRequest {
+        messages: vec![Message::user("judge")],
+        tools: vec![],
+        extensions: Default::default(),
+        options: GenerationOptions {
+            max_output_tokens: Some(16),
             ..Default::default()
         },
-        stage: "goal_judge".into(),
-        max_calls: 1,
-        repair: None,
+    }
+}
+fn judge_limits() -> RunLimits {
+    RunLimits {
+        max_model_retries: 0,
+        max_context_tokens: 1024,
+        max_model_output_tokens: 16,
+        max_model_calls_per_step: Some(1),
+        ..Default::default()
     }
 }
 struct Policy {
-    client: ModelJobClient,
+    client: ModelClient,
     provider: Provider,
     executed: AtomicUsize,
     paused: AtomicUsize,
@@ -80,7 +187,13 @@ impl ContinuationPolicy for Policy {
         parent: &RunContext,
     ) -> Result<ContinuationDecision, AgentError> {
         self.client
-            .execute_child_observed(job(&self.provider), parent)
+            .with_options(ModelInvocationOptions::for_run(parent, &judge_limits()))
+            .chat_observed(
+                &ModelRef::new("native", "actual"),
+                judge_input(),
+                &judge_limits(),
+                "goal_judge",
+            )
             .await
             .into_result()?;
         Ok(ContinuationDecision::Continue(json!({"approved":true})))
@@ -88,7 +201,13 @@ impl ContinuationPolicy for Policy {
     async fn execute(&self, _: Value, parent: &RunContext) -> Result<ContinuationStep, AgentError> {
         let response = self
             .client
-            .execute_child_observed(job(&self.provider), parent)
+            .with_options(ModelInvocationOptions::for_run(parent, &judge_limits()))
+            .chat_observed(
+                &ModelRef::new("native", "actual"),
+                judge_input(),
+                &judge_limits(),
+                "goal_judge",
+            )
             .await
             .into_result()?;
         self.executed.fetch_add(1, Ordering::AcqRel);
@@ -155,12 +274,18 @@ fn request(session: &str, policy: Arc<dyn ContinuationPolicy>) -> RunRequest {
     run
 }
 #[tokio::test]
-async fn native_judge_and_child_share_original_calls_tokens_and_journal() {
+async fn direct_judge_and_step_share_original_calls_tokens_and_durable_journal() {
     let temp = tempfile::tempdir().unwrap();
-    let agent = driver(&temp.path().join("state.sqlite")).await;
+    let path = temp.path().join("state.sqlite");
+    let agent = driver(&path).await;
+    let http = JudgeHttp::new(false).await;
+    let provider = Provider {
+        transport: Some(http.adapter.clone()),
+        ..Default::default()
+    };
     let policy = Arc::new(Policy {
-        client: ModelJobClient::new().await.unwrap(),
-        provider: Provider::default(),
+        client: model_client(&provider),
+        provider,
         executed: AtomicUsize::new(0),
         paused: AtomicUsize::new(0),
     });
@@ -187,9 +312,15 @@ async fn native_judge_and_child_share_original_calls_tokens_and_journal() {
         .await
         .unwrap()
         .unwrap();
-    let journal: ContinuationJournalState = serde_json::from_value(checkpoint.state).unwrap();
+    let journal: ContinuationJournalState =
+        serde_json::from_value(checkpoint.state.clone()).unwrap();
     assert_eq!(journal.phase, ContinuationPhase::Exhausted);
-    assert_eq!(journal.child_executions.len(), 2);
+    assert!(journal.child_executions.is_empty());
+    assert_eq!(journal.child_runs, 0);
+    assert_eq!(observation.child_runs, 0);
+    assert_eq!(journal.rounds, 1);
+    assert_eq!(journal.state, json!({"complete":true}));
+    assert!(journal.pending.is_none());
     assert_eq!(journal.model_calls, 4);
     assert_eq!(journal.budget_usage, observation.budget_usage);
     assert!(
@@ -199,27 +330,68 @@ async fn native_judge_and_child_share_original_calls_tokens_and_journal() {
             .is_err()
     );
     assert_eq!(policy.provider.calls.load(Ordering::Acquire), 2);
-    policy.client.close().await;
+    assert_eq!(http.calls.load(Ordering::Acquire), 2);
     agent.close().await;
+    let reopened = driver(&path).await;
+    let error = reopened
+        .run(request("same-identity", policy.clone()))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already admitted"));
+    let unchanged = reopened
+        .latest_checkpoint("same-identity")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.run_id, checkpoint.run_id);
+    assert_eq!(unchanged.revision, checkpoint.revision);
+    assert_eq!(unchanged.state, checkpoint.state);
+    assert_eq!(http.calls.load(Ordering::Acquire), 2);
+    assert_eq!(policy.provider.calls.load(Ordering::Acquire), 2);
+    http.drained().await;
+    policy.client.close().await;
+    reopened.close().await;
 }
 #[tokio::test]
 async fn cancelled_judge_retains_intent_and_refuses_automatic_replay() {
     let temp = tempfile::tempdir().unwrap();
-    let agent = driver(&temp.path().join("state.sqlite")).await;
+    let path = temp.path().join("state.sqlite");
+    let agent = driver(&path).await;
+    let http = JudgeHttp::new(true).await;
     let provider = Provider {
-        stall: true,
+        transport: Some(http.adapter.clone()),
         ..Default::default()
     };
-    let entered = provider.entered.clone();
+    let entered = http.entered.clone();
     let policy = Arc::new(Policy {
-        client: ModelJobClient::new().await.unwrap(),
+        client: model_client(&provider),
         provider,
         executed: AtomicUsize::new(0),
         paused: AtomicUsize::new(0),
     });
     let handle = agent.start(request("interrupted", policy.clone())).unwrap();
     let control = agent.control(&handle).unwrap();
-    entered.notified().await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
+        .await
+        .expect("actual HTTP request must arrive before cancellation");
+    // The real HTTP request has arrived. Its intent and reservation must already
+    // exist durably, even while the response is still outstanding.
+    let admitted = agent
+        .latest_checkpoint("interrupted")
+        .await
+        .unwrap()
+        .unwrap();
+    let intent: ContinuationJournalState = serde_json::from_value(admitted.state).unwrap();
+    assert_eq!(intent.phase, ContinuationPhase::Evaluating);
+    assert_eq!(intent.model_calls, 3);
+    assert_eq!(intent.rounds, 0);
+    assert_eq!(intent.state, json!({"runCode":"initial"}));
+    assert!(intent.pending.is_none());
+    assert!(intent.failure.is_none());
+    assert!(intent.child_executions.is_empty());
+    assert_eq!(intent.child_runs, 0);
+    assert!(intent.budget_usage.input_tokens + intent.budget_usage.output_tokens > 10);
+    assert_eq!(http.calls.load(Ordering::Acquire), 1);
     agent.cancel(&control).unwrap();
     let error = agent.wait(handle).await.unwrap_err();
     assert!(matches!(error.primary(), AgentError::Cancelled));
@@ -228,9 +400,16 @@ async fn cancelled_judge_retains_intent_and_refuses_automatic_replay() {
         .await
         .unwrap()
         .unwrap();
-    let journal: ContinuationJournalState = serde_json::from_value(checkpoint.state).unwrap();
+    let journal: ContinuationJournalState =
+        serde_json::from_value(checkpoint.state.clone()).unwrap();
     assert_eq!(journal.phase, ContinuationPhase::Interrupted);
-    assert_eq!(journal.child_executions.len(), 1);
+    assert!(journal.child_executions.is_empty());
+    assert_eq!(journal.child_runs, 0);
+    assert_eq!(journal.model_calls, 3);
+    assert_eq!(journal.rounds, 0);
+    assert_eq!(journal.state, intent.state);
+    assert!(journal.pending.is_none());
+    assert!(journal.failure.is_some());
     assert!(journal.budget_usage.input_tokens + journal.budget_usage.output_tokens > 10);
     assert!(
         agent
@@ -240,8 +419,27 @@ async fn cancelled_judge_retains_intent_and_refuses_automatic_replay() {
     );
     assert_eq!(policy.provider.calls.load(Ordering::Acquire), 1);
     assert_eq!(policy.executed.load(Ordering::Acquire), 0);
-    policy.client.close().await;
     agent.close().await;
+    let reopened = driver(&path).await;
+    let error = reopened
+        .run(request("interrupted", policy.clone()))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("already admitted"));
+    let unchanged = reopened
+        .latest_checkpoint("interrupted")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.run_id, checkpoint.run_id);
+    assert_eq!(unchanged.revision, checkpoint.revision);
+    assert_eq!(unchanged.state, checkpoint.state);
+    assert_eq!(http.calls.load(Ordering::Acquire), 1);
+    assert_eq!(policy.provider.calls.load(Ordering::Acquire), 1);
+    assert_eq!(policy.executed.load(Ordering::Acquire), 0);
+    http.drained().await;
+    policy.client.close().await;
+    reopened.close().await;
 }
 struct Opaque;
 #[async_trait]
@@ -463,9 +661,10 @@ fn global_counters_preserve_child_local_caps_and_do_not_use_child_cap_as_root_ca
 async fn expired_attach_to_start_wait_cannot_extend_original_deadline() {
     let temp = tempfile::tempdir().unwrap();
     let agent = driver(&temp.path().join("state.sqlite")).await;
+    let provider = Provider::default();
     let policy = Arc::new(Policy {
-        client: ModelJobClient::new().await.unwrap(),
-        provider: Provider::default(),
+        client: model_client(&provider),
+        provider,
         executed: AtomicUsize::new(0),
         paused: AtomicUsize::new(0),
     });
@@ -493,9 +692,10 @@ async fn expired_attach_to_start_wait_cannot_extend_original_deadline() {
 async fn initial_child_slots_are_not_refilled_before_first_judge() {
     let temp = tempfile::tempdir().unwrap();
     let agent = driver(&temp.path().join("state.sqlite")).await;
+    let provider = Provider::default();
     let policy = Arc::new(Policy {
-        client: ModelJobClient::new().await.unwrap(),
-        provider: Provider::default(),
+        client: model_client(&provider),
+        provider,
         executed: AtomicUsize::new(0),
         paused: AtomicUsize::new(0),
     });

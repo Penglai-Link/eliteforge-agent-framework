@@ -42,33 +42,38 @@ impl ChatModel for AttemptModel {
         })
     }
 }
-fn job(model: Arc<AttemptModel>) -> ChatModelJob {
-    ChatModelJob {
-        connection: ModelConnection::new("provider", model, vec![ModelDescriptor::new("actual")]),
-        model: ModelRef::new("provider", "actual"),
-        request: ChatRequest {
-            messages: vec![Message::user("hello")],
-            tools: vec![],
-            extensions: Default::default(),
-            options: GenerationOptions {
-                max_output_tokens: Some(8),
-                ..Default::default()
-            },
-        },
-        limits: RunLimits {
-            max_model_retries: 1,
-            max_model_calls_per_step: Some(2),
+fn client(model: Arc<AttemptModel>) -> ModelClient {
+    ModelClient::new(ModelRuntimeUpdate::new(
+        "provider",
+        1,
+        vec![ModelConnection::new(
+            "provider",
+            model,
+            vec![ModelDescriptor::new("actual")],
+        )],
+    ))
+    .unwrap()
+}
+fn input() -> ChatRequest {
+    ChatRequest {
+        messages: vec![Message::user("hello")],
+        tools: vec![],
+        extensions: Default::default(),
+        options: GenerationOptions {
+            max_output_tokens: Some(8),
             ..Default::default()
         },
-        max_calls: 2,
-        repair: None,
-        workflow: None,
-        stage: "stateless".into(),
+    }
+}
+fn limits() -> RunLimits {
+    RunLimits {
+        max_model_retries: 1,
+        max_model_calls_per_step: Some(2),
+        ..Default::default()
     }
 }
 #[tokio::test]
 async fn observed_report_distinguishes_complete_actual_unknown_and_retry_subtotal() {
-    let client = ModelJobClient::new().await.unwrap();
     for (fail_first, reported, calls) in [(false, true, 1), (false, false, 1), (true, true, 2)] {
         let model = Arc::new(AttemptModel {
             calls: AtomicUsize::new(0),
@@ -76,7 +81,15 @@ async fn observed_report_distinguishes_complete_actual_unknown_and_retry_subtota
             reported,
             requests: Mutex::new(vec![]),
         });
-        let observed = client.execute_observed(job(model.clone())).await;
+        let client = client(model.clone());
+        let observed = client
+            .chat_observed(
+                &ModelRef::new("provider", "actual"),
+                input(),
+                &limits(),
+                "stateless",
+            )
+            .await;
         assert_eq!(observed.result.unwrap().content.text(), "ok");
         assert_eq!(observed.report.calls, calls);
         assert_eq!(observed.report.attempts, calls);
@@ -112,12 +125,12 @@ async fn observed_report_distinguishes_complete_actual_unknown_and_retry_subtota
                 .iter()
                 .all(|report| report.model == ModelRef::new("provider", "actual"))
         );
+        assert!(client.close_observed().await.is_success());
     }
-    assert!(client.close_observed().await.is_success());
 }
 struct Repair;
 #[async_trait]
-impl ModelJobRepair for Repair {
+impl ModelResponseValidator for Repair {
     async fn validate(
         &self,
         _: &ChatResponse,
@@ -139,13 +152,20 @@ async fn repair_cannot_reset_inherited_tree_budget_or_provider_usage_unknown() {
         reported: false,
         requests: Mutex::new(vec![]),
     });
-    let client = ModelJobClient::new().await.unwrap();
-    let mut job = job(model.clone());
-    job.repair = Some(Arc::new(Repair));
-    job.request
+    let client = client(model.clone());
+    let mut request = input();
+    request
         .extensions
         .insert(ContinuationBudget::new(1, 4, 0, 0, 0, 0).unwrap());
-    let observed = client.execute_observed(job).await;
+    let observed = client
+        .chat_with_validator_observed(
+            &ModelRef::new("provider", "actual"),
+            request,
+            &limits(),
+            "stateless",
+            Arc::new(Repair),
+        )
+        .await;
     assert!(
         observed
             .result

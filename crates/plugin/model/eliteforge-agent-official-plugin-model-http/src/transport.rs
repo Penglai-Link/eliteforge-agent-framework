@@ -181,7 +181,11 @@ impl PersonAiModelTransport {
                 .map_err(|_| ModelError::Fatal("PersonAI request encryption failed".into()))?;
         Ok(self
             .api
-            .new_gateway_request(reqwest::Method::POST, path, &self.context)
+            .new_gateway_request(
+                reqwest::Method::POST,
+                &format!("/{}", path.trim_start_matches('/')),
+                &self.context,
+            )
             .map_err(|_| ModelError::Fatal("PersonAI request authorization failed".into()))?
             .json(&envelope))
     }

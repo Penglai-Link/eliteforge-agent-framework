@@ -40,7 +40,7 @@ returns both conservative run-ledger `usage` and optional aggregate
 usage, provider usage is unavailable while ledger reservations remain charged.
 Reported totals must also equal this execution's ledger delta; failed internal
 retry attempts leave the complete actual audit unavailable.
-The result's public chat-response bridge preserves this distinction through SDK jobs. `MemoryCompactionMetadata`
+The result's public chat-response bridge preserves this distinction through direct SDK `ModelClient::workflow_observed` calls and the existing `ChatExecutor`, without creating an Agent, session or native run. `MemoryCompactionMetadata`
 passes operator notes and retained-tail boundaries as data. Native `ContextReducer`
 integration and the core contributor/assembler/selection types are publicly
 available from this plugin; no second compressor is introduced.

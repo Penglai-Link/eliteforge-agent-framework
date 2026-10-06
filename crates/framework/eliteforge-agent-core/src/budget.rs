@@ -45,6 +45,15 @@ impl UsageLedger {
         true
     }
 
+    /// Same input admission rule as UsagePermit::reserve, without spending it.
+    /// Outstanding/ambiguous reservations remain charged.
+    pub fn can_reserve(&self, input_tokens: u64, limit: u64) -> bool {
+        input_tokens < self.available_tokens(limit)
+    }
+    fn available_tokens(&self, limit: u64) -> u64 {
+        let charged = self.including_reservations();
+        limit.saturating_sub(charged.input_tokens.saturating_add(charged.output_tokens))
+    }
     pub fn including_reservations(&self) -> Usage {
         Usage {
             input_tokens: self.usage.input_tokens.saturating_add(self.reserved),
@@ -112,12 +121,7 @@ impl UsagePermit {
         limit: u64,
     ) -> Result<(Self, u32), ModelError> {
         let mut state = ledger.lock().unwrap_or_else(|e| e.into_inner());
-        let consumed = state
-            .usage
-            .input_tokens
-            .saturating_add(state.usage.output_tokens)
-            .saturating_add(state.reserved);
-        let available = limit.saturating_sub(consumed);
+        let available = state.available_tokens(limit);
         if input_tokens >= available {
             return Err(ModelError::Fatal(
                 "total model token budget cannot admit this request".into(),

@@ -20,6 +20,7 @@ impl EmbeddingModel for DemoMedia {
         request: EmbeddingRequest,
     ) -> Result<EmbeddingResponse, ModelError> {
         Ok(EmbeddingResponse {
+            provider_model: None,
             model: ModelRef::new("demo", model),
             input_tokens: Some(2),
             vectors: request

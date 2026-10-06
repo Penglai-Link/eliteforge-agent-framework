@@ -138,7 +138,6 @@ async fn native_recovery_uses_real_authorized_candidate_with_its_smaller_window(
 async fn denied_tree_dispatch_releases_unspent_tokens_and_never_calls_provider() {
     let calls = Arc::new(AtomicUsize::new(0));
     let capture = Arc::new(Capture::default());
-    let client = ModelJobClient::new().await.unwrap();
     let mut request = ChatRequest {
         messages: vec![Message::user("hello")],
         tools: vec![],
@@ -148,21 +147,23 @@ async fn denied_tree_dispatch_releases_unspent_tokens_and_never_calls_provider()
     request
         .extensions
         .insert(ContinuationBudget::new(1, 4, 0, 1, 0, 0).unwrap());
-    let job = ChatModelJob {
-        connection: ModelConnection::new(
+    let client = ModelClient::new(ModelRuntimeUpdate::new(
+        "actual",
+        1,
+        vec![ModelConnection::new(
             "actual",
             capture.clone(),
             vec![ModelDescriptor::new("real")],
-        ),
-        model: ModelRef::new("actual", "real"),
-        request,
-        limits: RunLimits::default(),
-        stage: "job".into(),
-        max_calls: 1,
-        repair: None,
-        workflow: None,
+        )],
+    ))
+    .unwrap();
+    let limits = RunLimits {
+        max_model_calls_per_step: Some(1),
+        ..Default::default()
     };
-    let observed = client.execute_observed(job).await;
+    let observed = client
+        .chat_observed(&ModelRef::new("actual", "real"), request, &limits, "direct")
+        .await;
     assert!(
         observed
             .result

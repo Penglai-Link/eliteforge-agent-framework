@@ -15,6 +15,16 @@ pub enum ContextPreparation {
         source_revision: String,
     },
 }
+/// Explicit response validation for bounded direct model calls.
+#[async_trait]
+pub trait ModelResponseValidator: Send + Sync {
+    async fn validate(
+        &self,
+        response: &ChatResponse,
+        attempt: usize,
+    ) -> Result<Option<ChatRequest>, AgentError>;
+}
+
 #[async_trait]
 pub trait ModelWorkflow: Send + Sync {
     async fn run(

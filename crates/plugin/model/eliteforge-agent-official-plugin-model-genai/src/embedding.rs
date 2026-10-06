@@ -98,6 +98,7 @@ impl EmbeddingModel for GenaiEmbeddingAdapter {
             .await
             .map_err(map_error)?;
         let mut response = EmbeddingResponse {
+            provider_model: None,
             model: ModelRef::new(&self.connection, model),
             vectors: response
                 .embeddings

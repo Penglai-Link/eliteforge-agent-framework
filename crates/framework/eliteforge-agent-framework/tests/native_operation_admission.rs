@@ -12,6 +12,7 @@ impl EmbeddingModel for Embedder {
     async fn embed(&self, _: &str, _: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(EmbeddingResponse {
+            provider_model: None,
             model: ModelRef::new("authorized", "embed"),
             vectors: vec![EmbeddingVector {
                 index: 0,
@@ -108,18 +109,19 @@ async fn closed_or_cancelled_typed_preflight_spends_neither_tokens_nor_tree_call
 #[tokio::test]
 async fn observed_embedding_keeps_actual_binding_identity_and_complete_provider_usage() {
     let model = Arc::new(Embedder(AtomicUsize::new(0)));
-    let client = ModelJobClient::new().await.unwrap();
     let reference = ModelRef::new("authorized", "embed");
     let mut request = EmbeddingRequest::texts(["cost"]);
     request.choice = ModelChoice::model(reference.clone());
-    let observed = client
-        .embed_observed(
-            EmbeddingModelService::new(reference.clone(), model.clone()),
-            request,
-            RunLimits::default(),
-            1,
-        )
-        .await;
+    let mut registration = ModelRuntimeUpdate::new("authorized", 1, vec![]);
+    registration
+        .embedding
+        .push(EmbeddingModelService::new(reference.clone(), model.clone()));
+    let client = ModelClient::new(registration).unwrap();
+    let limits = RunLimits {
+        max_model_calls_per_step: Some(1),
+        ..Default::default()
+    };
+    let observed = client.embed_observed(request, &limits).await;
     assert_eq!(observed.result.unwrap().model, reference);
     assert_eq!(observed.report.selected, vec![reference]);
     assert_eq!(observed.report.calls, 1);

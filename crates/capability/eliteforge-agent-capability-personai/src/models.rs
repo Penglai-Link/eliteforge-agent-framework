@@ -725,6 +725,8 @@ impl EmbeddingModel for BoundPersonAiModels {
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
         let result = EmbeddingResponse {
+            provider_model: response.get("model").and_then(Value::as_str)
+                .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned),
             model: self.model_ref(model),
             vectors,
             input_tokens: response["usage"]["prompt_tokens"].as_u64(),

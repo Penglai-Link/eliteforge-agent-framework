@@ -46,6 +46,7 @@ impl ModelReportState {
         *self.ledger.lock().unwrap_or_else(|e| e.into_inner()) = Some(context.usage.clone());
         let mut context = context.clone();
         context.sinks.push(self.clone());
+        context.extensions.insert(self.clone());
         context
     }
     pub fn response(&self, response: &ChatResponse) {
@@ -87,6 +88,9 @@ impl ModelReportState {
                 ..Default::default()
             });
         }
+    }
+    pub fn calls(&self) -> usize {
+        self.report.lock().unwrap_or_else(|e| e.into_inner()).calls
     }
     pub fn snapshot(&self, attempts: usize) -> ModelExecutionReport {
         let mut report = self

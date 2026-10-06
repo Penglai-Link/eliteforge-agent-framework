@@ -139,7 +139,11 @@ fn config(url: &str) -> http::AgentModelConfig {
         max_retries: None,
     }
 }
-fn job(server: &Server, streaming: bool, max_calls: usize) -> ChatModelJob {
+fn fixture(
+    server: &Server,
+    streaming: bool,
+    max_calls: usize,
+) -> (ModelConnection, ChatRequest, RunLimits) {
     let adapter = Arc::new(http::ProtocolChatModel {
         config: config(&server.url),
         factory: Arc::new(http::FixedModelTransportFactory(Arc::new(
@@ -147,11 +151,9 @@ fn job(server: &Server, streaming: bool, max_calls: usize) -> ChatModelJob {
         ))),
         streaming,
     });
-    ChatModelJob {
-        workflow: None,
-        connection: ModelConnection::new("test", adapter, vec![ModelDescriptor::new("test")]),
-        model: ModelRef::new("test", "test"),
-        request: ChatRequest {
+    (
+        ModelConnection::new("test", adapter, vec![ModelDescriptor::new("test")]),
+        ChatRequest {
             messages: vec![Message::user("hello")],
             tools: vec![],
             options: GenerationOptions {
@@ -160,25 +162,40 @@ fn job(server: &Server, streaming: bool, max_calls: usize) -> ChatModelJob {
             },
             extensions: Default::default(),
         },
-        limits: RunLimits {
+        RunLimits {
             max_model_retries: 3,
+            max_model_calls_per_step: Some(max_calls),
             model_timeout: Duration::from_secs(3),
             ..Default::default()
         },
-        stage: "test".into(),
-        max_calls,
-        repair: None,
-    }
+    )
+}
+fn runtime(connection: ModelConnection) -> Arc<ModelRuntime> {
+    ModelRuntime::new(ModelRuntimeUpdate::new("http-fixture", 1, vec![connection])).unwrap()
+}
+fn embedding_runtime(service: EmbeddingModelService) -> Arc<ModelRuntime> {
+    let mut update = ModelRuntimeUpdate::new("embedding-fixture", 1, vec![]);
+    update.embedding.push(service);
+    ModelRuntime::new(update).unwrap()
+}
+fn rerank_runtime(service: RerankModelService) -> Arc<ModelRuntime> {
+    let mut update = ModelRuntimeUpdate::new("rerank-fixture", 1, vec![]);
+    update.rerank.push(service);
+    ModelRuntime::new(update).unwrap()
 }
 #[tokio::test]
-async fn actual_http_attempts_equal_job_dispatches_and_share_call_budget() {
+async fn actual_http_attempts_equal_direct_dispatches_and_share_call_budget() {
     for (max_calls, success, expected) in [(2, true, 2), (1, false, 1)] {
         let server = Server::new(vec![(503, "{}".into()), (200, answer("ok"))], false).await;
-        let client = ModelJobClient::new().await.unwrap();
-        let mut handle = client.start(job(&server, false, max_calls)).unwrap();
-        let result = client.wait(&mut handle).await;
+        let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+        let (connection, request, limits) = fixture(&server, false, max_calls);
+        let observed = client
+            .with_runtime(runtime(connection))
+            .chat_observed(&ModelRef::new("test", "test"), request, &limits, "direct")
+            .await;
+        let result = observed.result;
         assert_eq!(result.is_ok(), success, "{result:?}");
-        assert_eq!(handle.calls(), expected);
+        assert_eq!(observed.report.calls, expected);
         assert_eq!(server.calls(), expected);
         client.close().await;
     }
@@ -198,10 +215,14 @@ async fn client_errors_and_incomplete_streams_never_retry_or_fallback() {
         ),
     ] {
         let server = Server::new(vec![(status, body)], false).await;
-        let client = ModelJobClient::new().await.unwrap();
-        let mut handle = client.start(job(&server, streaming, 5)).unwrap();
-        assert!(client.wait(&mut handle).await.is_err());
-        assert_eq!(handle.calls(), 1);
+        let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+        let (connection, request, limits) = fixture(&server, streaming, 5);
+        let observed = client
+            .with_runtime(runtime(connection))
+            .chat_observed(&ModelRef::new("test", "test"), request, &limits, "direct")
+            .await;
+        assert!(observed.result.is_err());
+        assert_eq!(observed.report.calls, 1);
         assert_eq!(server.calls(), 1);
         client.close().await;
     }
@@ -209,8 +230,13 @@ async fn client_errors_and_incomplete_streams_never_retry_or_fallback() {
 #[tokio::test]
 async fn stream_terminal_preserves_usage_after_output() {
     let server=Server::new(vec![(200,concat!("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"},\"finish_reason\":null}]}\r\n\r\n","data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\r\n","data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\r\n\r\n","data: [DONE]\r\n\r\n").into())],false).await;
-    let client = ModelJobClient::new().await.unwrap();
-    let response = client.execute(job(&server, true, 4)).await.unwrap();
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+    let (connection, request, limits) = fixture(&server, true, 4);
+    let response = client
+        .with_runtime(runtime(connection))
+        .chat(&ModelRef::new("test", "test"), request, &limits, "direct")
+        .await
+        .unwrap();
     assert_eq!(response.content.text(), "你好");
     assert_eq!(
         response.usage,
@@ -223,48 +249,77 @@ async fn stream_terminal_preserves_usage_after_output() {
     client.close().await;
 }
 #[tokio::test]
-async fn cancellation_during_wait_timeout_and_close_drain_transports() {
-    for mode in 0..3 {
+async fn cancellation_timeout_drop_and_close_drain_direct_transports() {
+    for mode in 0..4 {
         let server = Server::new(vec![(200, answer("ok"))], true).await;
-        let client = ModelJobClient::new().await.unwrap();
-        let mut input = job(&server, false, 4);
+        let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+        let (connection, request, mut limits) = fixture(&server, false, 4);
         if mode == 1 {
-            input.limits.model_timeout = Duration::from_millis(40);
+            limits.model_timeout = Duration::from_millis(40);
         }
-        let mut handle = client.start(input).unwrap();
-        let control = handle.control().unwrap();
-        let waiting_client = client.clone();
-        let waiting = tokio::spawn(async move { waiting_client.wait(&mut handle).await });
+        let options = ModelInvocationOptions::for_call(&limits).unwrap();
+        let control = options.run.as_ref().unwrap();
+        assert!(control.session_id.is_empty());
+        assert!(control.execution_counters.is_none());
+        assert!(control.node_execution.is_none());
+        assert!(control.budget_journal.is_none());
+        let cancel = options.cancellation.clone();
+        let bound = client
+            .with_runtime(runtime(connection))
+            .with_options(options);
+        let waiting = tokio::spawn(async move {
+            bound
+                .chat(&ModelRef::new("test", "test"), request, &limits, "direct")
+                .await
+        });
         server.started().await;
         if mode == 0 {
-            control.cancel().unwrap();
+            cancel.cancel();
         }
         if mode == 2 {
             client.close().await;
         }
-        assert!(
-            tokio::time::timeout(Duration::from_secs(3), waiting)
-                .await
-                .unwrap()
-                .unwrap()
-                .is_err()
-        );
+        if mode == 3 {
+            waiting.abort();
+        }
+        let result = tokio::time::timeout(Duration::from_secs(3), waiting)
+            .await
+            .unwrap();
+        if mode == 3 {
+            assert!(result.unwrap_err().is_cancelled());
+        } else {
+            assert!(result.unwrap().is_err());
+        }
         assert_eq!(server.calls(), 1);
         server.drained().await;
         client.close().await;
-        assert!(client.start(job(&server, false, 1)).is_err());
+        let (connection, request, limits) = fixture(&server, false, 1);
+        assert!(
+            client
+                .with_runtime(runtime(connection))
+                .chat(&ModelRef::new("test", "test"), request, &limits, "closed",)
+                .await
+                .is_err()
+        );
+        assert_eq!(server.calls(), 1);
     }
-    let lazy = Arc::new(LazyModelJobClient::default());
-    lazy.close().await;
-    assert!(lazy.get().await.is_err());
-    let lazy = Arc::new(LazyModelJobClient::default());
-    let init = lazy.clone();
-    let initialize = tokio::spawn(async move {
-        let _ = init.get().await;
-    });
-    lazy.close().await;
-    initialize.await.unwrap();
-    assert!(lazy.get().await.is_err());
+    // A closed owner cannot be revived by constructing a new catalog view.
+    let server = Server::new(vec![(200, answer("must not run"))], false).await;
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+    client.close().await;
+    let (connection, request, limits) = fixture(&server, false, 1);
+    let view = client.with_runtime(runtime(connection));
+    assert!(
+        view.chat(
+            &ModelRef::new("test", "test"),
+            request,
+            &limits,
+            "first-use"
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(server.calls(), 0);
 }
 #[derive(Clone)]
 struct Marker(&'static str);
@@ -298,7 +353,7 @@ impl ChatModel for Capture {
 }
 struct Repair;
 #[async_trait]
-impl ModelJobRepair for Repair {
+impl ModelResponseValidator for Repair {
     async fn validate(
         &self,
         _: &ChatResponse,
@@ -330,16 +385,24 @@ impl ModelJobRepair for Repair {
 async fn repair_updates_public_messages_tools_options_and_extensions() {
     let server = Server::new(vec![(200, answer("ok"))], false).await;
     let requests = Arc::new(Mutex::new(vec![]));
-    let mut input = job(&server, false, 2);
-    input.connection.adapter = Arc::new(Capture {
+    let mut input = fixture(&server, false, 2);
+    input.0.adapter = Arc::new(Capture {
         requests: requests.clone(),
         failures: Default::default(),
     });
-    input.repair = Some(Arc::new(Repair));
-    let client = ModelJobClient::new().await.unwrap();
-    let mut handle = client.start(input).unwrap();
-    client.wait(&mut handle).await.unwrap();
-    assert_eq!(handle.calls(), 2);
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+    let observed = client
+        .with_runtime(runtime(input.0))
+        .chat_with_validator_observed(
+            &ModelRef::new("test", "test"),
+            input.1,
+            &input.2,
+            "repair",
+            Arc::new(Repair),
+        )
+        .await;
+    observed.result.unwrap();
+    assert_eq!(observed.report.calls, 2);
     let requests = requests.lock().unwrap().clone();
     assert_eq!(requests[1].messages[0].content.text(), "new");
     assert_eq!(requests[1].tools[0].call_name, "tool");
@@ -355,10 +418,10 @@ async fn repair_updates_public_messages_tools_options_and_extensions() {
 async fn public_input_budget_covers_native_metadata_images_and_tool_parameters() {
     for kind in 0..3 {
         let server = Server::new(vec![(200, answer("ok"))], false).await;
-        let mut input = job(&server, false, 2);
-        input.limits.max_context_tokens = 80;
-        input.limits.max_total_tokens = 100;
-        input.request = match kind {
+        let mut input = fixture(&server, false, 2);
+        input.2.max_context_tokens = 80;
+        input.2.max_total_tokens = 100;
+        input.1 = match kind {
             0 => http::request_to_framework(http::ModelRequest {
                 messages: vec![http::AgentMessage::user("hello")],
                 tools: vec![],
@@ -379,7 +442,7 @@ async fn public_input_budget_covers_native_metadata_images_and_tool_parameters()
                         source: MediaSource::Base64("a".repeat(8000)),
                     },
                 }]))],
-                ..input.request
+                ..input.1
             },
             _ => ChatRequest {
                 tools: vec![ToolDescriptor::new(
@@ -388,11 +451,17 @@ async fn public_input_budget_covers_native_metadata_images_and_tool_parameters()
                     "desc",
                     json!({"type":"object","description":"x".repeat(3000)}),
                 )],
-                ..input.request
+                ..input.1
             },
         };
-        let client = ModelJobClient::new().await.unwrap();
-        assert!(client.execute(input).await.is_err());
+        let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+        assert!(
+            client
+                .with_runtime(runtime(input.0))
+                .chat(&ModelRef::new("test", "test"), input.1, &input.2, "direct")
+                .await
+                .is_err()
+        );
         assert_eq!(server.calls(), 0);
         client.close().await;
     }
@@ -400,7 +469,7 @@ async fn public_input_budget_covers_native_metadata_images_and_tool_parameters()
 #[tokio::test]
 async fn rerank_fallback_reserves_actual_prompt_before_http() {
     let server = Server::new(vec![(200, answer("[0]"))], false).await;
-    let client = ModelJobClient::new().await.unwrap();
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
     let service = RerankModelService::new(
         ModelRef::new("test", "test"),
         Arc::new(http::HttpRerankModel {
@@ -419,16 +488,17 @@ async fn rerank_fallback_reserves_actual_prompt_before_http() {
     };
     assert!(
         client
-            .rerank(
-                service,
+            .with_runtime(rerank_runtime(service))
+            .rerank_observed(
                 request,
-                RunLimits {
+                &RunLimits {
                     max_total_tokens: 60,
+                    max_model_calls_per_step: Some(1),
                     ..Default::default()
-                },
-                1
+                }
             )
             .await
+            .result
             .is_err()
     );
     assert_eq!(server.calls(), 0);
@@ -438,22 +508,34 @@ async fn rerank_fallback_reserves_actual_prompt_before_http() {
 #[tokio::test]
 async fn repairs_share_token_ledger_and_wire_output_limit_is_clamped() {
     let server = Server::new(vec![(200, answer("ok"))], false).await;
-    let client = ModelJobClient::new().await.unwrap();
-    let mut input = job(&server, false, 2);
-    input.limits.max_total_tokens = 32;
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+    let mut input = fixture(&server, false, 2);
+    input.2.max_total_tokens = 32;
     let requests = Arc::new(Mutex::new(vec![]));
-    input.connection.adapter = Arc::new(Capture {
+    input.0.adapter = Arc::new(Capture {
         requests: requests.clone(),
         failures: Default::default(),
     });
-    input.repair = Some(Arc::new(Repair));
-    let mut handle = client.start(input).unwrap();
-    assert!(client.wait(&mut handle).await.is_err());
-    assert_eq!(handle.calls(), 1);
+    let observed = client
+        .with_runtime(runtime(input.0))
+        .chat_with_validator_observed(
+            &ModelRef::new("test", "test"),
+            input.1,
+            &input.2,
+            "repair",
+            Arc::new(Repair),
+        )
+        .await;
+    assert!(observed.result.is_err());
+    assert_eq!(observed.report.calls, 1);
     assert_eq!(requests.lock().unwrap().len(), 1);
-    let mut input = job(&server, false, 2);
-    input.limits.max_total_tokens = 32;
-    client.execute(input).await.unwrap();
+    let mut input = fixture(&server, false, 2);
+    input.2.max_total_tokens = 32;
+    client
+        .with_runtime(runtime(input.0))
+        .chat(&ModelRef::new("test", "test"), input.1, &input.2, "direct")
+        .await
+        .unwrap();
     assert_eq!(server.calls(), 1);
     let body = server.requests.lock().unwrap().clone();
     let limit = body[0]["max_tokens"].as_u64().unwrap();
@@ -464,7 +546,7 @@ async fn repairs_share_token_ledger_and_wire_output_limit_is_clamped() {
 #[tokio::test]
 async fn rerank_actual_usage_settles_and_output_limit_reaches_wire() {
     let server = Server::new(vec![(200, answer("[0]"))], false).await;
-    let client = ModelJobClient::new().await.unwrap();
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
     let service = RerankModelService::new(
         ModelRef::new("test", "test"),
         Arc::new(http::HttpRerankModel {
@@ -483,26 +565,25 @@ async fn rerank_actual_usage_settles_and_output_limit_reaches_wire() {
     };
     let budget = service.implementation.input_token_estimate(&request) + 12;
     let result = client
+        .with_runtime(rerank_runtime(service))
         .rerank_observed(
-            service,
             request,
-            RunLimits {
+            &RunLimits {
                 max_total_tokens: budget,
+                max_model_calls_per_step: Some(1),
                 ..Default::default()
             },
-            1,
         )
-        .await
-        .unwrap();
-    assert_eq!(result.calls, server.calls());
+        .await;
+    assert_eq!(result.report.calls, server.calls());
     assert_eq!(
-        result.usage,
+        result.report.ledger_usage,
         Usage {
             input_tokens: 4,
             output_tokens: 2
         }
     );
-    assert_eq!(result.response.results[0].index, 0);
+    assert_eq!(result.result.unwrap().results[0].index, 0);
     let body = server.requests.lock().unwrap().clone();
     assert!(body[0]["max_tokens"].as_u64().unwrap() < 64);
     drop(body);
@@ -512,9 +593,9 @@ async fn rerank_actual_usage_settles_and_output_limit_reaches_wire() {
 #[tokio::test]
 async fn valid_rich_input_reaches_provider_and_uses_core_selected_messages() {
     let server = Server::new(vec![(200, answer("ok"))], false).await;
-    let mut input = job(&server, false, 1);
-    input.connection.models[0].input_modalities = vec![Modality::Text, Modality::Image];
-    input.request.messages = vec![Message::user(Content(vec![
+    let mut input = fixture(&server, false, 1);
+    input.0.models[0].input_modalities = vec![Modality::Text, Modality::Image];
+    input.1.messages = vec![Message::user(Content(vec![
         ContentBlock::Text {
             text: "inspect".into(),
         },
@@ -530,8 +611,12 @@ async fn valid_rich_input_reaches_provider_and_uses_core_selected_messages() {
             value: json!({"attachment":{"resourceCode":"RESOURCE-1","snippet":"reference data"}}),
         },
     ]))];
-    let client = ModelJobClient::new().await.unwrap();
-    let response = client.execute(input).await.unwrap();
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+    let response = client
+        .with_runtime(runtime(input.0))
+        .chat(&ModelRef::new("test", "test"), input.1, &input.2, "direct")
+        .await
+        .unwrap();
     assert_eq!(response.content.text(), "ok");
     let body = server.requests.lock().unwrap().clone();
     assert!(
@@ -556,10 +641,14 @@ async fn oversized_and_malformed_http_streams_release_connection_before_teardown
         .repeat(9000),
     ] {
         let server = Server::new(vec![(200, body)], false).await;
-        let client = ModelJobClient::new().await.unwrap();
-        let mut handle = client.start(job(&server, true, 4)).unwrap();
-        assert!(client.wait(&mut handle).await.is_err());
-        assert_eq!(handle.calls(), 1);
+        let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+        let (connection, request, limits) = fixture(&server, true, 4);
+        let observed = client
+            .with_runtime(runtime(connection))
+            .chat_observed(&ModelRef::new("test", "test"), request, &limits, "stream")
+            .await;
+        assert!(observed.result.is_err());
+        assert_eq!(observed.report.calls, 1);
         assert_eq!(server.calls(), 1);
         server.drained().await;
         client.close().await;
@@ -623,7 +712,7 @@ impl ChatModel for AuthModel {
 #[tokio::test]
 async fn authentication_recovery_and_final_failure_hooks_are_counted_and_budgeted() {
     let server = Server::new(vec![(200, answer("ok"))], false).await;
-    let client = ModelJobClient::new().await.unwrap();
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
     for mode in 0..4 {
         let model = Arc::new(AuthModel {
             calls: AtomicUsize::new(0),
@@ -631,11 +720,19 @@ async fn authentication_recovery_and_final_failure_hooks_are_counted_and_budgete
             failures: AtomicUsize::new(0),
             mode,
         });
-        let mut input = job(&server, false, 2);
-        input.connection.adapter = model.clone();
-        input.limits.model_timeout = Duration::from_millis(30);
-        let mut handle = client.start(input).unwrap();
-        let result = client.wait(&mut handle).await;
+        let mut input = fixture(&server, false, 2);
+        input.0.adapter = model.clone();
+        input.2.model_timeout = Duration::from_millis(30);
+        let observed = client
+            .with_runtime(runtime(input.0))
+            .chat_observed(
+                &ModelRef::new("test", "test"),
+                input.1,
+                &input.2,
+                "authentication",
+            )
+            .await;
+        let result = observed.result;
         assert_eq!(result.is_ok(), mode == 0);
         assert_eq!(model.recoveries.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -646,49 +743,124 @@ async fn authentication_recovery_and_final_failure_hooks_are_counted_and_budgete
             model.failures.load(Ordering::SeqCst),
             if mode == 0 { 0 } else { 1 }
         );
-        assert_eq!(handle.calls(), model.calls.load(Ordering::SeqCst));
+        assert_eq!(observed.report.calls, model.calls.load(Ordering::SeqCst));
     }
-    let model = Arc::new(AuthModel {
-        calls: AtomicUsize::new(0),
-        recoveries: AtomicUsize::new(0),
-        failures: AtomicUsize::new(0),
-        mode: 0,
-    });
-    let mut input = job(&server, false, 1);
-    input.connection.adapter = model.clone();
-    assert!(client.execute(input).await.is_err());
-    assert_eq!(model.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(model.recoveries.load(Ordering::SeqCst), 0);
-    assert_eq!(model.failures.load(Ordering::SeqCst), 1);
+    for local_cap in [1, 2] {
+        let model = Arc::new(AuthModel {
+            calls: AtomicUsize::new(0),
+            recoveries: AtomicUsize::new(0),
+            failures: AtomicUsize::new(0),
+            mode: 0,
+        });
+        let tree = ContinuationBudget::new(1, 4, 0, 0, 0, 0).unwrap();
+        let mut input = fixture(&server, false, local_cap);
+        input.0.adapter = model.clone();
+        if local_cap == 2 {
+            input.1.extensions.insert(tree.clone());
+        }
+        let observed = client
+            .with_runtime(runtime(input.0))
+            .chat_observed(&ModelRef::new("test", "test"), input.1, &input.2, "direct")
+            .await;
+        assert!(matches!(observed.result.unwrap_err().primary(),
+            AgentError::Model(ModelError::Provider(detail))
+                if detail.category == ProviderErrorCategory::Authentication));
+        assert_eq!(observed.report.calls, 1);
+        assert!(observed.report.ledger_usage.input_tokens > 0);
+        assert!(observed.report.provider_usage.is_none());
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(model.recoveries.load(Ordering::SeqCst), 0);
+        assert_eq!(model.failures.load(Ordering::SeqCst), 1);
+        if local_cap == 2 {
+            assert_eq!(tree.calls(), 1);
+        }
+    }
     client.close().await;
 }
-struct AuthEmbedding(AtomicUsize);
+#[derive(Default)]
+struct AuthOperation {
+    calls: AtomicUsize,
+    recoveries: AtomicUsize,
+    failures: AtomicUsize,
+}
 #[async_trait]
-impl EmbeddingModel for AuthEmbedding {
+impl EmbeddingModel for AuthOperation {
     async fn embed(&self, _: &str, _: EmbeddingRequest) -> Result<EmbeddingResponse, ModelError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Err(auth_error())
     }
     async fn recover_authentication(&self, _: &ModelError) -> Result<bool, ModelError> {
+        self.recoveries.fetch_add(1, Ordering::SeqCst);
         Err(ModelError::Fatal("refresh failed".into()))
     }
     fn on_failure(&self, _: &ModelError) {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        self.failures.fetch_add(1, Ordering::SeqCst);
+    }
+}
+#[async_trait]
+impl RerankModel for AuthOperation {
+    fn output_token_reserve(&self) -> u32 {
+        1
+    }
+    async fn rerank(&self, _: &str, _: RerankRequest) -> Result<RerankResponse, ModelError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(auth_error())
+    }
+    async fn recover_authentication(&self, _: &ModelError) -> Result<bool, ModelError> {
+        self.recoveries.fetch_add(1, Ordering::SeqCst);
+        Err(ModelError::Fatal("refresh failed".into()))
+    }
+    fn on_failure(&self, _: &ModelError) {
+        self.failures.fetch_add(1, Ordering::SeqCst);
     }
 }
 #[tokio::test]
 async fn operation_refresh_errors_reach_final_hook_exactly_once() {
-    let client = ModelJobClient::new().await.unwrap();
-    let model = Arc::new(AuthEmbedding(AtomicUsize::new(0)));
-    let service = EmbeddingModelService::new(ModelRef::new("test", "embedding"), model.clone());
-    let mut request = EmbeddingRequest::texts(["hello"]);
-    request.choice = ModelChoice::model(service.model.clone());
-    assert!(
-        client
-            .embed(service, request, RunLimits::default(), 2)
-            .await
-            .is_err()
-    );
-    assert_eq!(model.0.load(Ordering::SeqCst), 1);
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+    for tree_limited in [false, true] {
+        let model = Arc::new(AuthOperation::default());
+        let service = EmbeddingModelService::new(ModelRef::new("test", "embedding"), model.clone());
+        let mut request = EmbeddingRequest::texts(["hello"]);
+        request.choice = ModelChoice::model(service.model.clone());
+        let limits = RunLimits {
+            max_model_calls_per_step: Some(2),
+            ..Default::default()
+        };
+        let tree = ContinuationBudget::new(1, 4, 0, 0, 0, 0).unwrap();
+        let mut options = ModelInvocationOptions::for_call(&limits).unwrap();
+        if tree_limited {
+            options
+                .run
+                .as_mut()
+                .unwrap()
+                .extensions
+                .insert(tree.clone());
+        }
+        let observed = client
+            .with_runtime(embedding_runtime(service))
+            .with_options(options)
+            .embed_observed(request, &limits)
+            .await;
+        let error = observed.result.unwrap_err();
+        if tree_limited {
+            assert!(
+                matches!(error.primary(), AgentError::Model(ModelError::Provider(detail))
+                if detail.category == ProviderErrorCategory::Authentication)
+            );
+            assert_eq!(tree.calls(), 1);
+        } else {
+            assert!(error.to_string().contains("refresh failed"));
+        }
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            model.recoveries.load(Ordering::SeqCst),
+            usize::from(!tree_limited)
+        );
+        assert_eq!(model.failures.load(Ordering::SeqCst), 1);
+        assert_eq!(observed.report.calls, 1);
+        assert!(observed.report.ledger_usage.input_tokens > 0);
+        assert!(observed.report.provider_usage.is_none());
+    }
     client.close().await;
 }
 
@@ -698,13 +870,21 @@ async fn successful_http_without_usage_keeps_reservation_and_bounds_repairs() {
         json!({"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]})
             .to_string();
     let server = Server::new(vec![(200, response)], false).await;
-    let mut input = job(&server, false, 4);
-    input.limits.max_total_tokens = 32;
-    input.repair = Some(Arc::new(Repair));
-    let client = ModelJobClient::new().await.unwrap();
-    let mut handle = client.start(input).unwrap();
-    assert!(client.wait(&mut handle).await.is_err());
-    assert_eq!(handle.calls(), 1);
+    let mut input = fixture(&server, false, 4);
+    input.2.max_total_tokens = 32;
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+    let observed = client
+        .with_runtime(runtime(input.0))
+        .chat_with_validator_observed(
+            &ModelRef::new("test", "test"),
+            input.1,
+            &input.2,
+            "repair",
+            Arc::new(Repair),
+        )
+        .await;
+    assert!(observed.result.is_err());
+    assert_eq!(observed.report.calls, 1);
     assert_eq!(server.calls(), 1);
     server.drained().await;
     client.close().await;
@@ -720,7 +900,7 @@ async fn native_rerank_total_only_and_empty_usage_are_conservative() {
             false,
         )
         .await;
-        let client = ModelJobClient::new().await.unwrap();
+        let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
         let service = RerankModelService::new(
             ModelRef::new("test", "test"),
             Arc::new(http::HttpRerankModel {
@@ -743,35 +923,42 @@ async fn native_rerank_total_only_and_empty_usage_are_conservative() {
         };
         let estimate = service.implementation.input_token_estimate(&request);
         let output = client
-            .rerank_observed(service, request, RunLimits::default(), 1)
-            .await
-            .unwrap();
+            .with_runtime(rerank_runtime(service))
+            .rerank_observed(
+                request,
+                &RunLimits {
+                    max_model_calls_per_step: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(output.result.is_ok());
         assert_eq!(
-            output.usage.input_tokens,
+            output.report.ledger_usage.input_tokens,
             if usage.get("total_tokens").is_some() {
                 7
             } else {
                 estimate
             }
         );
-        assert_eq!(output.usage.output_tokens, 0);
-        assert_eq!(output.calls, server.calls());
+        assert_eq!(output.report.ledger_usage.output_tokens, 0);
+        assert_eq!(output.report.calls, server.calls());
         client.close().await;
     }
 }
 
-fn protocol_job(
+fn protocol_fixture(
     server: &Server,
     messages: Vec<Message>,
     protocol: http::AgentModelProtocol,
-) -> ChatModelJob {
+) -> (ModelConnection, ChatRequest, RunLimits) {
     let mut config = config(&server.url);
     config.protocol = protocol;
     config.context_window_tokens = Some(32_000);
     let mut descriptor = ModelDescriptor::new("test");
     descriptor.supports_tools = Some(true);
-    let mut input = job(server, false, 1);
-    input.connection = ModelConnection::new(
+    let mut input = fixture(server, false, 1);
+    input.0 = ModelConnection::new(
         "test",
         Arc::new(http::ProtocolChatModel {
             config,
@@ -782,7 +969,7 @@ fn protocol_job(
         }),
         vec![descriptor],
     );
-    input.request.messages = messages;
+    input.1.messages = messages;
     input
 }
 fn native_call(id: &str, name: &str, args: Value) -> Value {
@@ -851,13 +1038,12 @@ async fn reserved_native_json_cannot_promote_data_or_forge_protocol_identity_bef
         ],
     ] {
         let server = Server::new(vec![(200, answer("must not run"))], false).await;
-        let client = ModelJobClient::new().await.unwrap();
+        let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+        let (connection, request, limits) =
+            protocol_fixture(&server, messages, http::AgentModelProtocol::Responses);
         let result = client
-            .execute(protocol_job(
-                &server,
-                messages,
-                http::AgentModelProtocol::Responses,
-            ))
+            .with_runtime(runtime(connection))
+            .chat(&ModelRef::new("test", "test"), request, &limits, "protocol")
             .await;
         assert!(
             result.is_err(),
@@ -907,13 +1093,15 @@ async fn native_tool_history_roundtrips_once_through_real_responses_http() {
     );
     let body = json!({"id":"response", "status":"completed", "output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}], "usage":{"input_tokens":4,"output_tokens":2}}).to_string();
     let server = Server::new(vec![(200, body)], false).await;
-    let client = ModelJobClient::new().await.unwrap();
+    let client = ModelClient::new(ModelRuntimeUpdate::new("owner", 0, vec![])).unwrap();
+    let (connection, request, limits) = protocol_fixture(
+        &server,
+        encoded.messages,
+        http::AgentModelProtocol::Responses,
+    );
     let response = client
-        .execute(protocol_job(
-            &server,
-            encoded.messages,
-            http::AgentModelProtocol::Responses,
-        ))
+        .with_runtime(runtime(connection))
+        .chat(&ModelRef::new("test", "test"), request, &limits, "protocol")
         .await
         .unwrap();
     assert_eq!(response.content.text(), "ok");
@@ -941,4 +1129,282 @@ async fn native_tool_history_roundtrips_once_through_real_responses_http() {
     );
     client.close().await;
     server.drained().await;
+}
+
+#[derive(Default)]
+struct ParentPresentation {
+    published: Mutex<Vec<AgentEvent>>,
+    callbacks: Mutex<Vec<AgentEvent>>,
+}
+#[async_trait]
+impl EventSink for ParentPresentation {
+    fn on_published(&self, _: &RunContext, envelope: &EventEnvelope) {
+        self.published.lock().unwrap().push(envelope.event.clone());
+    }
+    async fn on_event(&self, _: &RunContext, event: &AgentEvent) {
+        self.callbacks.lock().unwrap().push(event.clone());
+    }
+}
+struct DirectJudgeParent {
+    client: ModelClient,
+    request: ChatRequest,
+    limits: RunLimits,
+}
+#[async_trait]
+impl AgentLoop for DirectJudgeParent {
+    async fn run(
+        &self,
+        _: &RunRequest,
+        parent: &RunContext,
+        _: &AgentServices,
+    ) -> Result<RunResult, AgentError> {
+        let observed = self
+            .client
+            .with_options(ModelInvocationOptions::for_run(parent, &self.limits))
+            .chat_observed(
+                &ModelRef::new("test", "test"),
+                self.request.clone(),
+                &self.limits,
+                "goal_judge",
+            )
+            .await;
+        assert_eq!(observed.result?.content.text(), "private judge text");
+        assert_eq!(observed.report.calls, 1);
+        assert_eq!(observed.report.attempts, 1);
+        assert_eq!(observed.report.selected, [ModelRef::new("test", "test")]);
+        assert_eq!(observed.report.dispatches.len(), 1);
+        assert_eq!(
+            observed.report.provider_usage,
+            Some(Usage {
+                input_tokens: 4,
+                output_tokens: 2,
+            })
+        );
+        assert_eq!(parent.usage(), observed.report.provider_usage.unwrap());
+        assert_eq!(
+            parent
+                .extensions
+                .get::<ModelDispatchCounter>()
+                .unwrap()
+                .calls(),
+            1
+        );
+        assert_eq!(
+            parent
+                .extensions
+                .get::<ContinuationBudget>()
+                .unwrap()
+                .calls(),
+            1
+        );
+        // A real parent publication proves the receiver and callback remain live.
+        parent
+            .emit(AgentEvent::TextDelta("parent answer".into()))
+            .await;
+        Ok(RunResult {
+            output: "parent answer".into(),
+            content: "parent answer".into(),
+            structured: None,
+            interactions: vec![],
+            status: RunStatus::Completed,
+            usage: parent.usage(),
+            steps: 0,
+            tool_calls: 0,
+            external_session: None,
+        })
+    }
+}
+fn assert_parent_presentation(events: &[AgentEvent]) {
+    assert!(events.iter().any(|event| matches!(event,
+        AgentEvent::TextDelta(text) if text == "parent answer")));
+    assert!(
+        !events.iter().any(|event| match event {
+            AgentEvent::TextDelta(text) => text != "parent answer",
+            AgentEvent::Output(output)
+                if matches!(output.as_ref(), OutputEvent::RunResult(result)
+                if result.output == "parent answer" && result.content.text() == "parent answer") =>
+                false,
+            AgentEvent::Output(_)
+            | AgentEvent::ReasoningDelta(_)
+            | AgentEvent::ModelStarted { .. }
+            | AgentEvent::ModelSelected { .. }
+            | AgentEvent::ModelDispatched(_)
+            | AgentEvent::ModelUsage { .. } => true,
+            _ => false,
+        }),
+        "direct judge output or diagnostics leaked into parent presentation: {events:?}"
+    );
+}
+#[tokio::test]
+async fn direct_judge_http_shares_parent_accounting_without_publishing_private_output() {
+    let body = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"private judge text\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    let server = Server::new(vec![(200, body.into())], false).await;
+    let (connection, request, limits) = fixture(&server, true, 1);
+    let client = ModelClient::from_runtime(runtime(connection));
+    let presentation = Arc::new(ParentPresentation::default());
+    let agent = eliteforge_agent_test_support::TestBuilder::default()
+        .default_models(false)
+        .plugin(AgentLoopPlugin::new(DirectJudgeParent {
+            client: client.clone(),
+            request,
+            limits,
+        }))
+        .plugin(EventPlugin::from_arc(
+            "parent-presentation",
+            presentation.clone(),
+        ))
+        .build()
+        .await
+        .unwrap();
+    let tree = ContinuationBudget::new(2, 4, 0, 0, 0, 0).unwrap();
+    let dispatches = ModelDispatchCounter::default();
+    let mut request = RunRequest::new("parent-chat", "hello");
+    request.extensions.insert(tree.clone());
+    request.extensions.insert(dispatches.clone());
+    let handle = agent.start(request).unwrap();
+    let mut receiver = agent.subscribe(&handle).unwrap();
+    let result = agent.wait(handle).await.unwrap();
+    assert_eq!(result.output, "parent answer");
+    assert_eq!(
+        result.usage,
+        Usage {
+            input_tokens: 4,
+            output_tokens: 2
+        }
+    );
+    assert_eq!(tree.calls(), 1);
+    assert_eq!(dispatches.calls(), 1);
+    assert_eq!(server.calls(), 1);
+    let mut events = vec![];
+    while let Ok(envelope) = receiver.try_recv() {
+        events.push(envelope.event);
+    }
+    assert_parent_presentation(&events);
+    assert_parent_presentation(&presentation.published.lock().unwrap());
+    assert_parent_presentation(&presentation.callbacks.lock().unwrap());
+    server.drained().await;
+    client.close().await;
+    assert!(agent.close().await.is_success());
+}
+
+#[tokio::test]
+async fn authentication_refresh_requires_token_capacity_even_with_remaining_call_slots() {
+    let server = Server::new(vec![(200, answer("unused"))], false).await;
+    let model = Arc::new(AuthModel {
+        calls: AtomicUsize::new(0),
+        recoveries: AtomicUsize::new(0),
+        failures: AtomicUsize::new(0),
+        mode: 0,
+    });
+    let tree = ContinuationBudget::new(2, 4, 0, 0, 0, 0).unwrap();
+    let (mut connection, mut request, mut limits) = fixture(&server, false, 2);
+    connection.adapter = model.clone();
+    request.options.max_output_tokens = Some(1);
+    limits.max_model_output_tokens = 1;
+    request.extensions.insert(tree.clone());
+    let reference = ModelRef::new("test", "test");
+    let input_cost = connection
+        .token_estimator
+        .request(&reference, &request)
+        .await
+        .unwrap() as u64;
+    limits.max_total_tokens = input_cost + 1;
+    let client = ModelClient::from_runtime(runtime(connection));
+    let observed = client
+        .chat_observed(&reference, request, &limits, "token-limited")
+        .await;
+    assert!(
+        matches!(observed.result.unwrap_err().primary(), AgentError::Model(ModelError::Provider(detail))
+        if detail.category == ProviderErrorCategory::Authentication)
+    );
+    assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(model.recoveries.load(Ordering::SeqCst), 0);
+    assert_eq!(model.failures.load(Ordering::SeqCst), 1);
+    assert_eq!(tree.calls(), 1);
+    assert_eq!(tree.remaining_model_calls(), 1);
+    assert_eq!(observed.report.calls, 1);
+    assert_eq!(
+        observed.report.ledger_usage,
+        Usage {
+            input_tokens: input_cost,
+            output_tokens: 1
+        }
+    );
+    assert!(observed.report.provider_usage.is_none());
+    client.close().await;
+    for rerank in [false, true] {
+        let model = Arc::new(AuthOperation::default());
+        let tree = ContinuationBudget::new(2, 4, 0, 0, 0, 0).unwrap();
+        let mut embedding = EmbeddingRequest::texts(["hello"]);
+        embedding.choice = ModelChoice::model(ModelRef::new("test", "operation"));
+        let ranking = RerankRequest {
+            choice: embedding.choice.clone(),
+            query: "hello".into(),
+            documents: vec!["document".into()],
+            top_n: Some(1),
+        };
+        let input_cost = if rerank {
+            RerankModel::input_token_estimate(model.as_ref(), &ranking)
+        } else {
+            EmbeddingModel::input_token_estimate(model.as_ref(), &embedding)
+        };
+        let limits = RunLimits {
+            max_model_calls_per_step: Some(2),
+            max_total_tokens: input_cost + 1,
+            ..Default::default()
+        };
+        let mut options = ModelInvocationOptions::for_call(&limits).unwrap();
+        options
+            .run
+            .as_mut()
+            .unwrap()
+            .extensions
+            .insert(tree.clone());
+        let mut update = ModelRuntimeUpdate::new("typed-token-limited", 1, vec![]);
+        let reference = ModelRef::new("test", "operation");
+        if rerank {
+            update
+                .rerank
+                .push(RerankModelService::new(reference, model.clone()));
+        } else {
+            update
+                .embedding
+                .push(EmbeddingModelService::new(reference, model.clone()));
+        }
+        let client = ModelClient::new(update).unwrap().with_options(options);
+        let (result, report) = if rerank {
+            let observed = client.rerank_observed(ranking, &limits).await;
+            (observed.result.map(|_| ()), observed.report)
+        } else {
+            let observed = client.embed_observed(embedding, &limits).await;
+            (observed.result.map(|_| ()), observed.report)
+        };
+        assert!(
+            matches!(result.unwrap_err().primary(), AgentError::Model(ModelError::Provider(detail))
+            if detail.category == ProviderErrorCategory::Authentication),
+            "rerank={rerank}"
+        );
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(model.recoveries.load(Ordering::SeqCst), 0);
+        assert_eq!(model.failures.load(Ordering::SeqCst), 1);
+        assert_eq!(tree.calls(), 1);
+        assert_eq!(tree.remaining_model_calls(), 1);
+        assert_eq!(report.calls, 1);
+        // Embedding reserves no output: the remaining one token cannot admit
+        // another input. Rerank also consumes its one-token output reservation.
+        assert_eq!(
+            report.ledger_usage,
+            Usage {
+                input_tokens: input_cost,
+                output_tokens: u64::from(rerank)
+            }
+        );
+        assert!(report.provider_usage.is_none());
+        client.close().await;
+    }
 }

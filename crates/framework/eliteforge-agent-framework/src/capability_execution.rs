@@ -5,7 +5,6 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 struct Catalogs {
-    runtime: Arc<ModelRuntime>,
     stopped: CancellationToken,
     active: RwLock<()>,
 }
@@ -18,19 +17,90 @@ impl Drop for Catalogs {
 /// Executes typed operations with deterministic selection and bounded, cancellable dispatch.
 #[derive(Clone)]
 pub struct ModelClient {
+    pub(crate) runtime: Arc<ModelRuntime>,
     catalogs: Arc<Catalogs>,
-    options: ModelInvocationOptions,
+    pub(crate) options: ModelInvocationOptions,
+    pub(crate) admitted: bool,
+}
+impl Default for ModelClient {
+    fn default() -> Self {
+        Self::new(ModelRuntimeUpdate::new("host.models", 0, vec![]))
+            .expect("empty model runtime is valid")
+    }
 }
 impl ModelClient {
-    pub(crate) fn from_runtime(runtime: Arc<ModelRuntime>) -> Self {
+    pub fn from_runtime(runtime: Arc<ModelRuntime>) -> Self {
         Self {
+            runtime,
             catalogs: Arc::new(Catalogs {
-                runtime,
                 stopped: CancellationToken::new(),
                 active: RwLock::new(()),
             }),
             options: ModelInvocationOptions::default(),
+            admitted: false,
         }
+    }
+    pub fn new(update: ModelRuntimeUpdate) -> Result<Self, AgentError> {
+        Ok(Self::from_runtime(ModelRuntime::new(update)?))
+    }
+    /// A fixed binding view with the same cancellation and drain owner.
+    pub fn with_runtime(&self, runtime: Arc<ModelRuntime>) -> Self {
+        Self {
+            runtime,
+            catalogs: self.catalogs.clone(),
+            options: self.options.clone(),
+            admitted: self.admitted,
+        }
+    }
+    pub fn with_options(&self, options: ModelInvocationOptions) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            catalogs: self.catalogs.clone(),
+            options,
+            admitted: self.admitted,
+        }
+    }
+    pub async fn close_observed(&self) -> eliteforge_agent_plugin_core::ShutdownReport {
+        self.stop();
+        self.drain().await;
+        Default::default()
+    }
+    pub async fn close(&self) {
+        let _ = self.close_observed().await;
+    }
+    pub fn is_closed(&self) -> bool {
+        self.catalogs.stopped.is_cancelled()
+    }
+    pub(crate) async fn controlled<T>(
+        &self,
+        context: &RunContext,
+        future: impl Future<Output = Result<T, AgentError>>,
+    ) -> Result<T, AgentError> {
+        let _active = self.catalogs.active.read().await;
+        if self.catalogs.stopped.is_cancelled() {
+            return Err(AgentError::Closed);
+        }
+        context.check_cancelled()?;
+        let result = tokio::select! {
+            biased;
+            _ = self.catalogs.stopped.cancelled() => Err(AgentError::Closed),
+            _ = self.options.cancellation.cancelled() => Err(AgentError::Cancelled),
+            _ = context.cancelled() => Err(AgentError::Cancelled),
+            result = tokio::time::timeout_at(context.deadline, future) => {
+                result.unwrap_or_else(|_| Err(ModelError::Indeterminate("model invocation timed out".into()).into()))
+            }
+        };
+        let cleanup = context
+            .close_resources(context.limits().cleanup_timeout)
+            .await;
+        finish_with_cleanup(
+            result,
+            if cleanup.is_success() {
+                Ok(())
+            } else {
+                Err(AgentError::Run("model resource cleanup failed".into()))
+            },
+        )
     }
     fn check_inputs(&self, inputs: &[Content]) -> Result<(), AgentError> {
         if inputs.is_empty()
@@ -95,7 +165,11 @@ impl ModelClient {
         future: impl Future<Output = Result<T, ModelError>>,
         mut permit: Option<&mut crate::budget::UsagePermit>,
     ) -> Result<T, AgentError> {
-        let _active = self.catalogs.active.read().await;
+        let _active = if self.admitted {
+            None
+        } else {
+            Some(self.catalogs.active.read().await)
+        };
         let admission = (|| -> Result<(), AgentError> {
             if self.options.timeout.is_zero() {
                 return Err(invalid("model timeout must be positive"));
@@ -108,6 +182,13 @@ impl ModelClient {
             }
             if let Some(run) = &self.options.run {
                 run.check_cancelled()?;
+                if matches!(
+                    operation,
+                    ModelOperation::Embedding | ModelOperation::Rerank
+                ) && let Some(limit) = run.extensions.get::<ModelCallLimit>()
+                {
+                    limit.admit()?;
+                }
                 if matches!(
                     operation,
                     ModelOperation::Embedding | ModelOperation::Rerank
@@ -151,13 +232,9 @@ impl ModelClient {
         }
     }
     fn video_binding(&self, job: &VideoJob) -> Result<VideoGenerationModelService, AgentError> {
-        let binding = self
-            .catalogs
-            .runtime
-            .video_job_binding(job)
-            .ok_or_else(|| {
-                ModelError::Unavailable("video job binding is unavailable in this process".into())
-            })?;
+        let binding = self.runtime.video_job_binding(job).ok_or_else(|| {
+            ModelError::Unavailable("video job binding is unavailable in this process".into())
+        })?;
         if job.id.trim().is_empty() || binding.protocol != job.protocol {
             return Err(invalid(
                 "video job protocol does not match its model binding",
@@ -177,12 +254,14 @@ impl ModelOperations for ModelClient {
     }
     fn with_options(&self, options: ModelInvocationOptions) -> Arc<dyn ModelOperations> {
         Arc::new(Self {
+            runtime: self.runtime.clone(),
             catalogs: self.catalogs.clone(),
             options,
+            admitted: self.admitted,
         })
     }
     fn models(&self, operation: ModelOperation) -> Vec<ModelRef> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         match operation {
             ModelOperation::Embedding => snapshot.embedding.models().cloned().collect(),
             ModelOperation::Rerank => snapshot.rerank.models().cloned().collect(),
@@ -196,7 +275,7 @@ impl ModelOperations for ModelClient {
         }
     }
     async fn embed(&self, mut request: EmbeddingRequest) -> Result<EmbeddingResponse, AgentError> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         self.check_inputs(&request.inputs)?;
         if request.dimensions == Some(0) {
             return Err(invalid("embedding dimensions must be positive"));
@@ -271,7 +350,7 @@ impl ModelOperations for ModelClient {
         space: &EmbeddingSpace,
         mut request: EmbeddingRequest,
     ) -> Result<EmbeddingResponse, AgentError> {
-        if self.catalogs.runtime.snapshot().spaces.get(&space.model) != Some(space) {
+        if self.runtime.snapshot().spaces.get(&space.model) != Some(space) {
             return Err(invalid(
                 "query embedding space does not match registered model, revision, dimensions and preprocessing",
             ));
@@ -280,7 +359,7 @@ impl ModelOperations for ModelClient {
         self.embed(request).await
     }
     async fn rerank(&self, mut request: RerankRequest) -> Result<RerankResponse, AgentError> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         let mut inputs = request.documents.clone();
         inputs.push(request.query.clone());
         self.check_inputs(&inputs)?;
@@ -356,7 +435,7 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: ImageGenerationRequest,
     ) -> Result<ImageGenerationResponse, AgentError> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         let inputs = [Content::from(request.prompt.clone())];
         self.check_inputs(&inputs)?;
         if request.count == 0 || request.count as usize > self.options.max_batch_size {
@@ -389,7 +468,7 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: ImageGenerationRequest,
     ) -> Result<ImageJob, AgentError> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         let inputs = [Content::from(request.prompt.clone())];
         self.check_inputs(&inputs)?;
         if request.count == 0 || request.count as usize > self.options.max_batch_size {
@@ -411,19 +490,13 @@ impl ModelOperations for ModelClient {
             job.protocol = binding.protocol.clone();
         }
         job.binding_id = Some(RunId::new_v4());
-        self.catalogs
-            .runtime
-            .retain_image_job(&job, binding.clone());
+        self.runtime.retain_image_job(&job, binding.clone());
         Ok(job)
     }
     async fn query_image(&self, job: &ImageJob) -> Result<ImageJob, AgentError> {
-        let binding = self
-            .catalogs
-            .runtime
-            .image_job_binding(job)
-            .ok_or_else(|| {
-                ModelError::Unavailable("image job binding is unavailable in this process".into())
-            })?;
+        let binding = self.runtime.image_job_binding(job).ok_or_else(|| {
+            ModelError::Unavailable("image job binding is unavailable in this process".into())
+        })?;
         let mut next = self
             .dispatch(
                 ModelOperation::ImageGeneration,
@@ -438,13 +511,9 @@ impl ModelOperations for ModelClient {
         Ok(next)
     }
     async fn cancel_image(&self, job: &ImageJob) -> Result<(), AgentError> {
-        let binding = self
-            .catalogs
-            .runtime
-            .image_job_binding(job)
-            .ok_or_else(|| {
-                ModelError::Unavailable("image job binding is unavailable in this process".into())
-            })?;
+        let binding = self.runtime.image_job_binding(job).ok_or_else(|| {
+            ModelError::Unavailable("image job binding is unavailable in this process".into())
+        })?;
         if !binding.capabilities.cancellation {
             return Err(invalid("image binding does not support cancellation"));
         }
@@ -459,7 +528,7 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: VideoGenerationRequest,
     ) -> Result<VideoJob, AgentError> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         let inputs = [Content::from(request.prompt.clone())];
         self.check_inputs(&inputs)?;
         if request.seconds == 0 {
@@ -476,9 +545,7 @@ impl ModelOperations for ModelClient {
             .await?;
         validate_job(&job, &binding.model, &binding.protocol)?;
         job.binding_id = Some(RunId::new_v4());
-        self.catalogs
-            .runtime
-            .retain_video_job(&job, binding.clone());
+        self.runtime.retain_video_job(&job, binding.clone());
         Ok(job)
     }
     async fn query_video(&self, job: &VideoJob) -> Result<VideoJob, AgentError> {
@@ -513,7 +580,7 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: SpeechRecognitionRequest,
     ) -> Result<SpeechRecognitionResponse, AgentError> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         let inputs = [Content(vec![ContentBlock::Media {
             media: request.audio.clone(),
         }])];
@@ -548,7 +615,7 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: SpeechSynthesisRequest,
     ) -> Result<SpeechSynthesisResponse, AgentError> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         let inputs = [Content::from(request.text.clone())];
         self.check_inputs(&inputs)?;
         if request.voice.trim().is_empty() || request.format.trim().is_empty() {
@@ -574,7 +641,7 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: ContentDetectionRequest,
     ) -> Result<ContentDetectionResponse, AgentError> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         let inputs = [request.content.clone()];
         self.check_inputs(&inputs)?;
         let binding = snapshot.detection.select(&request.choice, &inputs)?;
@@ -597,7 +664,7 @@ impl ModelOperations for ModelClient {
         &self,
         mut request: RealtimeRequest,
     ) -> Result<Arc<dyn RealtimeSession>, AgentError> {
-        let snapshot = self.catalogs.runtime.snapshot();
+        let snapshot = self.runtime.snapshot();
         let binding = snapshot.realtime.select_modalities(
             &request.choice,
             &request.input,

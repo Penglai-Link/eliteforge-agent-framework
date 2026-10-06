@@ -81,6 +81,8 @@ impl fw::EmbeddingModel for HttpEmbeddingModel {
             })
             .collect::<Result<Vec<_>, fw::ModelError>>()?;
         Ok(fw::EmbeddingResponse {
+            provider_model: response.get("model").and_then(Value::as_str)
+                .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned),
             model: request
                 .choice
                 .model

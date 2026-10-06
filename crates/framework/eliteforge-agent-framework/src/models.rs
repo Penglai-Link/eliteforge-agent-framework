@@ -13,6 +13,8 @@ pub struct ModelInvoker {
     assembler: Arc<dyn ContextAssembler>,
     recovery: ModelRecoveryPolicy,
     refreshers: Vec<Arc<dyn ModelCatalogRefresh>>,
+    call_limit: Option<ModelCallLimit>,
+    control: Option<RunContext>,
 }
 impl ModelInvoker {
     pub fn new(
@@ -29,7 +31,51 @@ impl ModelInvoker {
             assembler: Arc::new(DefaultContextAssembler::default()),
             recovery: ModelRecoveryPolicy::default(),
             refreshers: Vec::new(),
+            call_limit: None,
+            control: None,
         })
+    }
+    pub fn with_call_limit(mut self, maximum: usize) -> Result<Self, AgentError> {
+        self.call_limit = Some(ModelCallLimit::new(maximum)?);
+        Ok(self)
+    }
+    pub fn with_control_context(mut self, context: RunContext) -> Self {
+        self.control = Some(context);
+        self
+    }
+    fn control_context(&self, supplied: &RunContext) -> RunContext {
+        let mut context = self.control.clone().unwrap_or_else(|| supplied.clone());
+        if let Some(limit) = &self.call_limit {
+            context.extensions.insert(limit.clone());
+        }
+        context
+    }
+    fn control_limits(&self, supplied: &RunLimits, context: &RunContext) -> RunLimits {
+        let mut limits = supplied.clone();
+        if self.control.is_some() {
+            let bound = context.limits();
+            limits.max_context_tokens = limits.max_context_tokens.min(bound.max_context_tokens);
+            limits.max_context_messages =
+                limits.max_context_messages.min(bound.max_context_messages);
+            limits.max_model_output_tokens = limits
+                .max_model_output_tokens
+                .min(bound.max_model_output_tokens);
+            limits.max_total_tokens = limits.max_total_tokens.min(bound.max_total_tokens);
+            limits.max_model_retries = limits.max_model_retries.min(bound.max_model_retries);
+            limits.max_overflow_recoveries = limits
+                .max_overflow_recoveries
+                .min(bound.max_overflow_recoveries);
+            limits.cleanup_timeout = limits.cleanup_timeout.min(bound.cleanup_timeout);
+            limits.model_timeout = limits.model_timeout.min(bound.model_timeout);
+            limits.max_model_calls_per_step = match (
+                limits.max_model_calls_per_step,
+                bound.max_model_calls_per_step,
+            ) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+        }
+        limits
     }
     pub fn with_runtime(mut self, runtime: Arc<ModelRuntime>) -> Self {
         self.runtime = Some(runtime);
@@ -74,6 +120,8 @@ impl ModelInvoker {
             refreshers: scope.refreshers.clone(),
             middleware: self.middleware.clone(),
             assembler: self.assembler.clone(),
+            call_limit: self.call_limit.clone(),
+            control: self.control.clone(),
         }
     }
 
@@ -164,10 +212,12 @@ impl ModelInvoker {
         limits: &RunLimits,
         context: &RunContext,
     ) -> Result<ChatResponse, AgentError> {
-        let scoped = self.scoped(context);
+        let context = self.control_context(context);
+        let limits = self.control_limits(limits, &context);
+        let scoped = self.scoped(&context);
         let snapshot = scoped.catalog_snapshot();
         scoped
-            .invoke_auxiliary_in_catalog(&snapshot, model, request, stage, limits, context)
+            .invoke_auxiliary_in_catalog(&snapshot, model, request, stage, &limits, &context)
             .await
     }
 
@@ -252,6 +302,12 @@ impl ModelInvoker {
             }
         };
         crate::middleware::validate_model_response(&mut response, &options)?;
+        if let Some(report) = context
+            .extensions
+            .get::<Arc<crate::model_observation::ModelReportState>>()
+        {
+            report.response(&response);
+        }
         if let Some(data) = &mut response.model_context {
             data.model = model.clone();
             data.protocol = catalog.protocol(model).expect("validated model").into();
@@ -272,8 +328,17 @@ impl ModelInvoker {
         memory: &mut dyn ConversationSession,
         context: &RunContext,
     ) -> Result<ChatResponse, AgentError> {
-        self.scoped(context)
-            .invoke_in_scope(call, memory, context)
+        let context = self.control_context(context);
+        let limits = self.control_limits(call.limits, &context);
+        self.scoped(&context)
+            .invoke_in_scope(
+                ModelCall {
+                    limits: &limits,
+                    ..call
+                },
+                memory,
+                &context,
+            )
             .await
     }
 
@@ -533,6 +598,12 @@ impl ModelInvoker {
             match response {
                 Ok(mut response) => {
                     crate::middleware::validate_model_response(&mut response, call.options)?;
+                    if let Some(report) = context
+                        .extensions
+                        .get::<Arc<crate::model_observation::ModelReportState>>()
+                    {
+                        report.response(&response);
+                    }
                     // Provider IDs need only be unique within one response.
                     // Fresh framework identities also isolate providers/middleware
                     // that return clones of a previously constructed response.
@@ -565,8 +636,54 @@ impl ModelInvoker {
                         && !authentication_recovered
                         && !stream.emitted.load(Ordering::Acquire) =>
                 {
-                    authentication_recovered = true;
                     let authentication_error = ModelError::Provider(error.clone());
+                    // Refreshing credentials has side effects. Do not refresh when
+                    // any authoritative admission ceiling forbids another dispatch.
+                    let no_capacity = self
+                        .call_limit
+                        .as_ref()
+                        .is_some_and(|limit| limit.remaining() == 0)
+                        || models
+                            .limit
+                            .is_some_and(|limit| models.used.load(Ordering::Acquire) >= limit)
+                        || context
+                            .extensions
+                            .get::<ModelCallLimit>()
+                            .is_some_and(|limit| limit.remaining() == 0)
+                        || context
+                            .extensions
+                            .get::<ContinuationBudget>()
+                            .is_some_and(|budget| budget.remaining_model_calls() == 0);
+                    let retry_request = ChatRequest {
+                        messages: attempted_messages.clone(),
+                        tools: call.tools.to_vec(),
+                        extensions: context.extensions.clone(),
+                        options: call.options.clone(),
+                    };
+                    let input = if no_capacity {
+                        None
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = context.cancelled() => return Err(AgentError::Cancelled),
+                            result = tokio::time::timeout(call.limits.model_timeout, estimator.request(&selected, &retry_request)) => result.ok().and_then(Result::ok),
+                        }
+                    };
+                    let token_capacity = input.is_some_and(|input| {
+                        context
+                            .usage
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .can_reserve(
+                                input.min(u64::MAX as usize) as u64,
+                                context.token_ceiling.min(call.limits.max_total_tokens),
+                            )
+                    });
+                    if no_capacity || !token_capacity {
+                        provider.on_failure(&context.extensions, &authentication_error);
+                        return Err(authentication_error.into());
+                    }
+                    authentication_recovered = true;
                     let refreshed = tokio::select! {
                         biased;
                         _ = context.cancelled() => return Err(AgentError::Cancelled),

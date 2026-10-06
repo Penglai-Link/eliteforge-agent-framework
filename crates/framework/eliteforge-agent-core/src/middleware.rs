@@ -249,6 +249,13 @@ impl ModelNext<'_> {
                 output_token_limit: output_tokens,
             };
             let options = request.options.clone();
+            if let Some(limit) = self.run.extensions.get::<crate::ModelCallLimit>()
+                && let Err(error) = limit.admit()
+            {
+                permit.release_unspent();
+                self.run.persist_budget().await?;
+                return Err(error);
+            }
             if let Some(budget) = self.run.extensions.get::<crate::ContinuationBudget>()
                 && let Err(error) = budget.admit_model_call()
             {

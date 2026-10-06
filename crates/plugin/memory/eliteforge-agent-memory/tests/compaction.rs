@@ -119,39 +119,34 @@ impl ModelWorkflow for Workflow {
         Ok(result.into_chat_response())
     }
 }
-fn job(provider: Provider, calls: usize) -> ChatModelJob {
-    ChatModelJob {
-        workflow: Some(Arc::new(Workflow {
-            retry: provider.mode == "retry_usage",
-            options: CompressionOptions {
-                max_input_tokens: 6_000,
-                max_summary_bytes: 128,
-                max_model_calls: calls,
-            },
-        })),
-        connection: ModelConnection::new(
+fn fixture(provider: Provider, calls: usize) -> (ModelClient, Arc<dyn ModelWorkflow>, RunLimits) {
+    let workflow = Arc::new(Workflow {
+        retry: provider.mode == "retry_usage",
+        options: CompressionOptions {
+            max_input_tokens: 6_000,
+            max_summary_bytes: 128,
+            max_model_calls: calls,
+        },
+    });
+    let client = ModelClient::new(ModelRuntimeUpdate::new(
+        "memory",
+        1,
+        vec![ModelConnection::new(
             "memory",
             Arc::new(provider),
             vec![ModelDescriptor::new("summary")],
-        ),
-        model: ModelRef::new("memory", "summary"),
-        request: ChatRequest {
-            messages: vec![],
-            tools: vec![],
-            extensions: Default::default(),
-            options: Default::default(),
-        },
-        limits: RunLimits {
-            max_model_retries: 0,
-            max_context_tokens: 8_000,
-            max_total_tokens: 80_000,
-            max_model_output_tokens: 1_024,
-            ..Default::default()
-        },
-        stage: "memory.compaction".into(),
-        max_calls: 16,
-        repair: None,
-    }
+        )],
+    ))
+    .unwrap();
+    let limits = RunLimits {
+        max_model_retries: 0,
+        max_context_tokens: 8_000,
+        max_total_tokens: 80_000,
+        max_model_output_tokens: 1_024,
+        max_model_calls_per_step: Some(16),
+        ..Default::default()
+    };
+    (client, workflow, limits)
 }
 #[tokio::test]
 async fn compaction_segments_under_sdk_model_budget_and_preserves_source() {
@@ -159,8 +154,17 @@ async fn compaction_segments_under_sdk_model_budget_and_preserves_source() {
         mode: "ok",
         requests: Default::default(),
     };
-    let client = ModelJobClient::new().await.unwrap();
-    let response = client.execute(job(provider.clone(), 16)).await.unwrap();
+    let (client, workflow, limits) = fixture(provider.clone(), 16);
+    let response = client
+        .workflow_observed(
+            &ModelRef::new("memory", "summary"),
+            workflow,
+            &limits,
+            "memory.compaction",
+        )
+        .await
+        .into_result()
+        .unwrap();
     assert_eq!(response.content.text(), "retained historical facts");
     let calls = provider.requests.lock().unwrap().len() as u64;
     assert!(calls >= 2);
@@ -182,8 +186,17 @@ async fn compaction_unknown_or_mixed_provider_usage_keeps_charge_without_actual_
             mode,
             requests: Default::default(),
         };
-        let client = ModelJobClient::new().await.unwrap();
-        let response = client.execute(job(provider.clone(), 16)).await.unwrap();
+        let (client, workflow, limits) = fixture(provider.clone(), 16);
+        let response = client
+            .workflow_observed(
+                &ModelRef::new("memory", "summary"),
+                workflow,
+                &limits,
+                "memory.compaction",
+            )
+            .await
+            .into_result()
+            .unwrap();
         let result = MemoryCompactionResult::from_chat_response(response).unwrap();
         let calls = provider.requests.lock().unwrap().len() as u64;
         assert!(calls >= 2, "test must cover segmented calls");
@@ -222,11 +235,18 @@ async fn compaction_invalid_schema_tools_oversize_failure_and_call_limit_fail_cl
             mode,
             requests: Default::default(),
         };
-        let client = ModelJobClient::new().await.unwrap();
+        let (client, workflow, limits) =
+            fixture(provider.clone(), if mode == "ok" { 1 } else { 16 });
         assert!(
             client
-                .execute(job(provider.clone(), if mode == "ok" { 1 } else { 16 }))
+                .workflow_observed(
+                    &ModelRef::new("memory", "summary"),
+                    workflow,
+                    &limits,
+                    "memory.compaction"
+                )
                 .await
+                .result
                 .is_err(),
             "mode {mode}"
         );
@@ -240,15 +260,24 @@ async fn compaction_cancellation_timeout_and_close_drain_inflight_calls() {
             mode: "delay",
             requests: Default::default(),
         };
-        let client = ModelJobClient::new().await.unwrap();
-        let mut input = job(provider.clone(), 16);
+        let (client, workflow, mut limits) = fixture(provider.clone(), 16);
         if mode == 1 {
-            input.limits.model_timeout = Duration::from_millis(40);
+            limits.model_timeout = Duration::from_millis(40);
         }
-        let mut handle = client.start(input).unwrap();
-        let control = handle.control().unwrap();
-        let waiting_client = client.clone();
-        let waiting = tokio::spawn(async move { waiting_client.wait(&mut handle).await });
+        let options = ModelInvocationOptions::for_call(&limits).unwrap();
+        let cancel = options.cancellation.clone();
+        let waiting_client = client.with_options(options);
+        let waiting = tokio::spawn(async move {
+            waiting_client
+                .workflow_observed(
+                    &ModelRef::new("memory", "summary"),
+                    workflow,
+                    &limits,
+                    "memory.compaction",
+                )
+                .await
+                .into_result()
+        });
         tokio::time::timeout(Duration::from_secs(3), async {
             while provider.requests.lock().unwrap().is_empty() {
                 tokio::task::yield_now().await;
@@ -257,7 +286,7 @@ async fn compaction_cancellation_timeout_and_close_drain_inflight_calls() {
         .await
         .unwrap();
         if mode == 0 {
-            control.cancel().unwrap();
+            cancel.cancel();
         }
         if mode == 2 {
             client.close().await;
@@ -280,11 +309,19 @@ async fn compaction_internal_retry_unknown_attempt_marks_successful_usage_as_inc
         mode: "retry_usage",
         requests: Default::default(),
     };
-    let client = ModelJobClient::new().await.unwrap();
-    let mut input = job(provider.clone(), 16);
-    input.limits.max_model_retries = 1;
-    let result =
-        MemoryCompactionResult::from_chat_response(client.execute(input).await.unwrap()).unwrap();
+    let (client, workflow, mut limits) = fixture(provider.clone(), 16);
+    limits.max_model_retries = 1;
+    let response = client
+        .workflow_observed(
+            &ModelRef::new("memory", "summary"),
+            workflow,
+            &limits,
+            "memory.compaction",
+        )
+        .await
+        .into_result()
+        .unwrap();
+    let result = MemoryCompactionResult::from_chat_response(response).unwrap();
     let attempts = provider.requests.lock().unwrap().len() as u64;
     assert!(attempts >= 3);
     assert_eq!(result.summary, "retained historical facts");
@@ -301,9 +338,18 @@ async fn segmented_provider_cache_metrics_aggregate_and_missing_field_stays_unkn
             mode,
             requests: Default::default(),
         };
-        let client = ModelJobClient::new().await.unwrap();
+        let (client, workflow, limits) = fixture(provider.clone(), 16);
         let result = MemoryCompactionResult::from_chat_response(
-            client.execute(job(provider.clone(), 16)).await.unwrap(),
+            client
+                .workflow_observed(
+                    &ModelRef::new("memory", "summary"),
+                    workflow,
+                    &limits,
+                    "memory.compaction",
+                )
+                .await
+                .into_result()
+                .unwrap(),
         )
         .unwrap();
         let calls = provider.requests.lock().unwrap().len() as u64;

@@ -118,49 +118,53 @@ impl ModelWorkflow for Workflow {
         })
     }
 }
-fn job(
+fn fixture(
     assembler: DefaultContextAssembler,
     provider: Provider,
     instructions: Vec<Message>,
     dispatch: bool,
-) -> ChatModelJob {
-    ChatModelJob {
-        workflow: Some(Arc::new(Workflow {
-            assembler: Arc::new(assembler),
-            instructions,
-            history: vec![Message::user("question")],
-            dispatch,
-        })),
-        connection: ModelConnection::new(
+) -> (ModelClient, Arc<dyn ModelWorkflow>, RunLimits) {
+    let workflow = Arc::new(Workflow {
+        assembler: Arc::new(assembler),
+        instructions,
+        history: vec![Message::user("question")],
+        dispatch,
+    });
+    let client = ModelClient::new(ModelRuntimeUpdate::new(
+        "memory",
+        1,
+        vec![ModelConnection::new(
             "memory",
             Arc::new(provider),
             vec![
                 ModelDescriptor::new("main"),
                 ModelDescriptor::new("summary"),
             ],
-        ),
-        model: ModelRef::new("memory", "main"),
-        request: ChatRequest {
-            messages: vec![],
-            tools: vec![],
-            options: Default::default(),
-            extensions: Default::default(),
-        },
-        limits: RunLimits {
-            max_model_retries: 0,
-            max_context_tokens: 16000,
-            max_model_output_tokens: 512,
-            max_total_tokens: 100000,
-            ..Default::default()
-        },
-        stage: "provider-test".into(),
-        max_calls: 16,
-        repair: None,
-    }
+        )],
+    ))
+    .unwrap();
+    let limits = RunLimits {
+        max_model_retries: 0,
+        max_context_tokens: 16000,
+        max_model_output_tokens: 512,
+        max_total_tokens: 100000,
+        max_model_calls_per_step: Some(16),
+        ..Default::default()
+    };
+    (client, workflow, limits)
 }
-async fn execute(input: ChatModelJob) -> Result<ContextWindow, AgentError> {
-    let client = ModelJobClient::new().await.unwrap();
-    let result = client.execute(input).await;
+async fn execute(
+    (client, workflow, limits): (ModelClient, Arc<dyn ModelWorkflow>, RunLimits),
+) -> Result<ContextWindow, AgentError> {
+    let result = client
+        .workflow_observed(
+            &ModelRef::new("memory", "main"),
+            workflow,
+            &limits,
+            "provider-test",
+        )
+        .await
+        .into_result();
     client.close().await;
     result.map(|response| serde_json::from_value(response.structured.unwrap()).unwrap())
 }
@@ -209,7 +213,7 @@ async fn actual_layout_changes_wire_order_and_independent_reports_without_duplic
         .unwrap()
         .with_policy(Arc::new(BorrowUnusedMemoryBudget));
         let provider = Provider::default();
-        let window = execute(job(
+        let window = execute(fixture(
             assembler,
             provider.clone(),
             vec![Message::system("trusted prefix")],
@@ -336,7 +340,7 @@ async fn block_and_global_pressure_coordinate_once_and_never_call_instruction_st
             .unwrap()
             .with_global_compression(Some(if global { 1000 } else { 8000 }), false)
             .unwrap();
-        let window = execute(job(
+        let window = execute(fixture(
             assembler,
             Provider::default(),
             vec![Message::system("trusted prefix")],
@@ -387,7 +391,7 @@ async fn same_or_larger_token_rewrites_are_no_gain_and_keep_original_stable_data
             )],
         )
         .unwrap();
-        let window = execute(job(assembler, Provider::default(), vec![], false))
+        let window = execute(fixture(assembler, Provider::default(), vec![], false))
             .await
             .unwrap();
         assert_eq!(window.messages[0], Message::user("X".repeat(100)));
@@ -425,7 +429,7 @@ async fn custom_instruction_provider_is_immutable_or_rejects_compression_before_
             continue;
         }
         let provider = Provider::default();
-        let result = execute(job(assembler.unwrap(), provider.clone(), vec![], true)).await;
+        let result = execute(fixture(assembler.unwrap(), provider.clone(), vec![], true)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         {
             assert_eq!(
@@ -476,7 +480,7 @@ async fn final_source_aware_policy_cannot_shrink_a_reported_quota_without_reject
     .unwrap()
     .with_policy(Arc::new(ShrinkFinal(AtomicUsize::new(0))));
     let provider = Provider::default();
-    let error = execute(job(assembler, provider.clone(), vec![], true))
+    let error = execute(fixture(assembler, provider.clone(), vec![], true))
         .await
         .err()
         .expect("expected context failure");
@@ -510,12 +514,24 @@ async fn slow_budget_policy_obeys_cancellation_and_run_deadline_without_provider
         let assembler =
             DefaultContextAssembler::default().with_policy(Arc::new(SlowPolicy(started.clone())));
         let provider = Provider::default();
-        let mut input = job(assembler, provider.clone(), vec![], true);
+        let (client, workflow, mut limits) = fixture(assembler, provider.clone(), vec![], true);
         if !cancel {
-            input.limits.run_timeout = Duration::from_millis(50);
+            limits.run_timeout = Duration::from_millis(50);
         }
-        let client = ModelJobClient::new().await.unwrap();
-        let mut handle = client.start(input).unwrap();
+        let options = ModelInvocationOptions::for_call(&limits).unwrap();
+        let cancel_token = options.cancellation.clone();
+        let waiting_client = client.with_options(options);
+        let waiting = tokio::spawn(async move {
+            waiting_client
+                .workflow_observed(
+                    &ModelRef::new("memory", "main"),
+                    workflow,
+                    &limits,
+                    "provider-test",
+                )
+                .await
+                .into_result()
+        });
         tokio::time::timeout(Duration::from_secs(2), async {
             while started.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
@@ -524,11 +540,12 @@ async fn slow_budget_policy_obeys_cancellation_and_run_deadline_without_provider
         .await
         .unwrap();
         if cancel {
-            handle.control().unwrap().cancel().unwrap();
+            cancel_token.cancel();
         }
         assert!(
-            tokio::time::timeout(Duration::from_secs(2), client.wait(&mut handle))
+            tokio::time::timeout(Duration::from_secs(2), waiting)
                 .await
+                .unwrap()
                 .unwrap()
                 .is_err()
         );
@@ -603,7 +620,7 @@ async fn semantic_summary_reuses_cache_appends_only_new_records_and_preserves_pr
     let older = "ORIGINAL SOURCE A ".repeat(100);
     for _ in 0..2 {
         let data = source("data", vec![older.clone()], 1);
-        execute(job(
+        execute(fixture(
             semantic_assembler(data, store.clone(), audit.clone(), None),
             provider.clone(),
             vec![Message::system("stable instructions")],
@@ -621,7 +638,7 @@ async fn semantic_summary_reuses_cache_appends_only_new_records_and_preserves_pr
         .count();
     assert_eq!(initial, 1);
     let data = source("data", vec![older, "APPENDED SOURCE B ".repeat(100)], 2);
-    execute(job(
+    execute(fixture(
         semantic_assembler(data, store.clone(), audit.clone(), None),
         provider.clone(),
         vec![Message::system("stable instructions")],
@@ -698,7 +715,7 @@ async fn late_semantic_result_is_rejected_after_live_source_revision_changes() {
     };
     let audit = Arc::new(Audit::default());
     let data = source("data", vec!["guarded facts ".repeat(120)], 1);
-    let error = execute(job(
+    let error = execute(fixture(
         semantic_assembler(
             data,
             store.clone(),
@@ -730,13 +747,13 @@ async fn late_semantic_result_is_rejected_after_live_source_revision_changes() {
 #[tokio::test]
 async fn history_pressure_uses_borrowed_capacity_and_minimum_gain_preserves_source() {
     let active = Arc::new(AtomicUsize::new(0));
-    let mut input = job(
+    let (client, _, limits) = fixture(
         DefaultContextAssembler::default(),
         Provider::default(),
         vec![],
         false,
     );
-    input.workflow = Some(Arc::new(Workflow {
+    let workflow: Arc<dyn ModelWorkflow> = Arc::new(Workflow {
         assembler: Arc::new(
             DefaultContextAssembler::new(
                 ContextLayout(vec![
@@ -765,8 +782,8 @@ async fn history_pressure_uses_borrowed_capacity_and_minimum_gain_preserves_sour
             Message::user("question"),
         ],
         dispatch: false,
-    }));
-    let window = execute(input).await.unwrap();
+    });
+    let window = execute((client, workflow, limits)).await.unwrap();
     assert_eq!(active.load(Ordering::SeqCst), 1);
     assert_eq!(
         window.report.blocks[2].compression_trigger,
@@ -792,7 +809,7 @@ async fn history_pressure_uses_borrowed_capacity_and_minimum_gain_preserves_sour
         )],
     )
     .unwrap();
-    let window = execute(job(assembler, Provider::default(), vec![], false))
+    let window = execute(fixture(assembler, Provider::default(), vec![], false))
         .await
         .unwrap();
     assert_eq!(window.messages[0], Message::user("X".repeat(100)));
@@ -851,17 +868,29 @@ async fn cancellation_and_deadline_drop_pending_summary_cas_and_close_sqlite() {
         });
         let data = source("data", vec!["source for cancelled summary ".repeat(100)], 1);
         let provider = Provider::default();
-        let mut input = job(
+        let (client, workflow, mut limits) = fixture(
             semantic_assembler(data, store.clone(), Arc::new(Audit::default()), None),
             provider.clone(),
             vec![],
             true,
         );
         if !cancel {
-            input.limits.run_timeout = Duration::from_millis(100);
+            limits.run_timeout = Duration::from_millis(100);
         }
-        let client = ModelJobClient::new().await.unwrap();
-        let mut handle = client.start(input).unwrap();
+        let options = ModelInvocationOptions::for_call(&limits).unwrap();
+        let cancel_token = options.cancellation.clone();
+        let waiting_client = client.with_options(options);
+        let waiting = tokio::spawn(async move {
+            waiting_client
+                .workflow_observed(
+                    &ModelRef::new("memory", "main"),
+                    workflow,
+                    &limits,
+                    "provider-test",
+                )
+                .await
+                .into_result()
+        });
         tokio::time::timeout(Duration::from_secs(2), async {
             while store.entered.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
@@ -870,11 +899,12 @@ async fn cancellation_and_deadline_drop_pending_summary_cas_and_close_sqlite() {
         .await
         .unwrap();
         if cancel {
-            handle.control().unwrap().cancel().unwrap();
+            cancel_token.cancel();
         }
         assert!(
-            tokio::time::timeout(Duration::from_secs(2), client.wait(&mut handle))
+            tokio::time::timeout(Duration::from_secs(2), waiting)
                 .await
+                .unwrap()
                 .unwrap()
                 .is_err()
         );
@@ -898,7 +928,7 @@ async fn persistent_summary_reopens_and_source_correction_or_scope_change_invali
             .await
             .unwrap(),
     );
-    execute(job(
+    execute(fixture(
         semantic_assembler(
             source("data", vec!["original scoped facts ".repeat(100)], 1),
             store.clone(),
@@ -917,7 +947,7 @@ async fn persistent_summary_reopens_and_source_correction_or_scope_change_invali
             .await
             .unwrap(),
     );
-    execute(job(
+    execute(fixture(
         semantic_assembler(
             source("data", vec!["original scoped facts ".repeat(100)], 1),
             store.clone(),
@@ -931,7 +961,7 @@ async fn persistent_summary_reopens_and_source_correction_or_scope_change_invali
     .await
     .unwrap();
     assert_eq!(provider.requests.lock().unwrap().len(), 1);
-    execute(job(
+    execute(fixture(
         semantic_assembler(
             source("data", vec!["corrected scoped facts ".repeat(100)], 2),
             store.clone(),
@@ -975,7 +1005,7 @@ async fn persistent_summary_reopens_and_source_correction_or_scope_change_invali
     .with_policy(Arc::new(BorrowUnusedMemoryBudget))
     .with_global_compression(Some(8000), true)
     .unwrap();
-    execute(job(assembler, provider.clone(), vec![], false))
+    execute(fixture(assembler, provider.clone(), vec![], false))
         .await
         .unwrap();
     assert_eq!(provider.requests.lock().unwrap().len(), 3);

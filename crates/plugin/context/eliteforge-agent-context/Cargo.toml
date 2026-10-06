@@ -14,6 +14,7 @@ tokio-util.workspace = true
 uuid = { version = "1", features = ["v4", "serde"] }
 base64 = "0.22"
 sha2 = "0.10"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 [dev-dependencies]
 eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
 eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }

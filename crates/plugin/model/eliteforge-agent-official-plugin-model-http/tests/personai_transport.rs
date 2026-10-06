@@ -112,6 +112,12 @@ async fn personai_encrypted_model_transport_preserves_product_header_and_provide
         ProviderErrorCategory::Unavailable,
     )
     .await;
+    check_personai_error(
+        404,
+        r#"{"message":"device_unbound / 设备已解绑","error":{"type":"device_unbound"}}"#,
+        ProviderErrorCategory::Unavailable,
+    )
+    .await;
     check_personai_error(307, "redirect", ProviderErrorCategory::Other).await;
     check_personai_error(308, "redirect", ProviderErrorCategory::Other).await;
 }
