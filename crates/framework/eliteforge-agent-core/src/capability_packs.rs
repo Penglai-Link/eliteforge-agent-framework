@@ -279,7 +279,14 @@ pub trait CapabilityPack: Send + Sync {
         }
     }
 
-    /// Bind an external selection to the stable Agent scope before assembly.
+    /// Bind package resources to the shared Framework environment.
+    /// The compatibility hook supports existing external pack implementations.
+    fn for_framework_scope(&self, scope: &str) -> Option<Arc<dyn CapabilityPack>> {
+        self.for_agent_scope(scope)
+    }
+
+    /// Compatibility hook for private, single-Agent Framework environments.
+    /// New packs should implement `for_framework_scope`.
     fn for_agent_scope(&self, _scope: &str) -> Option<Arc<dyn CapabilityPack>> {
         None
     }
@@ -327,7 +334,7 @@ pub trait CapabilityPack: Send + Sync {
 /// Small, allocation-free-to-use builder for ordinary application packs.
 ///
 /// The builder is itself a [`CapabilityPack`], so it can be passed directly to
-/// `AgentBuilder::capability_pack`.  [`Self::build`] is available when an
+/// `FrameworkBuilder::capability_pack`.  [`Self::build`] is available when an
 /// explicit finalizer reads better at a call site.
 pub struct CapabilityPackBuilder<C> {
     id: String,

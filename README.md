@@ -6,14 +6,17 @@ Framework 负责装配、执行和生命周期管理。能力包提供模型、�
 能力包可携带 Skills、MCP、新插件、已有插件的扩展、工具等：
 
 ```rust
-use eliteforge_agent_framework::AgentBuilder;
+use eliteforge_agent_framework::{Framework, AgentSelection};
 use eliteforge_agent_official_capability_pack::EliteForgeOfficialCapabilityPack;
 
 // 由宿主预先创建权限受控的 agent-artifacts 目录。
-let agent = AgentBuilder::new()
+let framework = Framework::builder()
     .capability_pack(EliteForgeOfficialCapabilityPack::new("agent.sqlite", "agent-artifacts"))
     .build().await?;
+let agent = framework.agent(AgentSelection::default()).build().await?;
 ```
+
+插件全部属于 Framework。存储在同一 Framework 内唯一、自动共享；工具和 Skills 默认不授权，由 Agent 显式选择。关闭 Agent 只停止自己的执行，关闭 Framework 才释放插件。完整规则和多 Agent 示例见[Framework 共享装配](docs/Framework共享装配.md)。
 
 Rust 能力包只要编译进宿主，都是在进程内装配。
 运行后可以额外安装能力包。安装包声明 `backend` 且包含扩展实现、插件或页面时，会启动独立进程，通过 RPC 与 Framework 交互。
@@ -22,14 +25,16 @@ Rust 能力包只要编译进宿主，都是在进程内装配。
 
 ```mermaid
 flowchart LR
-    Application[Agent原生应用] --> Builder[AgentBuilder]
-    Builder --> Agent[Agent]
+    Application[应用] --> Framework[Framework 加载能力包和插件]
+    Framework --> Registry[共享抽象服务与可选能力]
+    Registry --> Agent[Agent 选择 Loop、工具和策略]
     Agent --> Loop[ReAct / Workflow / DAG / External Agent]
     Loop --> Model[模型]
     Loop --> Context[上下文]
     Loop --> Tool[工具与 MCP]
-    Loop --> Store[本地存储 / 会话 / 状态]
-    Agent --> OTel[OpenTelemetry]
+    Loop --> Store[Core 存储抽象]
+    Registry --> Store
+    Framework --> OTel[OpenTelemetry]
 ```
 
 ## 快速上手
@@ -137,7 +142,7 @@ crates/
 | `eliteforge-agent-capability-macros` | 编译时生成能力与扩展点注册代码，嵌入 Skills 资源 |
 | `eliteforge-agent-capability-runtime` | 安装包管理、独立后端进程、RPC、页面会话和后端 SDK |
 | `eliteforge-agent-capability-dev-host` | 开发时主动运行的调试宿主、示例后端和 MCP 服务；应用使用 Framework 无需启动它 |
-| `eliteforge-agent-official-capability-pack` | 官方插件组合，一次配置到 Agent |
+| `eliteforge-agent-official-capability-pack` | 官方插件组合，一次配置到 Framework |
 | `eliteforge-agent-official-plugin-*` | Genai、本地存储、MCP、AG-UI、OTel 等官方实现 |
 
 ## 文档

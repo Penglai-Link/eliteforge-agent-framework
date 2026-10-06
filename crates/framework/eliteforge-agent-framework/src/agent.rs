@@ -46,11 +46,11 @@ impl CapabilityPack for BoundCapabilityPack {
     fn skill_sources(&self) -> Vec<CapabilitySkillSource> {
         self.original.skill_sources()
     }
-    fn for_agent_scope(&self, scope: &str) -> Option<Arc<dyn CapabilityPack>> {
+    fn for_framework_scope(&self, scope: &str) -> Option<Arc<dyn CapabilityPack>> {
         Some(Arc::new(Self {
             original: self
                 .original
-                .for_agent_scope(scope)
+                .for_framework_scope(scope)
                 .unwrap_or_else(|| self.original.clone()),
             included: self.included.clone(),
         }))
@@ -72,6 +72,8 @@ impl CapabilityPack for BoundCapabilityPack {
     }
 }
 
+/// Builds an Agent selection in a shared Framework. `new()` and plugin methods
+/// remain a compatibility entry for a private, single-Agent Framework.
 #[derive(Clone)]
 pub struct AgentBuilder {
     plugins: Vec<Arc<dyn Plugin>>,
@@ -80,6 +82,8 @@ pub struct AgentBuilder {
     capability_packs: Vec<Arc<dyn CapabilityPack>>,
     capability_skills_root: Option<PathBuf>,
     default_models: bool,
+    framework: Option<Framework>,
+    selection: AgentSelection,
 }
 impl Default for AgentBuilder {
     fn default() -> Self {
@@ -90,6 +94,8 @@ impl Default for AgentBuilder {
             capability_packs: Vec::new(),
             capability_skills_root: None,
             default_models: true,
+            framework: None,
+            selection: AgentSelection::default(),
         }
     }
 }
@@ -111,7 +117,8 @@ impl AgentBuilder {
         self
     }
 
-    /// Select a configured capability pack for this AgentGeneration's dependency graph.
+    /// Compatibility configuration for a private Framework. Shared environments
+    /// load packages through `FrameworkBuilder::capability_pack`.
     pub fn capability_pack(mut self, pack: impl CapabilityPack + 'static) -> Self {
         self.capability_packs.push(Arc::new(pack));
         self
@@ -142,7 +149,9 @@ impl AgentBuilder {
             if let Some(bound) = cache.get(pack.id()) {
                 return bound.clone();
             }
-            let original = pack.for_agent_scope(scope).unwrap_or_else(|| pack.clone());
+            let original = pack
+                .for_framework_scope(scope)
+                .unwrap_or_else(|| pack.clone());
             let included = original
                 .included_packs()
                 .iter()
@@ -163,11 +172,47 @@ impl AgentBuilder {
         Ok(())
     }
     pub async fn build(mut self) -> Result<Agent, AgentError> {
+        if let Some(framework) = self.framework.clone() {
+            self.validate_shared()?;
+            return framework.build_agent(self).await;
+        }
         self.bind_scope(RunId::new_v4().to_string())?;
         self.preflight()?;
         let blueprint = self.clone();
         let generation = self.build_generation().await?;
         Ok(Agent::from_generation(generation, blueprint))
+    }
+    pub(crate) fn in_framework(framework: Framework, selection: AgentSelection) -> Self {
+        Self {
+            framework: Some(framework),
+            selection,
+            ..Self::default()
+        }
+    }
+    fn validate_shared(&self) -> Result<(), AgentError> {
+        if !self.plugins.is_empty()
+            || !self.factories.is_empty()
+            || !self.capability_packs.is_empty()
+            || self.capability_skills_root.is_some()
+        {
+            return Err(AgentError::InvalidConfiguration("install plugins and capability packs on FrameworkBuilder; Agent only selects capabilities".into()));
+        }
+        Ok(())
+    }
+    pub(crate) async fn assemble_shared(self) -> Result<Agent, AgentError> {
+        self.validate_shared()?;
+        let blueprint = self.clone();
+        let generation = self.build_generation().await?;
+        Ok(Agent::from_generation(generation, blueprint))
+    }
+    pub(crate) fn installed_packs(&self) -> Result<Vec<Arc<dyn CapabilityPack>>, AgentError> {
+        Ok(selected_pack_closure(&self.capability_packs)?
+            .into_values()
+            .collect())
+    }
+    pub(crate) fn prepare_framework(&mut self) -> Result<(), AgentError> {
+        self.bind_scope(RunId::new_v4().to_string())?;
+        self.preflight()
     }
     fn all_explicit_plugins(&self) -> Result<Vec<Arc<dyn Plugin>>, AgentError> {
         let mut plugins = self.plugins.clone();
@@ -202,75 +247,39 @@ impl AgentBuilder {
         self.build_generation_reusing(None).await
     }
     async fn build_generation_reusing(
-        mut self,
+        self,
         retained: Option<&PluginContainer>,
     ) -> Result<AgentGeneration, AgentError> {
-        self.plugins
-            .extend(self.factories.iter().map(ConfiguredPluginFactory::plugin));
-        for pack in selected_pack_closure(&self.capability_packs)?.values() {
-            self.plugins.extend(pack.plugins());
+        let shared = self.framework.clone();
+        let mut container = if shared.is_none() {
+            Some(self.clone().install_plugins(retained).await?)
+        } else {
+            None
+        };
+        let registry = match &shared {
+            Some(framework) => framework.registry()?,
+            None => container
+                .as_ref()
+                .expect("private environment")
+                .services()
+                .clone(),
+        };
+        if shared.is_some() {
+            self.selection.validate_choices(&registry)?;
         }
-        let skill_sources = selected_capability_skill_sources(&self.capability_packs)?;
-        let capability_skill_provider =
-            selected_capability_requires_skills_runtime(&self.capability_packs)?;
-        let capability_skills_runtime =
-            selected_capability_provides_skills_runtime(&self.capability_packs)?;
-        if !skill_sources.is_empty() || capability_skill_provider {
-            let has_skills_runtime = self
-                .plugins
-                .iter()
-                .any(|plugin| plugin.id() == "skills.default");
-            for (index, source) in skill_sources.into_iter().enumerate() {
-                self.plugins.push(Arc::new(
-                    eliteforge_agent_official_plugin_skills::CapabilitySkillsSourcePlugin::new(
-                        format!("builtin.capability-skills.{}.{}", source.pack_id, index),
-                        source.pack_id,
-                        source.source,
-                        self.capability_skills_root.clone(),
-                    ),
-                ));
+        let registry = match self.selection.bind(&registry) {
+            Ok(registry) => registry,
+            Err(error) => {
+                if let Some(container) = &mut container {
+                    container
+                        .close_async(std::time::Duration::from_secs(5))
+                        .await;
+                }
+                return Err(error);
             }
-            if !has_skills_runtime && !capability_skills_runtime {
-                self.plugins.push(Arc::new(
-                    eliteforge_agent_official_plugin_skills::SkillsPlugin::sources_only(),
-                ));
-            }
-        }
-        let mut occupied_plugin_ids = HashSet::with_capacity(self.plugins.len() + 1);
-        for (index, plugin) in self.plugins.iter().enumerate() {
-            let id = plugin.id().to_owned();
-            if id.trim().is_empty() {
-                return Err(PluginError::EmptyPluginId { index }.into());
-            }
-            if !occupied_plugin_ids.insert(id.clone()) {
-                return Err(PluginError::DuplicatePluginId { id }.into());
-            }
-        }
-        // DefaultsPlugin joins the same graph below. Its ID must be reserved
-        // before capability factories run, but cannot satisfy a capability
-        // dependency because DefaultsPlugin is ordered after all capabilities.
-        let defaults_plugin_id = "builtin.framework-defaults".to_owned();
-        if occupied_plugin_ids.contains(&defaults_plugin_id) {
-            return Err(PluginError::DuplicatePluginId {
-                id: defaults_plugin_id,
-            }
-            .into());
-        }
-        let reserved_plugin_ids = HashSet::from([defaults_plugin_id]);
-        let capability_plugins = resolve_capability_packs_with_plugins(
-            &self.capability_packs,
-            &self.plugins,
-            &reserved_plugin_ids,
-        )?;
-        self.plugins.extend(capability_plugins);
-        let after = self.plugins.iter().map(|p| p.id().to_owned()).collect();
-        self.plugins.push(Arc::new(crate::plugins::DefaultsPlugin {
-            after,
-            default_models: self.default_models,
-        }));
-        let mut container = PluginContainer::build_reusing(self.plugins, retained).await?;
+        };
         let (agent_loop, mut services, sinks, outputs) = match (|| -> Result<_, AgentError> {
-            let registry = container.services();
+            let registry = &registry;
             let agent_loop = registry
                 .get::<LoopService>()
                 .ok_or(AgentError::MissingService("AgentLoop"))?
@@ -282,6 +291,9 @@ impl AgentBuilder {
                 .map(|service| service.0.clone())
                 .collect();
             let model_runtime = ModelRuntime::from_registry(registry)?;
+            if let Some(model) = &self.selection.model {
+                require_model(&model_runtime.snapshot().chat, model)?;
+            }
             let strategy = registry
                 .get::<ModelStrategyService>()
                 .map(|service| service.0.clone())
@@ -497,15 +509,18 @@ impl AgentBuilder {
         })() {
             Ok(services) => services,
             Err(error) => {
-                container
-                    .close_async(std::time::Duration::from_secs(5))
-                    .await;
+                if let Some(container) = &mut container {
+                    container
+                        .close_async(std::time::Duration::from_secs(5))
+                        .await;
+                }
                 return Err(error);
             }
         };
-        let packs: Vec<_> = selected_pack_closure(&self.capability_packs)?
-            .into_values()
-            .collect();
+        let packs = match &shared {
+            Some(framework) => framework.capability_packs(),
+            None => self.installed_packs()?,
+        };
         let versions: Vec<_> = packs
             .iter()
             .flat_map(|pack| pack.version_bindings())
@@ -528,20 +543,38 @@ impl AgentBuilder {
         }
         .await;
         if let Err(error) = validation {
-            container
-                .close_async(std::time::Duration::from_secs(5))
-                .await;
+            if let Some(container) = &mut container {
+                container
+                    .close_async(std::time::Duration::from_secs(5))
+                    .await;
+            }
             return Err(error);
         }
         let operations = services.operations.clone();
+        let owns_environment = shared.is_none();
+        let framework = match shared {
+            Some(framework) => framework,
+            None => Framework::from_container(
+                container.take().expect("private environment"),
+                registry.clone(),
+                AgentSelection::default(),
+                self.installed_packs()?,
+            ),
+        };
         let inner = Arc::new(AgentInner {
             id: RunId::new_v4(),
             cleanup: Mutex::new(CleanupState {
-                container: Some(container),
                 started: false,
                 complete: false,
                 report: eliteforge_agent_plugin_core::ShutdownReport::default(),
             }),
+            framework,
+            owns_environment,
+            default_model: self.selection.model.clone(),
+            skill_access: self.selection.skills.as_ref().map(|names| SkillAccess {
+                names: names.iter().cloned().collect(),
+            }),
+            registry,
             agent_loop,
             services,
             sinks,
@@ -555,6 +588,9 @@ impl AgentBuilder {
             cleanup_done: Notify::new(),
             threads: Arc::new(ThreadRegistry::default()),
         });
+        if !inner.owns_environment {
+            inner.framework.register_generation(&inner)?;
+        }
         let collaboration = Arc::new(CollaborationRuntime {
             agent: Arc::downgrade(&inner),
             threads: inner.threads.clone(),
@@ -566,6 +602,77 @@ impl AgentBuilder {
             collaboration,
         })
     }
+    pub(crate) async fn install_plugins(
+        mut self,
+        retained: Option<&PluginContainer>,
+    ) -> Result<PluginContainer, AgentError> {
+        self.plugins
+            .extend(self.factories.iter().map(ConfiguredPluginFactory::plugin));
+        for pack in selected_pack_closure(&self.capability_packs)?.values() {
+            self.plugins.extend(pack.plugins());
+        }
+        let skill_sources = selected_capability_skill_sources(&self.capability_packs)?;
+        let capability_skill_provider =
+            selected_capability_requires_skills_runtime(&self.capability_packs)?;
+        let capability_skills_runtime =
+            selected_capability_provides_skills_runtime(&self.capability_packs)?;
+        if !skill_sources.is_empty() || capability_skill_provider {
+            let has_skills_runtime = self
+                .plugins
+                .iter()
+                .any(|plugin| plugin.id() == "skills.default");
+            for (index, source) in skill_sources.into_iter().enumerate() {
+                self.plugins.push(Arc::new(
+                    eliteforge_agent_official_plugin_skills::CapabilitySkillsSourcePlugin::new(
+                        format!("builtin.capability-skills.{}.{}", source.pack_id, index),
+                        source.pack_id,
+                        source.source,
+                        self.capability_skills_root.clone(),
+                    ),
+                ));
+            }
+            if !has_skills_runtime && !capability_skills_runtime {
+                self.plugins.push(Arc::new(
+                    eliteforge_agent_official_plugin_skills::SkillsPlugin::sources_only(),
+                ));
+            }
+        }
+        let mut occupied_plugin_ids = HashSet::with_capacity(self.plugins.len() + 1);
+        for (index, plugin) in self.plugins.iter().enumerate() {
+            let id = plugin.id().to_owned();
+            if id.trim().is_empty() {
+                return Err(PluginError::EmptyPluginId { index }.into());
+            }
+            if !occupied_plugin_ids.insert(id.clone()) {
+                return Err(PluginError::DuplicatePluginId { id }.into());
+            }
+        }
+        // DefaultsPlugin joins the same graph below. Its ID must be reserved
+        // before capability factories run, but cannot satisfy a capability
+        // dependency because DefaultsPlugin is ordered after all capabilities.
+        let defaults_plugin_id = "builtin.framework-defaults".to_owned();
+        if occupied_plugin_ids.contains(&defaults_plugin_id) {
+            return Err(PluginError::DuplicatePluginId {
+                id: defaults_plugin_id,
+            }
+            .into());
+        }
+        let reserved_plugin_ids = HashSet::from([defaults_plugin_id]);
+        let capability_plugins = resolve_capability_packs_with_plugins(
+            &self.capability_packs,
+            &self.plugins,
+            &reserved_plugin_ids,
+        )?;
+        self.plugins.extend(capability_plugins);
+        let after = self.plugins.iter().map(|p| p.id().to_owned()).collect();
+        self.plugins.push(Arc::new(crate::plugins::DefaultsPlugin {
+            after,
+            default_models: self.default_models,
+        }));
+        PluginContainer::build_reusing(self.plugins, retained)
+            .await
+            .map_err(Into::into)
+    }
 }
 
 struct RunRegistry {
@@ -575,14 +682,18 @@ struct RunRegistry {
 }
 
 struct CleanupState {
-    container: Option<PluginContainer>,
     started: bool,
     complete: bool,
     report: eliteforge_agent_plugin_core::ShutdownReport,
 }
 
-struct AgentInner {
+pub(crate) struct AgentInner {
     id: RunId,
+    framework: Framework,
+    owns_environment: bool,
+    skill_access: Option<SkillAccess>,
+    default_model: Option<ModelRef>,
+    registry: eliteforge_agent_plugin_core::ServiceRegistry,
     cleanup: Mutex<CleanupState>,
     agent_loop: Arc<dyn AgentLoop>,
     services: AgentServices,
@@ -728,6 +839,80 @@ impl Agent {
             }),
         ))
     }
+    async fn reconfigure_selection(
+        &self,
+        framework: Framework,
+        mut target: AgentBuilder,
+    ) -> Result<(), ReconfigureError> {
+        target
+            .validate_shared()
+            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
+        if let Some(requested) = &target.framework
+            && !framework.same_environment(requested)
+        {
+            return Err(ReconfigureError::Invalid(
+                "cannot move Agent to another Framework".into(),
+            ));
+        }
+        let environment = framework
+            .admission()
+            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
+        let cancellation = framework.cancellation_token();
+        target.framework = Some(framework);
+        let transition = self.assembly.clone();
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.closed || state.generation.is_closed() {
+                return Err(ReconfigureError::Invalid("Agent is closed".into()));
+            }
+            if state.updating {
+                return Err(ReconfigureError::Busy(vec![AssemblyOccupancy {
+                    kind: "update".into(),
+                    label: "assembly update in progress".into(),
+                }]));
+            }
+            let blockers =
+                Self::blockers(&state).map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
+            if !blockers.is_empty() {
+                return Err(ReconfigureError::Busy(blockers));
+            }
+            state.updating = true;
+        }
+        tokio::spawn(async move {
+            let _environment = environment;
+            let _transition = transition.transition.lock().await;
+            let candidate = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => Err(AgentError::Closed),
+                candidate = std::panic::AssertUnwindSafe(target.clone().build_generation()).catch_unwind() => {
+                    candidate.unwrap_or_else(|_| Err(AgentError::Run("candidate selection panicked".into())))
+                }
+            };
+            let result = match candidate {
+                Ok(candidate) => {
+                    let old = {
+                        let mut state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
+                        state.blueprint = target;
+                        std::mem::replace(&mut state.generation, candidate)
+                    };
+                    old.close().await;
+                    Ok(())
+                }
+                Err(error) => Err(ReconfigureError::Restored(error.to_string())),
+            };
+            transition
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .updating = false;
+            let _ = sender.send(result);
+        });
+        receiver
+            .await
+            .unwrap_or_else(|_| Err(ReconfigureError::Invalid("selection update stopped".into())))
+    }
+
     pub fn with_model_options(&self, options: ModelInvocationOptions) -> Self {
         Self {
             assembly: self.assembly.clone(),
@@ -828,6 +1013,17 @@ impl Agent {
     /// Idle-only complete assembly replacement. Cancellation of the caller does
     /// not cancel the owned update/restore task or leave admission suspended.
     pub async fn reconfigure(&self, mut target: AgentBuilder) -> Result<(), ReconfigureError> {
+        let framework = self
+            .assembly
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .blueprint
+            .framework
+            .clone();
+        if let Some(framework) = framework {
+            return self.reconfigure_selection(framework, target).await;
+        }
         let scope = self
             .assembly
             .state
@@ -950,14 +1146,7 @@ impl Agent {
                 let state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
                 (state.generation.clone(), state.blueprint.clone())
             };
-            let mut retained = {
-                let mut cleanup = old.inner.cleanup.lock().unwrap_or_else(|e| e.into_inner());
-                cleanup
-                    .container
-                    .as_mut()
-                    .expect("live assembly")
-                    .detach_plugins(&retained_ids)
-            };
+            let mut retained = old.inner.framework.detach_plugins(&retained_ids);
             let closed = old.close().await;
             let candidate = if closed.is_success() {
                 std::panic::AssertUnwindSafe(
@@ -1001,15 +1190,7 @@ impl Agent {
                 }
             };
             if !unavailable {
-                generation
-                    .inner
-                    .cleanup
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .container
-                    .as_mut()
-                    .expect("candidate container")
-                    .adopt_retained(&mut retained);
+                generation.inner.framework.adopt_retained(&mut retained);
             }
             {
                 let mut state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1075,6 +1256,19 @@ pub struct RealtimeHandle {
 
 impl AgentGeneration {
     /// An AgentGeneration view with per-call model options; all views share lifecycle and services.
+    pub(crate) fn from_inner(inner: Arc<AgentInner>) -> Self {
+        let operations = inner.services.operations.clone();
+        let collaboration = Arc::new(CollaborationRuntime {
+            agent: Arc::downgrade(&inner),
+            threads: inner.threads.clone(),
+            operations: operations.clone(),
+        });
+        Self {
+            inner,
+            operations,
+            collaboration,
+        }
+    }
     pub fn with_model_options(&self, options: ModelInvocationOptions) -> Self {
         let operations = self.operations.with_options(options);
         let collaboration = Arc::new(CollaborationRuntime {
@@ -1198,7 +1392,7 @@ impl AgentGeneration {
         let cancellation = CancellationToken::new();
         {
             let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
-            if runs.closed {
+            if runs.closed || self.inner.framework.is_closed() {
                 return Err(AgentError::Closed);
             }
             runs.operations.insert(id, cancellation.clone());
@@ -1207,18 +1401,12 @@ impl AgentGeneration {
             inner: self.inner.clone(),
             id,
         };
-        let services = {
-            let state = self.inner.cleanup.lock().unwrap_or_else(|e| e.into_inner());
-            let registry = state
-                .container
-                .as_ref()
-                .ok_or(AgentError::Closed)?
-                .services();
-            registry
-                .get::<O::Service>()
-                .map(|service| vec![service])
-                .unwrap_or_else(|| registry.all::<O::Service>())
-        };
+        let services = self
+            .inner
+            .registry
+            .get::<O::Service>()
+            .map(|service| vec![service])
+            .unwrap_or_else(|| self.inner.registry.all::<O::Service>());
         let service =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| operation.select(services)))
                 .map_err(|_| AgentError::Run("plugin operation selection panicked".into()))??;
@@ -1573,6 +1761,12 @@ impl AgentGeneration {
         mut request: RunRequest,
         parent: Option<&RunContext>,
     ) -> Result<RunHandle, AgentError> {
+        if request.model.is_none() {
+            request.model = self.inner.default_model.clone();
+        }
+        if let Some(access) = &self.inner.skill_access {
+            request.extensions.insert(access.clone());
+        }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
             AgentError::Run("AgentGeneration::start requires a Tokio runtime".into())
         })?;
@@ -1655,7 +1849,7 @@ impl AgentGeneration {
         let cancellation = parent.map_or_else(CancellationToken::new, |p| p.children.child_token());
         {
             let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
-            if runs.closed {
+            if runs.closed || self.inner.framework.is_closed() {
                 return Err(AgentError::Closed);
             }
             if runs.active.contains_key(&request.session_id) {
@@ -2030,16 +2224,11 @@ impl AgentGeneration {
                     }
                     notified.await;
                 }
-                let container = inner
-                    .cleanup
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .container
-                    .take();
                 let report = std::panic::AssertUnwindSafe(async {
-                    match container {
-                        Some(mut container) => container.close_async(timeout).await,
-                        None => eliteforge_agent_plugin_core::ShutdownReport::default(),
+                    if inner.owns_environment {
+                        inner.framework.close_with_timeout(timeout).await
+                    } else {
+                        eliteforge_agent_plugin_core::ShutdownReport::default()
                     }
                 })
                 .catch_unwind()
@@ -2073,11 +2262,13 @@ impl AgentGeneration {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.inner
-            .runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .closed
+        self.inner.framework.is_closed()
+            || self
+                .inner
+                .runs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .closed
     }
 }
 

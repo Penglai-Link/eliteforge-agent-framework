@@ -12,6 +12,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AgentError, RunContext};
 
+/// Framework-resolved Agent permission, captured for each execution.
+#[derive(Debug, Clone, Default)]
+pub struct SkillAccess {
+    pub names: std::collections::BTreeSet<String>,
+}
+impl SkillAccess {
+    pub fn allows(&self, name: &str) -> bool {
+        self.names.contains(name)
+    }
+}
+
 /// Lightweight metadata exposed to a model before a skill is activated.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

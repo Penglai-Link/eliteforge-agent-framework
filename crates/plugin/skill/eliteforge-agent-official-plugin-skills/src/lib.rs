@@ -173,6 +173,7 @@ struct SkillsRuntime {
 }
 
 struct SelectedSkills {
+    access: Option<BTreeSet<String>>,
     catalog: SkillCatalog,
     skills: BTreeMap<String, SkillSummary>,
     loaded: Mutex<BTreeMap<String, BTreeSet<String>>>,
@@ -230,9 +231,18 @@ impl SkillsRuntime {
         let snapshot = slot
             .get_or_try_init(|| async {
                 let catalog = self.provider()?.catalog(context).await?;
-                Ok::<_, AgentError>(Arc::new(self.select(catalog)?))
+                Ok::<_, AgentError>(Arc::new(self.select(catalog, context)?))
             })
             .await?;
+        let access = context
+            .extensions
+            .get::<eliteforge_agent_core::SkillAccess>()
+            .map(|access| access.names.clone());
+        if snapshot.access != access {
+            return Err(AgentError::InvalidConfiguration(
+                "skill permissions changed for an existing logical run".into(),
+            ));
+        }
         Ok(snapshot.clone())
     }
 
@@ -281,7 +291,11 @@ impl SkillsRuntime {
             .is_some_and(|recovery| !recovery.retained && recovery.loaded_skills.contains(name))
     }
 
-    fn select(&self, catalog: SkillCatalog) -> Result<SelectedSkills, AgentError> {
+    fn select(
+        &self,
+        mut catalog: SkillCatalog,
+        context: &RunContext,
+    ) -> Result<SelectedSkills, AgentError> {
         let mut discovered = BTreeMap::new();
         for skill in &catalog.skills {
             if skill.name.trim().is_empty() {
@@ -300,7 +314,7 @@ impl SkillsRuntime {
             }
         }
 
-        let skills = match &self.selection {
+        let mut skills: BTreeMap<String, SkillSummary> = match &self.selection {
             SkillSelection::All => discovered,
             SkillSelection::Only(names) => {
                 let missing = names
@@ -325,7 +339,18 @@ impl SkillsRuntime {
                     .collect()
             }
         };
+        if let Some(access) = context
+            .extensions
+            .get::<eliteforge_agent_core::SkillAccess>()
+        {
+            skills.retain(|name, _| access.allows(name));
+            catalog.skills.retain(|skill| access.allows(&skill.name));
+        }
         Ok(SelectedSkills {
+            access: context
+                .extensions
+                .get::<eliteforge_agent_core::SkillAccess>()
+                .map(|access| access.names.clone()),
             catalog,
             skills,
             loaded: Mutex::new(BTreeMap::new()),

@@ -10,7 +10,7 @@ impl Plugin for ReactPlugin {
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
         let agent_loop: Arc<dyn AgentLoop> = Arc::new(crate::react::ReactAgentLoop);
-        context.provide(LoopService(agent_loop.clone()))?;
+        context.contribute(LoopService(agent_loop.clone()))?;
         context.contribute_extension(agent_loop)
     }
 }
@@ -32,9 +32,9 @@ impl Plugin for DefaultsPlugin {
         let react_node: Arc<dyn WorkflowNode> = Arc::new(ReactWorkflowNode);
         context.contribute(WorkflowNodeService(react_node.clone()))?;
         context.contribute_extension(react_node)?;
-        if context.services().get::<LoopService>().is_none() {
+        if !context.services().contains::<LoopService>() {
             let agent_loop: Arc<dyn AgentLoop> = Arc::new(crate::react::ReactAgentLoop);
-            context.provide(LoopService(agent_loop.clone()))?;
+            context.contribute(LoopService(agent_loop.clone()))?;
             context.contribute_extension(agent_loop)?;
         }
         #[cfg(feature = "genai")]
@@ -50,7 +50,9 @@ impl Plugin for DefaultsPlugin {
             && context
                 .services()
                 .get::<LoopService>()
-                .is_some_and(|s| s.0.requires_model())
+                .into_iter()
+                .chain(context.services().all::<LoopService>())
+                .any(|s| s.0.requires_model())
         {
             eliteforge_agent_official_plugin_model_genai::GenaiPlugin::default()
                 .install(context)

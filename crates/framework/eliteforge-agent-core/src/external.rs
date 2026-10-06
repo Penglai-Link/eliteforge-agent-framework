@@ -40,7 +40,7 @@ pub trait ExternalAgentEventSink: Send + Sync {
     async fn emit(&self, event: ExternalAgentEvent);
 }
 
-#[crate::extension_point(adapter = crate::ExternalAgentPlugin)]
+#[crate::extension_point(select, adapter = crate::ExternalAgentPlugin)]
 #[async_trait]
 pub trait ExternalAgent: Send + Sync {
     async fn run(

@@ -691,7 +691,7 @@ pub trait EventSink: Send + Sync {
     async fn on_event(&self, context: &RunContext, event: &AgentEvent);
 }
 
-#[crate::extension_point(single, adapter = crate::AgentLoopPlugin)]
+#[crate::extension_point(select, adapter = crate::AgentLoopPlugin)]
 #[async_trait]
 pub trait AgentLoop: Send + Sync {
     /// Loops that own their history externally can run without a ConversationStore.
@@ -863,6 +863,11 @@ impl ToolLease {
 #[crate::extension_point(adapter = crate::ToolProviderPlugin, contribute)]
 #[async_trait]
 pub trait ToolProvider: Send + Sync {
+    /// Static inventory for Framework-wide conflict checks. Dynamic providers
+    /// return None and their leased tools are validated by the runtime.
+    fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
+        None
+    }
     async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError>;
 }
 

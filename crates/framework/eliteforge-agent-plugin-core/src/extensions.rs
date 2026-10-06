@@ -13,6 +13,17 @@ pub enum ExtensionMultiplicity {
     Single,
 }
 
+/// Framework registration and Agent binding are separate constraints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionBinding {
+    /// One implementation, automatically shared by every Agent.
+    Shared,
+    /// Multiple Framework candidates; each Agent binds one.
+    SelectOne,
+    /// Ordered contributions composed by the Framework or selected as a set.
+    Contributions,
+}
+
 /// A trait marked as an extensibility boundary.
 ///
 /// `#[extension_point]` generates this implementation for a trait. The
@@ -24,6 +35,10 @@ pub trait ExtensionPoint: Send + Sync {
 
     #[doc(hidden)]
     const MULTIPLICITY: ExtensionMultiplicity;
+    const BINDING: ExtensionBinding = match Self::MULTIPLICITY {
+        ExtensionMultiplicity::Single => ExtensionBinding::Shared,
+        ExtensionMultiplicity::Multiple => ExtensionBinding::Contributions,
+    };
 
     #[doc(hidden)]
     fn into_stored(value: Arc<Self>) -> Self::Stored;
@@ -60,6 +75,13 @@ impl ExtensionRegistry {
         T: ExtensionPoint + ?Sized + 'static,
     {
         let key = TypeId::of::<T>();
+        if T::BINDING == ExtensionBinding::SelectOne && self.providers::<T>().contains(&plugin) {
+            return Err(PluginError::DuplicateExtension {
+                extension: T::name(),
+                existing_plugin: plugin.to_owned(),
+                plugin: plugin.to_owned(),
+            });
+        }
         let registration = ExtensionRegistration {
             plugin: plugin.to_owned(),
             value: Arc::new(T::into_stored(value)),

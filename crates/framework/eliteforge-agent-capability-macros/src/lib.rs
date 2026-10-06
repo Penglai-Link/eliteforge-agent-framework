@@ -581,6 +581,7 @@ fn is_skills_plugin_type(ty: &Type) -> bool {
 #[derive(Default)]
 struct ExtensionPointArguments {
     single: bool,
+    select: bool,
     adapter: Option<Path>,
     contribute: bool,
 }
@@ -600,6 +601,10 @@ impl ExtensionPointArguments {
                     return Err(meta.error("`single` does not accept a value"));
                 }
                 arguments.single = true;
+            } else if meta.path.is_ident("select") {
+                if arguments.select { return Err(meta.error("duplicate `select` argument")); }
+                if meta.input.peek(syn::Token![=]) { return Err(meta.error("`select` does not accept a value")); }
+                arguments.select = true;
             } else if meta.path.is_ident("adapter") {
                 if arguments.adapter.is_some() {
                     return Err(meta.error("duplicate `adapter` argument"));
@@ -615,12 +620,24 @@ impl ExtensionPointArguments {
                 arguments.contribute = true;
             } else {
                 return Err(meta.error(
-                    "unsupported extension-point argument; expected `single`, `adapter = Type`, or `contribute`",
+                    "unsupported extension-point argument; expected `single`, `select`, `adapter = Type`, or `contribute`",
                 ));
             }
             Ok(())
         })
         .parse2(input)?;
+        if arguments.single && arguments.select {
+            return Err(Error::new(
+                proc_macro2::Span::call_site(),
+                "`single` and `select` cannot be combined",
+            ));
+        }
+        if arguments.select && arguments.contribute {
+            return Err(Error::new(
+                proc_macro2::Span::call_site(),
+                "`select` and `contribute` cannot be combined",
+            ));
+        }
         if arguments.contribute && arguments.adapter.is_none() {
             return Err(Error::new(
                 proc_macro2::Span::call_site(),
@@ -649,7 +666,19 @@ fn expand_extension_point(attribute: TokenStream2, item: TokenStream2) -> Result
     } else {
         quote!(::eliteforge_agent_core::ExtensionMultiplicity::Multiple)
     };
+    let binding = if arguments.single {
+        quote!(::eliteforge_agent_core::ExtensionBinding::Shared)
+    } else if arguments.select {
+        quote!(::eliteforge_agent_core::ExtensionBinding::SelectOne)
+    } else {
+        quote!(::eliteforge_agent_core::ExtensionBinding::Contributions)
+    };
     let capability_adapter = match arguments.adapter {
+        Some(adapter) if arguments.select => quote! {
+            fn into_plugin(id: &str, implementation: ::std::sync::Arc<Self>) -> ::std::sync::Arc<dyn ::eliteforge_agent_core::Plugin> {
+                ::std::sync::Arc::new(#adapter::named_arc(id, implementation))
+            }
+        },
         Some(adapter) if arguments.contribute => quote! {
             fn into_plugin(
                 id: &str,
@@ -692,6 +721,7 @@ fn expand_extension_point(attribute: TokenStream2, item: TokenStream2) -> Result
             type Stored = #storage;
 
             const MULTIPLICITY: ::eliteforge_agent_core::ExtensionMultiplicity = #multiplicity;
+            const BINDING: ::eliteforge_agent_core::ExtensionBinding = #binding;
 
             fn into_stored(value: ::std::sync::Arc<Self>) -> Self::Stored {
                 #storage(value)

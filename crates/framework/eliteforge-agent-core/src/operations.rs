@@ -1,4 +1,4 @@
-//! Plugin operations are dispatched by Agent against installed services.
+//! Typed operations are dispatched by Framework or Agent against installed services.
 use crate::*;
 use async_trait::async_trait;
 use std::{
@@ -39,10 +39,10 @@ impl AgentOperation for DeleteSessions {
     }
 }
 
-/// A typed request, not a plugin instance. Agent supplies the installed service
-/// and owns admission, cancellation and shutdown ordering.
+/// A typed request, not a plugin instance. Framework or Agent supplies the
+/// installed service and owns admission, cancellation and shutdown ordering.
 /// The cancellation token covers this invocation: completion, caller drop and
-/// Agent shutdown all cancel it. Detached work must observe that token and clean
+/// environment shutdown all cancel it. Detached work must observe that token and clean
 /// up its resources; returning a value does not extend the invocation lifetime.
 #[async_trait]
 pub trait AgentOperation: Send {

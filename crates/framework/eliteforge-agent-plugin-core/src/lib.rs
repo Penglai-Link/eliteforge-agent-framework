@@ -19,6 +19,6 @@ pub use container::{
     plugin_dependency_order,
 };
 pub use error::PluginError;
-pub use extensions::{ExtensionMultiplicity, ExtensionPoint};
+pub use extensions::{ExtensionBinding, ExtensionMultiplicity, ExtensionPoint};
 pub use resources::{ResourceScope, ShutdownReport};
 pub use services::ServiceRegistry;

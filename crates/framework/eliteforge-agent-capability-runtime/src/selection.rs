@@ -297,7 +297,10 @@ impl CapabilityPack for ManagedCapabilityPack {
         selected.included = selected
             .included
             .iter()
-            .map(|pack| pack.for_agent_scope(scope).unwrap_or_else(|| pack.clone()))
+            .map(|pack| {
+                pack.for_framework_scope(scope)
+                    .unwrap_or_else(|| pack.clone())
+            })
             .collect();
         Some(Arc::new(selected))
     }
@@ -618,7 +621,7 @@ impl Plugin for RemoteMemberPlugin {
             }};
         }
         match self.declaration.extension.as_str() {
-            "framework.agent-loop" => unique!(LoopService, AgentLoop),
+            "framework.agent-loop" => multiple!(LoopService, AgentLoop),
             "framework.workflow-node" => multiple!(WorkflowNodeService, WorkflowNode),
             "framework.chat-model" => {
                 let connection = self.declaration.metadata["connection"]
@@ -682,7 +685,7 @@ impl Plugin for RemoteMemberPlugin {
             "framework.model-discovery" => {
                 context.contribute_extension::<dyn ModelDiscovery>(implementation)
             }
-            "framework.model-selection" => unique!(ModelStrategyService, ModelSelectionStrategy),
+            "framework.model-selection" => multiple!(ModelStrategyService, ModelSelectionStrategy),
             "framework.token-estimator" => Ok(()),
             "framework.embedding" => model!(EmbeddingModelService, EmbeddingModel),
             "framework.rerank" => model!(RerankModelService, RerankModel),
@@ -706,13 +709,15 @@ impl Plugin for RemoteMemberPlugin {
             "framework.context-contributor" => {
                 multiple!(ContextContributorService, ContextContributor)
             }
-            "framework.context-assembler" => unique!(ContextAssemblerService, ContextAssembler),
-            "framework.context-budget" => unique!(ContextBudgetPolicyService, ContextBudgetPolicy),
+            "framework.context-assembler" => multiple!(ContextAssemblerService, ContextAssembler),
+            "framework.context-budget" => {
+                multiple!(ContextBudgetPolicyService, ContextBudgetPolicy)
+            }
             "framework.context-reducer" => {
                 if self.declaration.metadata["global_history"] == false {
                     context.contribute_extension::<dyn ContextReducer>(implementation)
                 } else {
-                    unique!(ContextReducerService, ContextReducer)
+                    multiple!(ContextReducerService, ContextReducer)
                 }
             }
             "framework.skills" => context.contribute_extension::<dyn SkillProvider>(implementation),

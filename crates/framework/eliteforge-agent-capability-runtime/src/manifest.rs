@@ -30,6 +30,23 @@ pub struct ExtensionContract {
     pub category: ExtensionCategory,
     pub multiplicity: Multiplicity,
 }
+impl ExtensionContract {
+    /// Host-side binding semantics; the existing protocol representation stays
+    /// compatible with package manifests written before shared Frameworks.
+    pub fn binding(&self) -> eliteforge_agent_core::ExtensionBinding {
+        if self.multiplicity == Multiplicity::Single {
+            return eliteforge_agent_core::ExtensionBinding::Shared;
+        }
+        match self.id.as_str() {
+            "framework.agent-loop"
+            | "framework.model-selection"
+            | "framework.context-assembler"
+            | "framework.context-budget"
+            | "framework.context-reducer" => eliteforge_agent_core::ExtensionBinding::SelectOne,
+            _ => eliteforge_agent_core::ExtensionBinding::Contributions,
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionImplementation {
@@ -314,15 +331,7 @@ pub fn framework_extension_contracts() -> Vec<ExtensionContract> {
                 category: category.clone(),
                 multiplicity: if matches!(
                     id,
-                    "agent-loop"
-                        | "model-selection"
-                        | "context-assembler"
-                        | "context-budget"
-                        | "context-reducer"
-                        | "conversation-store"
-                        | "state-store"
-                        | "interaction-store"
-                        | "long-term-memory"
+                    "conversation-store" | "state-store" | "interaction-store" | "long-term-memory"
                 ) {
                     Multiplicity::Single
                 } else {

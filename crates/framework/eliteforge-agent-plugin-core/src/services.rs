@@ -87,12 +87,126 @@ impl ServiceRegistry {
         self.extensions.extensions::<T>()
     }
 
+    /// Retrieve a named Framework candidate without assuming global uniqueness.
+    pub fn extension_from<T>(&self, provider: &str) -> Option<Arc<T>>
+    where
+        T: ExtensionPoint + ?Sized + 'static,
+    {
+        self.extensions
+            .providers::<T>()
+            .into_iter()
+            .zip(self.extensions.extensions::<T>())
+            .find_map(|(id, implementation)| (id == provider).then_some(implementation))
+    }
+
     /// IDs of plugins that registered an extension point.
     pub fn extension_providers<T>(&self) -> Vec<&str>
     where
         T: ExtensionPoint + ?Sized + 'static,
     {
         self.extensions.providers::<T>()
+    }
+
+    /// Resolve an Agent binding without changing the Framework registry.
+    /// A selected contribution becomes a unique service in this local view.
+    pub fn bind_one<T: Send + Sync + 'static>(
+        &mut self,
+        provider: Option<&str>,
+    ) -> Result<(), PluginError> {
+        let key = TypeId::of::<T>();
+        let candidates = match self.entries.get(&key) {
+            Some(ServiceEntry::Unique(entry)) => vec![entry.clone()],
+            Some(ServiceEntry::Contributions(entries)) => entries.clone(),
+            None => Vec::new(),
+        };
+        let mut providers = std::collections::HashSet::new();
+        if candidates
+            .iter()
+            .any(|entry| !providers.insert(entry.plugin.as_str()))
+        {
+            return Err(PluginError::message(format!(
+                "{} has duplicate implementation IDs",
+                type_name::<T>()
+            )));
+        }
+        let selected = match provider {
+            Some(id) => candidates
+                .iter()
+                .find(|entry| entry.plugin == id)
+                .cloned()
+                .ok_or_else(|| {
+                    PluginError::message(format!(
+                        "{} provider {id} is not installed",
+                        type_name::<T>()
+                    ))
+                })?,
+            None if candidates.len() == 1 => candidates[0].clone(),
+            None if candidates.is_empty() => return Ok(()),
+            None => {
+                return Err(PluginError::message(format!(
+                    "{} has multiple implementations; select a provider or configure a Framework default",
+                    type_name::<T>()
+                )));
+            }
+        };
+        self.entries.insert(key, ServiceEntry::Unique(selected));
+        Ok(())
+    }
+
+    /// Restrict an Agent's optional contributions in the requested order.
+    pub fn bind_many<T: Send + Sync + 'static>(
+        &mut self,
+        providers: &[String],
+    ) -> Result<(), PluginError> {
+        let key = TypeId::of::<T>();
+        let candidates = match self.entries.get(&key) {
+            Some(ServiceEntry::Contributions(entries)) => entries.clone(),
+            Some(ServiceEntry::Unique(entry)) => vec![entry.clone()],
+            None => Vec::new(),
+        };
+        let mut selected = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for id in providers {
+            if !seen.insert(id) {
+                return Err(PluginError::message(format!(
+                    "duplicate selected provider {id}"
+                )));
+            }
+            let matches: Vec<_> = candidates
+                .iter()
+                .filter(|entry| &entry.plugin == id)
+                .cloned()
+                .collect();
+            if matches.is_empty() {
+                return Err(PluginError::message(format!(
+                    "{} provider {id} is not installed",
+                    type_name::<T>()
+                )));
+            }
+            selected.extend(matches);
+        }
+        self.entries
+            .insert(key, ServiceEntry::Contributions(selected));
+        Ok(())
+    }
+
+    /// Omit an optional capability from an Agent's binding view.
+    pub fn omit<T: Send + Sync + 'static>(&mut self) {
+        self.entries.remove(&TypeId::of::<T>());
+    }
+
+    /// Transform the services in a local binding view, preserving ownership and order.
+    pub fn map_services<T: Send + Sync + 'static>(&mut self, map: impl Fn(&T) -> T) {
+        let update = |entry: &mut Registration| {
+            if let Some(value) = entry.service.as_ref().downcast_ref::<T>() {
+                entry.service = Arc::new(map(value));
+            }
+        };
+        match self.entries.get_mut(&TypeId::of::<T>()) {
+            Some(ServiceEntry::Unique(entry)) => update(entry),
+            Some(ServiceEntry::Contributions(entries)) => entries.iter_mut().for_each(update),
+            None => {}
+        }
     }
 
     pub(crate) fn provide<T: Send + Sync + 'static>(

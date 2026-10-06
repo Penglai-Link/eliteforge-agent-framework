@@ -368,7 +368,7 @@ pub struct ModelSelectionContext<'a> {
     pub run: &'a RunContext,
 }
 
-#[crate::extension_point(single, adapter = crate::ModelStrategyPlugin)]
+#[crate::extension_point(select, adapter = crate::ModelStrategyPlugin)]
 #[async_trait]
 pub trait ModelSelectionStrategy: Send + Sync {
     fn validate(&self, _catalog: &ModelCatalog) -> Result<(), AgentError> {
@@ -561,6 +561,15 @@ impl Plugin for ModelConnectionPlugin {
 
 pub struct ModelStrategyPlugin(pub Arc<dyn ModelSelectionStrategy>);
 impl ModelStrategyPlugin {
+    pub fn named_arc(
+        id: impl Into<String>,
+        strategy: Arc<dyn ModelSelectionStrategy>,
+    ) -> NamedModelStrategyPlugin {
+        NamedModelStrategyPlugin {
+            id: id.into(),
+            strategy,
+        }
+    }
     pub fn new(strategy: impl ModelSelectionStrategy + 'static) -> Self {
         Self(Arc::new(strategy))
     }
@@ -575,8 +584,32 @@ impl Plugin for ModelStrategyPlugin {
         "model.strategy"
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        context.provide(ModelStrategyService(self.0.clone()))?;
+        context.contribute(ModelStrategyService(self.0.clone()))?;
         context.contribute_extension(self.0.clone())
+    }
+}
+
+/// Registers a named strategy candidate for Agent selection.
+pub struct NamedModelStrategyPlugin {
+    id: String,
+    strategy: Arc<dyn ModelSelectionStrategy>,
+}
+impl NamedModelStrategyPlugin {
+    pub fn new(id: impl Into<String>, strategy: impl ModelSelectionStrategy + 'static) -> Self {
+        Self {
+            id: id.into(),
+            strategy: Arc::new(strategy),
+        }
+    }
+}
+#[async_trait]
+impl Plugin for NamedModelStrategyPlugin {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+        context.contribute(ModelStrategyService(self.strategy.clone()))?;
+        context.contribute_extension(self.strategy.clone())
     }
 }
 

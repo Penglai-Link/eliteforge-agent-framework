@@ -56,6 +56,48 @@ macro_rules! unique_plugin {
     };
 }
 
+macro_rules! selectable_plugin {
+    ($name:ident, $interface:ident, $service:ident, $default:literal) => {
+        pub struct $name {
+            id: String,
+            implementation: Arc<dyn $interface>,
+        }
+        impl $name {
+            pub fn new(implementation: impl $interface + 'static) -> Self {
+                Self::from_arc(Arc::new(implementation))
+            }
+            pub fn from_arc(implementation: Arc<dyn $interface>) -> Self {
+                Self {
+                    id: $default.into(),
+                    implementation,
+                }
+            }
+            pub fn named(id: impl Into<String>, implementation: impl $interface + 'static) -> Self {
+                Self {
+                    id: id.into(),
+                    implementation: Arc::new(implementation),
+                }
+            }
+            pub fn named_arc(id: impl Into<String>, implementation: Arc<dyn $interface>) -> Self {
+                Self {
+                    id: id.into(),
+                    implementation,
+                }
+            }
+        }
+        #[async_trait]
+        impl Plugin for $name {
+            fn id(&self) -> &str {
+                &self.id
+            }
+            async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
+                context.contribute($service(self.implementation.clone()))?;
+                context.contribute_extension(self.implementation.clone())
+            }
+        }
+    };
+}
+
 pub struct ChatModelPlugin(ModelConnectionPlugin);
 impl ChatModelPlugin {
     pub fn new(model: impl ChatModel + 'static) -> Self {
@@ -84,8 +126,8 @@ unique_plugin!(
     ConversationStoreService,
     "framework.conversations"
 );
-unique_plugin!(AgentLoopPlugin, AgentLoop, LoopService, "framework.loop");
-unique_plugin!(
+selectable_plugin!(AgentLoopPlugin, AgentLoop, LoopService, "framework.loop");
+selectable_plugin!(
     ExternalAgentPlugin,
     ExternalAgent,
     ExternalAgentService,
@@ -103,19 +145,19 @@ unique_plugin!(
     LongTermMemoryService,
     "framework.long-term-memory"
 );
-unique_plugin!(
+selectable_plugin!(
     ContextAssemblerPlugin,
     ContextAssembler,
     ContextAssemblerService,
     "framework.context-assembler"
 );
-unique_plugin!(
+selectable_plugin!(
     ContextBudgetPolicyPlugin,
     ContextBudgetPolicy,
     ContextBudgetPolicyService,
     "framework.context-budget"
 );
-unique_plugin!(
+selectable_plugin!(
     ContextReducerPlugin,
     ContextReducer,
     ContextReducerService,
@@ -175,6 +217,14 @@ impl StaticToolProvider {
 
 #[async_trait]
 impl ToolProvider for StaticToolProvider {
+    fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
+        Some(
+            self.tools
+                .iter()
+                .map(|tool| tool.descriptor.clone())
+                .collect(),
+        )
+    }
     async fn lease(&self, _context: &RunContext) -> Result<ToolLease, AgentError> {
         Ok(ToolLease::new(self.tools.clone()))
     }

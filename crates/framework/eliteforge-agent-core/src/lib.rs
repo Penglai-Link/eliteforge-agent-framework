@@ -36,8 +36,8 @@ pub use continuation_budget::*;
 pub use conversation::*;
 pub use dag::*;
 pub use eliteforge_agent_plugin_core::{
-    ExtensionMultiplicity, ExtensionPlugin, ExtensionPoint, Plugin, PluginContext, PluginError,
-    PluginReadyContext,
+    ExtensionBinding, ExtensionMultiplicity, ExtensionPlugin, ExtensionPoint, Plugin,
+    PluginContext, PluginError, PluginReadyContext,
 };
 pub use errors::*;
 pub use external::*;

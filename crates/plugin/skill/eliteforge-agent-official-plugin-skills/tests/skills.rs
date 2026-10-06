@@ -1557,3 +1557,97 @@ async fn skill_loading_flows_through_existing_tool_policy() {
             .all(|message| !message.content.text().contains("secret instructions"))
     );
 }
+
+#[tokio::test]
+async fn shared_framework_keeps_agent_skill_permissions_separate() {
+    use eliteforge_agent_framework::{AgentSelection, Framework};
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join("skills");
+    write_skill(&local, "allowed", "Allowed skill", "Allowed instructions.");
+    write_skill(&local, "other", "Other skill", "Other instructions.");
+    let first = Arc::new(Mutex::new(Probe::default()));
+    let second = Arc::new(Mutex::new(Probe::default()));
+    let framework = Framework::builder()
+        .default_models(false)
+        .plugin(ConversationStorePlugin::new(
+            TestConversationStore::default(),
+        ))
+        .plugin(SkillsPlugin::filesystem(
+            FileSystemSkillsConfig::new().with_local_directory(local),
+        ))
+        .plugin(AgentLoopPlugin::named(
+            "first",
+            ProbeLoop {
+                action: ProbeAction::Load {
+                    name: "allowed".into(),
+                },
+                probe: first.clone(),
+            },
+        ))
+        .plugin(AgentLoopPlugin::named(
+            "second",
+            ProbeLoop {
+                action: ProbeAction::Load {
+                    name: "allowed".into(),
+                },
+                probe: second.clone(),
+            },
+        ))
+        .build()
+        .await
+        .unwrap();
+    let a = framework
+        .agent(AgentSelection {
+            agent_loop: Some("first".into()),
+            tool_providers: Some(vec!["skills.default".into()]),
+            context_sources: Some(vec!["skills.default".into()]),
+            skills: Some(vec!["allowed".into()]),
+            ..AgentSelection::default()
+        })
+        .build()
+        .await
+        .unwrap();
+    let b = framework
+        .agent(AgentSelection {
+            agent_loop: Some("second".into()),
+            tool_providers: Some(vec!["skills.default".into()]),
+            context_sources: Some(vec!["skills.default".into()]),
+            skills: Some(vec!["other".into()]),
+            ..AgentSelection::default()
+        })
+        .build()
+        .await
+        .unwrap();
+    a.run(RunRequest::new("first-session", "")).await.unwrap();
+    let mut request = RunRequest::new("second-session", "");
+    request.extensions.insert(SkillAccess {
+        names: BTreeSet::from(["allowed".into()]),
+    });
+    b.run(request).await.unwrap();
+    {
+        let first = first.lock().unwrap();
+        let second = second.lock().unwrap();
+        assert_eq!(first.values.len(), 1);
+        assert!(first.errors.is_empty());
+        assert_eq!(second.errors.len(), 1);
+        assert!(second.errors[0].contains("not enabled"));
+        assert!(second.values.is_empty());
+        assert!(first.context.iter().any(|text| text.contains("allowed")));
+        assert!(
+            first
+                .context
+                .iter()
+                .all(|text| !text.contains("Other skill"))
+        );
+        assert!(second.context.iter().any(|text| text.contains("other")));
+        assert!(
+            second
+                .context
+                .iter()
+                .all(|text| !text.contains("Allowed skill"))
+        );
+    }
+    a.close().await;
+    assert!(!b.is_closed());
+    assert!(framework.close().await.is_success());
+}

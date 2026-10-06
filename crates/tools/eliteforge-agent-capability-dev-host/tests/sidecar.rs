@@ -344,7 +344,8 @@ impl Plugin for Layout {
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
         let reducer = context
-            .extension::<dyn ContextReducer>()
+            .services()
+            .extension_from::<dyn ContextReducer>("demo.reducer")
             .ok_or_else(|| PluginError::message("missing remote reducer"))?;
         let mut history = ContextBlockConfig::new(
             HISTORY_BLOCK,
@@ -1454,7 +1455,8 @@ impl Plugin for CompressionDirectivePlugin {
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
         let reducer = context
-            .extension::<dyn ContextReducer>()
+            .services()
+            .extension_from::<dyn ContextReducer>("demo.reducer")
             .ok_or_else(|| PluginError::message("missing remote reducer"))?;
         AgentLoopPlugin::new(CompressionDirectiveLoop(reducer))
             .install(context)
