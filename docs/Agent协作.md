@@ -86,16 +86,17 @@ Thread 与父运行不是嵌套关系，因此映射为 `framework.thread.*` CUS
 官方能力包默认安装协作工具；不需要时可以关闭：
 
 ```rust
-use eliteforge_agent_framework::AgentBuilder;
+use eliteforge_agent_framework::{FrameworkBuilder, AgentSelection};
 use eliteforge_agent_official_capability_pack::EliteForgeOfficialCapabilityPack;
 
-let agent = AgentBuilder::new()
+let framework = FrameworkBuilder::new()
     .capability_pack(
         EliteForgeOfficialCapabilityPack::new("agent.sqlite", "agent-artifacts")
             .agent_tools(false),
     )
     .build()
     .await?;
+let agent = framework.agent(AgentSelection::default()).build().await?;
 ```
 
 官方插件 crate 也可以单独安装：`eliteforge-agent-official-plugin-tools-agents`。

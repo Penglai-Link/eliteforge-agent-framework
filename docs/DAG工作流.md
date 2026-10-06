@@ -43,12 +43,16 @@ let definition = DagWorkflowDefinition {
     ],
     max_parallel_nodes: 2,
 };
-let agent = AgentBuilder::new()
+let framework = FrameworkBuilder::new()
     .plugin(eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin::new("agent.sqlite", "agent-artifacts"))
     .plugin(model_connection_plugin)
     .plugin(model_strategy_plugin)
     .plugin(AgentLoopPlugin::new(DagWorkflowLoop::new(definition)?))
     .build().await?;
+let agent = framework.agent(AgentSelection {
+    agent_loop: Some("framework.loop".into()),
+    ..AgentSelection::default()
+}).build().await?;
 ```
 
 `WorkflowStage` 的指令、生成选项、工具子集和阶段模型路由继续生效。

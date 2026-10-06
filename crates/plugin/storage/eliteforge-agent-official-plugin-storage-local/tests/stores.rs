@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_storage_local::*;
+use eliteforge_agent_test_support::TestBuilder;
 use std::sync::Arc;
 
 struct Noop;
@@ -27,7 +28,7 @@ async fn local_bundle_reopens_conversations_memory_summaries_and_binary_artifact
         std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let build = || {
-        AgentBuilder::new()
+        TestBuilder::new()
             .plugin(LocalStoragePlugin::new(&path, &artifacts))
             .plugin(AgentLoopPlugin::new(Noop))
     };
@@ -80,7 +81,7 @@ async fn local_bundle_reopens_conversations_memory_summaries_and_binary_artifact
     );
     let bytes = vec![0, 1, 255, 0, 42];
     let artifact = agent.execute(PutArtifact(bytes.clone())).await.unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(matches!(
         agent.conversation(&conversation).await,
         Err(AgentError::Closed)
@@ -185,7 +186,7 @@ async fn local_bundle_reopens_conversations_memory_summaries_and_binary_artifact
         agent.memory("user-a", "preference").await,
         Err(AgentError::LongTermMemory(MemoryError::NotFound))
     ));
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -275,7 +276,7 @@ async fn sqlite_plugin_prepares_extensions_on_every_physical_connection() {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .plugin(
             LocalStoragePlugin::new(dir.path().join("agent.db"), artifacts).with_extensions(config),
         )
@@ -290,5 +291,5 @@ async fn sqlite_plugin_prepares_extensions_on_every_physical_connection() {
         assert_eq!(report.simple, ExtensionStatus::Available);
         assert_eq!(report.vector, ExtensionStatus::Available);
     }
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }

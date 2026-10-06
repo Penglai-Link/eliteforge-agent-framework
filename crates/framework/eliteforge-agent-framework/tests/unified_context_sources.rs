@@ -115,7 +115,7 @@ async fn six_logical_sources_share_one_read_contract_and_protected_roles() {
         .run(RunRequest::new("six-sources", "question"))
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert_eq!(instruction_calls.load(Ordering::SeqCst), 1);
     assert!(calls.iter().all(|count| count.load(Ordering::SeqCst) == 1));
     let requests = capture.0.lock().unwrap();
@@ -178,6 +178,7 @@ async fn skills_compose_once_into_builtin_instructions_with_custom_preparation()
     let capture = Capture::default();
     let reports = Reports::default();
     let agent = TestBuilder::default()
+        .skills(["review"])
         .plugin(ChatModelPlugin::new(capture.clone()))
         .plugin(EventPlugin::new("reports", reports.clone()))
         .plugin(SkillsPlugin::new(provider))
@@ -192,7 +193,7 @@ async fn skills_compose_once_into_builtin_instructions_with_custom_preparation()
         .run(RunRequest::new("skills-once", "question"))
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     let requests = capture.0.lock().unwrap();
     let text = requests[0]
         .messages
@@ -252,7 +253,7 @@ async fn instruction_source_read_obeys_cancellation_before_model_admission() {
         .unwrap_err();
     assert!(matches!(error.primary(), AgentError::Cancelled));
     assert!(capture.0.lock().unwrap().is_empty());
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 #[tokio::test]
 async fn instruction_quota_failure_keeps_provenance_and_never_admits_model() {
@@ -285,5 +286,5 @@ async fn instruction_quota_failure_keeps_provenance_and_never_admits_model() {
             .any(|source| source.id == "oversized.instructions")
     );
     assert!(capture.0.lock().unwrap().is_empty());
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }

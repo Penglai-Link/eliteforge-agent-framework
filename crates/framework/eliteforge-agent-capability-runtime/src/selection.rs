@@ -288,10 +288,7 @@ impl CapabilityPack for ManagedCapabilityPack {
     fn configuration(&self) -> &CapabilityConfig {
         &self.configuration
     }
-    fn rebuildable(&self) -> bool {
-        true
-    }
-    fn for_agent_scope(&self, scope: &str) -> Option<Arc<dyn CapabilityPack>> {
+    fn for_framework_scope(&self, scope: &str) -> Option<Arc<dyn CapabilityPack>> {
         let mut selected = self.clone();
         selected.scope = format!("{}:{scope}", self.namespace);
         selected.included = selected
@@ -315,60 +312,6 @@ impl CapabilityPack for ManagedCapabilityPack {
             .filter(|source| self.selected_skills.contains(*source))
             .map(|relative| CapabilitySkillSource::directory(self.pack.path.join(relative)))
             .collect()
-    }
-    fn reconfiguration_blockers(&self) -> Result<Vec<String>, AgentError> {
-        let mut blockers: Vec<_> = self
-            .manager
-            .usage
-            .blockers(self.id())
-            .into_iter()
-            .filter(|b| {
-                b.scope == self.scope && !matches!(b.kind.as_str(), "runtime" | "selection")
-            })
-            .map(|b| format!("{}: {}", b.kind, b.label))
-            .collect();
-        blockers.extend(
-            self.manager
-                .durable_pins()
-                .map_err(|e| AgentError::Run(e.to_string()))?
-                .into_iter()
-                .filter(|pin| {
-                    pin.scope == self.namespace
-                        && pin.versions.iter().any(|v| v.package == self.id())
-                })
-                .map(|pin| format!("pending task: {}", pin.id)),
-        );
-        Ok(blockers)
-    }
-    fn lock_reconfiguration(&self) -> Result<Box<dyn Send>, AgentError> {
-        let blockers = self.reconfiguration_blockers()?;
-        if !blockers.is_empty() {
-            return Err(AgentError::Run(format!("package occupied: {blockers:?}")));
-        }
-        let instances: Vec<_> = self
-            .manager
-            .instances
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .filter_map(|instance| instance.upgrade())
-            .filter(|instance| {
-                instance.identity.package == self.id()
-                    && instance.identity.scope == self.scope
-                    && !instance.is_retired()
-            })
-            .collect();
-        for instance in &instances {
-            instance.pause_admission();
-        }
-        let mut admission = PausedInstances(instances);
-        let guard = self
-            .manager
-            .usage
-            .begin_scope_update(self.id(), &self.scope)
-            .map_err(|e| AgentError::Run(e.to_string()))?;
-        let instances = std::mem::take(&mut admission.0);
-        Ok(Box::new((guard, PausedInstances(instances))))
     }
     fn version_bindings(&self) -> Vec<CapabilityVersionBinding> {
         vec![CapabilityVersionBinding {
@@ -463,14 +406,7 @@ pub struct CapabilityContributionSelection {
     pub mcp: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
 }
-struct PausedInstances(Vec<Arc<BackendInstance>>);
-impl Drop for PausedInstances {
-    fn drop(&mut self) {
-        for instance in &self.0 {
-            instance.resume_admission();
-        }
-    }
-}
+
 struct SelectedRuntime {
     selection: ManagedCapabilityPack,
     instance: OnceLock<Arc<BackendInstance>>,

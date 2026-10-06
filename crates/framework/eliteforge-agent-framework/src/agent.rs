@@ -1,284 +1,43 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
-    path::PathBuf,
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, AtomicU64},
     },
 };
 
-use eliteforge_agent_plugin_core::{Plugin, PluginContainer};
 use futures::FutureExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::*;
 
-struct BoundCapabilityPack {
-    original: Arc<dyn CapabilityPack>,
-    included: Vec<Arc<dyn CapabilityPack>>,
-}
-impl CapabilityPack for BoundCapabilityPack {
-    fn id(&self) -> &str {
-        self.original.id()
-    }
-    fn configuration(&self) -> &CapabilityConfig {
-        self.original.configuration()
-    }
-    fn preflight(&self) -> Result<(), AgentError> {
-        self.original.preflight()
-    }
-    fn requires_skills_runtime(&self) -> bool {
-        self.original.requires_skills_runtime()
-    }
-    fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
-        self.original.plugins()
-    }
-    fn rebuildable(&self) -> bool {
-        self.original.rebuildable()
-    }
-    fn retained_plugins(&self) -> Vec<Arc<dyn Plugin>> {
-        self.original.retained_plugins()
-    }
-    fn included_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
-        self.included.clone()
-    }
-    fn skill_sources(&self) -> Vec<CapabilitySkillSource> {
-        self.original.skill_sources()
-    }
-    fn for_framework_scope(&self, scope: &str) -> Option<Arc<dyn CapabilityPack>> {
-        Some(Arc::new(Self {
-            original: self
-                .original
-                .for_framework_scope(scope)
-                .unwrap_or_else(|| self.original.clone()),
-            included: self.included.clone(),
-        }))
-    }
-    fn lock_reconfiguration(&self) -> Result<Box<dyn Send>, AgentError> {
-        self.original.lock_reconfiguration()
-    }
-    fn reconfiguration_blockers(&self) -> Result<Vec<String>, AgentError> {
-        self.original.reconfiguration_blockers()
-    }
-    fn version_bindings(&self) -> Vec<CapabilityVersionBinding> {
-        self.original.version_bindings()
-    }
-    fn protect_task(&self, run: RunId) -> futures::future::BoxFuture<'_, Result<(), AgentError>> {
-        self.original.protect_task(run)
-    }
-    fn release_task(&self, run: RunId) -> futures::future::BoxFuture<'_, Result<(), AgentError>> {
-        self.original.release_task(run)
-    }
-}
-
-/// Builds an Agent selection in a shared Framework. `new()` and plugin methods
-/// remain a compatibility entry for a private, single-Agent Framework.
+/// Selects capabilities from an already installed Framework environment.
 #[derive(Clone)]
 pub struct AgentBuilder {
-    plugins: Vec<Arc<dyn Plugin>>,
-    factories: Vec<ConfiguredPluginFactory>,
-    scope: String,
-    capability_packs: Vec<Arc<dyn CapabilityPack>>,
-    capability_skills_root: Option<PathBuf>,
-    default_models: bool,
-    framework: Option<Framework>,
+    framework: Framework,
     selection: AgentSelection,
 }
-impl Default for AgentBuilder {
-    fn default() -> Self {
-        Self {
-            plugins: Vec::new(),
-            factories: Vec::new(),
-            scope: RunId::new_v4().to_string(),
-            capability_packs: Vec::new(),
-            capability_skills_root: None,
-            default_models: true,
-            framework: None,
-            selection: AgentSelection::default(),
-        }
-    }
-}
-
 impl AgentBuilder {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn default_models(mut self, enabled: bool) -> Self {
-        self.default_models = enabled;
-        self
-    }
-    pub fn plugin(mut self, plugin: impl Plugin + 'static) -> Self {
-        self.plugins.push(Arc::new(plugin));
-        self
-    }
-    pub fn plugin_arc(mut self, plugin: Arc<dyn Plugin>) -> Self {
-        self.plugins.push(plugin);
-        self
-    }
-
-    /// Compatibility configuration for a private Framework. Shared environments
-    /// load packages through `FrameworkBuilder::capability_pack`.
-    pub fn capability_pack(mut self, pack: impl CapabilityPack + 'static) -> Self {
-        self.capability_packs.push(Arc::new(pack));
-        self
-    }
-
-    /// Set the application-managed root used to prepare embedded `skills/`
-    /// resources from selected capability packages.
-    pub fn capability_skills_root(mut self, root: impl Into<PathBuf>) -> Self {
-        self.capability_skills_root = Some(root.into());
-        self
-    }
-
-    pub fn plugin_factory(mut self, factory: ConfiguredPluginFactory) -> Self {
-        self.factories.push(factory);
-        self
-    }
-    pub fn capability_pack_arc(mut self, pack: Arc<dyn CapabilityPack>) -> Self {
-        self.capability_packs.push(pack);
-        self
-    }
-    fn bind_scope(&mut self, scope: String) -> Result<(), AgentError> {
-        selected_pack_closure(&self.capability_packs)?;
-        fn bind(
-            pack: &Arc<dyn CapabilityPack>,
-            scope: &str,
-            cache: &mut BTreeMap<String, Arc<dyn CapabilityPack>>,
-        ) -> Arc<dyn CapabilityPack> {
-            if let Some(bound) = cache.get(pack.id()) {
-                return bound.clone();
-            }
-            let original = pack
-                .for_framework_scope(scope)
-                .unwrap_or_else(|| pack.clone());
-            let included = original
-                .included_packs()
-                .iter()
-                .map(|child| bind(child, scope, cache))
-                .collect();
-            let bound: Arc<dyn CapabilityPack> =
-                Arc::new(BoundCapabilityPack { original, included });
-            cache.insert(pack.id().to_owned(), bound.clone());
-            bound
-        }
-        let mut cache = BTreeMap::new();
-        self.capability_packs = self
-            .capability_packs
-            .iter()
-            .map(|pack| bind(pack, &scope, &mut cache))
-            .collect();
-        self.scope = scope;
-        Ok(())
-    }
-    pub async fn build(mut self) -> Result<Agent, AgentError> {
-        if let Some(framework) = self.framework.clone() {
-            self.validate_shared()?;
-            return framework.build_agent(self).await;
-        }
-        self.bind_scope(RunId::new_v4().to_string())?;
-        self.preflight()?;
-        let blueprint = self.clone();
-        let generation = self.build_generation().await?;
-        Ok(Agent::from_generation(generation, blueprint))
-    }
     pub(crate) fn in_framework(framework: Framework, selection: AgentSelection) -> Self {
         Self {
-            framework: Some(framework),
+            framework,
             selection,
-            ..Self::default()
         }
     }
-    fn validate_shared(&self) -> Result<(), AgentError> {
-        if !self.plugins.is_empty()
-            || !self.factories.is_empty()
-            || !self.capability_packs.is_empty()
-            || self.capability_skills_root.is_some()
-        {
-            return Err(AgentError::InvalidConfiguration("install plugins and capability packs on FrameworkBuilder; Agent only selects capabilities".into()));
-        }
-        Ok(())
+    pub async fn build(self) -> Result<Agent, AgentError> {
+        self.framework.clone().build_agent(self).await
     }
     pub(crate) async fn assemble_shared(self) -> Result<Agent, AgentError> {
-        self.validate_shared()?;
         let blueprint = self.clone();
         let generation = self.build_generation().await?;
         Ok(Agent::from_generation(generation, blueprint))
     }
-    pub(crate) fn installed_packs(&self) -> Result<Vec<Arc<dyn CapabilityPack>>, AgentError> {
-        Ok(selected_pack_closure(&self.capability_packs)?
-            .into_values()
-            .collect())
-    }
-    pub(crate) fn prepare_framework(&mut self) -> Result<(), AgentError> {
-        self.bind_scope(RunId::new_v4().to_string())?;
-        self.preflight()
-    }
-    fn all_explicit_plugins(&self) -> Result<Vec<Arc<dyn Plugin>>, AgentError> {
-        let mut plugins = self.plugins.clone();
-        for pack in selected_pack_closure(&self.capability_packs)?.values() {
-            plugins.extend(pack.plugins());
-        }
-        Ok(plugins)
-    }
-    fn retained_plugins(&self) -> Result<Vec<Arc<dyn Plugin>>, AgentError> {
-        let mut plugins = self.plugins.clone();
-        for pack in selected_pack_closure(&self.capability_packs)?.values() {
-            plugins.extend(pack.retained_plugins());
-        }
-        Ok(plugins)
-    }
-    fn preflight(&self) -> Result<(), AgentError> {
-        for pack in selected_pack_closure(&self.capability_packs)?.values() {
-            pack.preflight()?;
-        }
-        let mut plugins = self.plugins.clone();
-        plugins.extend(self.factories.iter().map(ConfiguredPluginFactory::plugin));
-        for pack in selected_pack_closure(&self.capability_packs)?.values() {
-            plugins.extend(pack.plugins());
-        }
-        validate_capability_packs_with_plugins(
-            &self.capability_packs,
-            &plugins,
-            &HashSet::from(["builtin.framework-defaults".into()]),
-        )
-    }
     async fn build_generation(self) -> Result<AgentGeneration, AgentError> {
-        self.build_generation_reusing(None).await
-    }
-    async fn build_generation_reusing(
-        self,
-        retained: Option<&PluginContainer>,
-    ) -> Result<AgentGeneration, AgentError> {
-        let shared = self.framework.clone();
-        let mut container = if shared.is_none() {
-            Some(self.clone().install_plugins(retained).await?)
-        } else {
-            None
-        };
-        let registry = match &shared {
-            Some(framework) => framework.registry()?,
-            None => container
-                .as_ref()
-                .expect("private environment")
-                .services()
-                .clone(),
-        };
-        if shared.is_some() {
-            self.selection.validate_choices(&registry)?;
-        }
-        let registry = match self.selection.bind(&registry) {
-            Ok(registry) => registry,
-            Err(error) => {
-                if let Some(container) = &mut container {
-                    container
-                        .close_async(std::time::Duration::from_secs(5))
-                        .await;
-                }
-                return Err(error);
-            }
-        };
-        let (agent_loop, mut services, sinks, outputs) = match (|| -> Result<_, AgentError> {
+        let registry = self.framework.registry()?;
+        self.selection.validate_choices(&registry)?;
+        let registry = self.selection.bind(&registry)?;
+        let (agent_loop, mut services, sinks, outputs) = (|| -> Result<_, AgentError> {
             let registry = &registry;
             let agent_loop = registry
                 .get::<LoopService>()
@@ -506,21 +265,8 @@ impl AgentBuilder {
                 }
             }
             Ok((agent_loop, services, sinks, outputs))
-        })() {
-            Ok(services) => services,
-            Err(error) => {
-                if let Some(container) = &mut container {
-                    container
-                        .close_async(std::time::Duration::from_secs(5))
-                        .await;
-                }
-                return Err(error);
-            }
-        };
-        let packs = match &shared {
-            Some(framework) => framework.capability_packs(),
-            None => self.installed_packs()?,
-        };
+        })()?;
+        let packs = self.framework.capability_packs();
         let versions: Vec<_> = packs
             .iter()
             .flat_map(|pack| pack.version_bindings())
@@ -542,25 +288,9 @@ impl AgentBuilder {
             Ok::<_, AgentError>(())
         }
         .await;
-        if let Err(error) = validation {
-            if let Some(container) = &mut container {
-                container
-                    .close_async(std::time::Duration::from_secs(5))
-                    .await;
-            }
-            return Err(error);
-        }
+        validation?;
         let operations = services.operations.clone();
-        let owns_environment = shared.is_none();
-        let framework = match shared {
-            Some(framework) => framework,
-            None => Framework::from_container(
-                container.take().expect("private environment"),
-                registry.clone(),
-                AgentSelection::default(),
-                self.installed_packs()?,
-            ),
-        };
+        let framework = self.framework;
         let inner = Arc::new(AgentInner {
             id: RunId::new_v4(),
             cleanup: Mutex::new(CleanupState {
@@ -569,7 +299,6 @@ impl AgentBuilder {
                 report: eliteforge_agent_plugin_core::ShutdownReport::default(),
             }),
             framework,
-            owns_environment,
             default_model: self.selection.model.clone(),
             skill_access: self.selection.skills.as_ref().map(|names| SkillAccess {
                 names: names.iter().cloned().collect(),
@@ -588,9 +317,7 @@ impl AgentBuilder {
             cleanup_done: Notify::new(),
             threads: Arc::new(ThreadRegistry::default()),
         });
-        if !inner.owns_environment {
-            inner.framework.register_generation(&inner)?;
-        }
+        inner.framework.register_generation(&inner)?;
         let collaboration = Arc::new(CollaborationRuntime {
             agent: Arc::downgrade(&inner),
             threads: inner.threads.clone(),
@@ -601,77 +328,6 @@ impl AgentBuilder {
             inner,
             collaboration,
         })
-    }
-    pub(crate) async fn install_plugins(
-        mut self,
-        retained: Option<&PluginContainer>,
-    ) -> Result<PluginContainer, AgentError> {
-        self.plugins
-            .extend(self.factories.iter().map(ConfiguredPluginFactory::plugin));
-        for pack in selected_pack_closure(&self.capability_packs)?.values() {
-            self.plugins.extend(pack.plugins());
-        }
-        let skill_sources = selected_capability_skill_sources(&self.capability_packs)?;
-        let capability_skill_provider =
-            selected_capability_requires_skills_runtime(&self.capability_packs)?;
-        let capability_skills_runtime =
-            selected_capability_provides_skills_runtime(&self.capability_packs)?;
-        if !skill_sources.is_empty() || capability_skill_provider {
-            let has_skills_runtime = self
-                .plugins
-                .iter()
-                .any(|plugin| plugin.id() == "skills.default");
-            for (index, source) in skill_sources.into_iter().enumerate() {
-                self.plugins.push(Arc::new(
-                    eliteforge_agent_official_plugin_skills::CapabilitySkillsSourcePlugin::new(
-                        format!("builtin.capability-skills.{}.{}", source.pack_id, index),
-                        source.pack_id,
-                        source.source,
-                        self.capability_skills_root.clone(),
-                    ),
-                ));
-            }
-            if !has_skills_runtime && !capability_skills_runtime {
-                self.plugins.push(Arc::new(
-                    eliteforge_agent_official_plugin_skills::SkillsPlugin::sources_only(),
-                ));
-            }
-        }
-        let mut occupied_plugin_ids = HashSet::with_capacity(self.plugins.len() + 1);
-        for (index, plugin) in self.plugins.iter().enumerate() {
-            let id = plugin.id().to_owned();
-            if id.trim().is_empty() {
-                return Err(PluginError::EmptyPluginId { index }.into());
-            }
-            if !occupied_plugin_ids.insert(id.clone()) {
-                return Err(PluginError::DuplicatePluginId { id }.into());
-            }
-        }
-        // DefaultsPlugin joins the same graph below. Its ID must be reserved
-        // before capability factories run, but cannot satisfy a capability
-        // dependency because DefaultsPlugin is ordered after all capabilities.
-        let defaults_plugin_id = "builtin.framework-defaults".to_owned();
-        if occupied_plugin_ids.contains(&defaults_plugin_id) {
-            return Err(PluginError::DuplicatePluginId {
-                id: defaults_plugin_id,
-            }
-            .into());
-        }
-        let reserved_plugin_ids = HashSet::from([defaults_plugin_id]);
-        let capability_plugins = resolve_capability_packs_with_plugins(
-            &self.capability_packs,
-            &self.plugins,
-            &reserved_plugin_ids,
-        )?;
-        self.plugins.extend(capability_plugins);
-        let after = self.plugins.iter().map(|p| p.id().to_owned()).collect();
-        self.plugins.push(Arc::new(crate::plugins::DefaultsPlugin {
-            after,
-            default_models: self.default_models,
-        }));
-        PluginContainer::build_reusing(self.plugins, retained)
-            .await
-            .map_err(Into::into)
     }
 }
 
@@ -690,7 +346,6 @@ struct CleanupState {
 pub(crate) struct AgentInner {
     id: RunId,
     framework: Framework,
-    owns_environment: bool,
     skill_access: Option<SkillAccess>,
     default_model: Option<ModelRef>,
     registry: eliteforge_agent_plugin_core::ServiceRegistry,
@@ -716,15 +371,8 @@ pub enum ReconfigureError {
     Busy(Vec<AssemblyOccupancy>),
     #[error("invalid reconfiguration: {0}")]
     Invalid(String),
-    #[error("candidate failed; previous assembly restored: {0}")]
-    Restored(String),
-    #[error(
-        "candidate failed: {candidate}; restoring previous assembly also failed: {restoration}"
-    )]
-    Unavailable {
-        candidate: String,
-        restoration: String,
-    },
+    #[error("candidate failed; previous selection retained: {0}")]
+    Rejected(String),
 }
 struct AssemblyState {
     generation: AgentGeneration,
@@ -844,12 +492,7 @@ impl Agent {
         framework: Framework,
         mut target: AgentBuilder,
     ) -> Result<(), ReconfigureError> {
-        target
-            .validate_shared()
-            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
-        if let Some(requested) = &target.framework
-            && !framework.same_environment(requested)
-        {
+        if !framework.same_environment(&target.framework) {
             return Err(ReconfigureError::Invalid(
                 "cannot move Agent to another Framework".into(),
             ));
@@ -858,7 +501,7 @@ impl Agent {
             .admission()
             .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
         let cancellation = framework.cancellation_token();
-        target.framework = Some(framework);
+        target.framework = framework;
         let transition = self.assembly.clone();
         let (sender, receiver) = oneshot::channel();
         {
@@ -899,7 +542,7 @@ impl Agent {
                     old.close().await;
                     Ok(())
                 }
-                Err(error) => Err(ReconfigureError::Restored(error.to_string())),
+                Err(error) => Err(ReconfigureError::Rejected(error.to_string())),
             };
             transition
                 .state
@@ -1000,19 +643,21 @@ impl Agent {
                 });
             }
         }
-        for pack in selected_pack_closure(&state.blueprint.capability_packs)?.values() {
-            blockers.extend(pack.reconfiguration_blockers()?.into_iter().map(|label| {
-                AssemblyOccupancy {
-                    kind: "capability".into(),
-                    label,
-                }
-            }));
-        }
         Ok(blockers)
     }
-    /// Idle-only complete assembly replacement. Cancellation of the caller does
-    /// not cancel the owned update/restore task or leave admission suspended.
-    pub async fn reconfigure(&self, mut target: AgentBuilder) -> Result<(), ReconfigureError> {
+    /// The Framework environment that owns this Agent's installed capabilities.
+    pub fn framework(&self) -> Framework {
+        self.assembly
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .blueprint
+            .framework
+            .clone()
+    }
+    /// Rebind an idle Agent to capabilities in the same Framework.
+    /// Caller cancellation does not interrupt the owned update task.
+    pub async fn reconfigure(&self, target: AgentBuilder) -> Result<(), ReconfigureError> {
         let framework = self
             .assembly
             .state
@@ -1021,192 +666,7 @@ impl Agent {
             .blueprint
             .framework
             .clone();
-        if let Some(framework) = framework {
-            return self.reconfigure_selection(framework, target).await;
-        }
-        let scope = self
-            .assembly
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .blueprint
-            .scope
-            .clone();
-        target
-            .bind_scope(scope)
-            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
-        let retained_plugins = {
-            let state = self
-                .assembly
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            state
-                .blueprint
-                .retained_plugins()
-                .map_err(|e| ReconfigureError::Invalid(e.to_string()))?
-        };
-        let target_members = target
-            .all_explicit_plugins()
-            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
-        for plugin in &retained_plugins {
-            if let Some(requested) = target_members
-                .iter()
-                .find(|member| member.id() == plugin.id())
-            {
-                if !Arc::ptr_eq(requested, plugin) {
-                    return Err(ReconfigureError::Invalid(format!(
-                        "retained plugin {} cannot change configuration",
-                        plugin.id()
-                    )));
-                }
-            } else {
-                target.plugins.push(plugin.clone());
-            }
-        }
-        let retained_ids: HashSet<_> = retained_plugins
-            .iter()
-            .map(|plugin| plugin.id().to_owned())
-            .collect();
-        for plugin in &retained_plugins {
-            if plugin
-                .dependencies()
-                .iter()
-                .any(|dependency| !retained_ids.contains(dependency))
-            {
-                return Err(ReconfigureError::Invalid(format!(
-                    "retained plugin {} depends on a replaceable member",
-                    plugin.id()
-                )));
-            }
-        }
-        target
-            .preflight()
-            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
-
-        let transition = self.assembly.clone();
-        let (sender, receiver) = oneshot::channel();
-        let mut package_guards = Vec::new();
-        {
-            let mut state = self
-                .assembly
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if state.closed || state.generation.is_closed() {
-                return Err(ReconfigureError::Invalid(
-                    "Agent is closed or unavailable".into(),
-                ));
-            }
-            if state.updating {
-                return Err(ReconfigureError::Busy(vec![AssemblyOccupancy {
-                    kind: "update".into(),
-                    label: "assembly update in progress".into(),
-                }]));
-            }
-
-            let blockers =
-                Self::blockers(&state).map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
-            if !blockers.is_empty() {
-                return Err(ReconfigureError::Busy(blockers));
-            }
-            for pack in selected_pack_closure(&state.blueprint.capability_packs)
-                .map_err(|e| ReconfigureError::Invalid(e.to_string()))?
-                .values()
-            {
-                match pack.lock_reconfiguration() {
-                    Ok(guard) => package_guards.push(guard),
-                    Err(error) => {
-                        let blockers = Self::blockers(&state)
-                            .map_err(|e| ReconfigureError::Invalid(e.to_string()))?;
-                        return Err(if blockers.is_empty() {
-                            ReconfigureError::Invalid(error.to_string())
-                        } else {
-                            ReconfigureError::Busy(blockers)
-                        });
-                    }
-                }
-            }
-            state.updating = true;
-        }
-        tokio::spawn(async move {
-            let _package_guards = package_guards;
-            let _transition = transition.transition.lock().await;
-            {
-                let mut state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.closed {
-                    state.updating = false;
-                    let _ = sender.send(Err(ReconfigureError::Invalid(
-                        "Agent closed before update started".into(),
-                    )));
-                    return;
-                }
-            }
-            let (old, previous) = {
-                let state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
-                (state.generation.clone(), state.blueprint.clone())
-            };
-            let mut retained = old.inner.framework.detach_plugins(&retained_ids);
-            let closed = old.close().await;
-            let candidate = if closed.is_success() {
-                std::panic::AssertUnwindSafe(
-                    target.clone().build_generation_reusing(Some(&retained)),
-                )
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| Err(AgentError::Run("candidate assembly panicked".into())))
-            } else {
-                Err(AgentError::Run(format!(
-                    "old assembly did not shut down cleanly: {closed:?}"
-                )))
-            };
-            let (generation, blueprint, result, unavailable) = match candidate {
-                Ok(generation) => (generation, target, Ok(()), false),
-                Err(error) => {
-                    let candidate = error.to_string();
-                    match std::panic::AssertUnwindSafe(
-                        previous.clone().build_generation_reusing(Some(&retained)),
-                    )
-                    .catch_unwind()
-                    .await
-                    .unwrap_or_else(|_| Err(AgentError::Run("restoration panicked".into())))
-                    {
-                        Ok(generation) => (
-                            generation,
-                            previous,
-                            Err(ReconfigureError::Restored(candidate)),
-                            false,
-                        ),
-                        Err(error) => (
-                            old,
-                            previous,
-                            Err(ReconfigureError::Unavailable {
-                                candidate,
-                                restoration: error.to_string(),
-                            }),
-                            true,
-                        ),
-                    }
-                }
-            };
-            if !unavailable {
-                generation.inner.framework.adopt_retained(&mut retained);
-            }
-            {
-                let mut state = transition.state.lock().unwrap_or_else(|e| e.into_inner());
-                state.generation = generation;
-                state.blueprint = blueprint;
-                state.updating = false;
-                state.closed = unavailable;
-            }
-            let _ = sender.send(result);
-        });
-        receiver.await.unwrap_or_else(|_| {
-            Err(ReconfigureError::Unavailable {
-                candidate: "update task stopped".into(),
-                restoration: "unknown".into(),
-            })
-        })
+        self.reconfigure_selection(framework, target).await
     }
     pub async fn close(&self) -> eliteforge_agent_plugin_core::ShutdownReport {
         self.close_with_timeout(std::time::Duration::from_secs(5))
@@ -2181,11 +1641,11 @@ impl AgentGeneration {
     }
 
     /// Starts one owned shutdown task. Cancelling any caller does not abandon
-    /// cleanup; all clones await and receive the same report. The first caller's
-    /// timeout applies to each asynchronous plugin callback.
+    /// cleanup; all clones await and receive the same report.
+    /// Framework owns plugin shutdown; this only drains Agent work.
     pub async fn close_with_timeout(
         &self,
-        timeout: std::time::Duration,
+        _timeout: std::time::Duration,
     ) -> eliteforge_agent_plugin_core::ShutdownReport {
         {
             let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
@@ -2224,21 +1684,7 @@ impl AgentGeneration {
                     }
                     notified.await;
                 }
-                let report = std::panic::AssertUnwindSafe(async {
-                    if inner.owns_environment {
-                        inner.framework.close_with_timeout(timeout).await
-                    } else {
-                        eliteforge_agent_plugin_core::ShutdownReport::default()
-                    }
-                })
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| {
-                    eliteforge_agent_plugin_core::ShutdownReport {
-                        panics: 1,
-                        ..Default::default()
-                    }
-                });
+                let report = eliteforge_agent_plugin_core::ShutdownReport::default();
                 {
                     let mut state = inner.cleanup.lock().unwrap_or_else(|e| e.into_inner());
                     state.report = report;

@@ -94,7 +94,7 @@ fn per_tool_timeout_abandons_a_queued_native_pty_start() {
             tokio::time::sleep(Duration::from_millis(200)).await;
             assert!(!root.join("should-not-start").exists());
             assert!(service.list("timeout").unwrap().is_empty());
-            assert!(agent.close().await.is_success());
+            assert!(agent.framework().close().await.is_success());
         });
 }
 
@@ -156,5 +156,5 @@ async fn per_tool_timeout_stops_command_before_a_task_id_is_accepted() {
                 if message.contains("tool effects are indeterminate") && message.contains("tool timed out")));
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(!root.join("late-command").exists());
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }

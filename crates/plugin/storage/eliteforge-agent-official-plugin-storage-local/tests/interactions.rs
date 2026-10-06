@@ -3,6 +3,7 @@ use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_agui::*;
 use eliteforge_agent_official_plugin_storage_local::*;
 use eliteforge_agent_official_plugin_tools_human::*;
+use eliteforge_agent_test_support::TestBuilder;
 use serde_json::{Value, json};
 use std::{
     path::Path,
@@ -87,7 +88,7 @@ async fn build(
             std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
     }
-    let mut builder = AgentBuilder::new().plugin(LocalStoragePlugin::new(path, artifacts))
+    let mut builder = TestBuilder::new().plugin(LocalStoragePlugin::new(path, artifacts))
         .plugin(ChatModelPlugin::new(Script { first, requests: seen })).plugin(HumanInteractionPlugin)
         .plugin(ToolProviderPlugin::new("work", StaticToolProvider::new(vec![ToolBinding::new(
             ToolDescriptor::new("work", "work", "work", json!({"type":"object","required":["value"],"properties":{"value":{"type":"integer"}},"additionalProperties":false})), Counted(count)
@@ -150,7 +151,7 @@ async fn all_loops_persist_questions_answers_and_agui_interrupts_across_restart(
         let records = agent.pending_interactions("chat").await.unwrap();
         assert_eq!(records.len(), 1);
         assert!(records[0].tool_call.is_some());
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
         drop(agent);
         let agent = build(&path, mode, None, seen.clone(), calls, false).await;
         assert_eq!(
@@ -175,7 +176,7 @@ async fn all_loops_persist_questions_answers_and_agui_interrupts_across_restart(
             .await
             .unwrap();
         // Crash between answer acceptance and continuation is safe.
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
         drop(agent);
         let agent = build(&path, mode, None, seen.clone(), Arc::default(), false).await;
         let mut recovery = resume.clone();
@@ -213,7 +214,7 @@ async fn all_loops_persist_questions_answers_and_agui_interrupts_across_restart(
                     .unwrap()
                     .contains("Use captions")
         }));
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
     }
 }
 
@@ -239,7 +240,7 @@ async fn react_approval_executes_only_original_arguments_and_identical_resume_is
         let id = result.interactions[0].id;
         let record = agent.interaction("s", id).await.unwrap();
         assert_eq!(record.tool_call.unwrap().arguments, json!({"value":17}));
-        agent.close().await;
+        agent.framework().close().await;
         drop(agent);
         let agent = build(&path, "react", None, seen.clone(), calls.clone(), true).await;
         let resume = agent.answer("s", id, json!(approved)).await.unwrap();
@@ -253,14 +254,14 @@ async fn react_approval_executes_only_original_arguments_and_identical_resume_is
         agent.run(resume).await.unwrap();
         assert_eq!(seen.lock().unwrap().len(), 2);
         assert_eq!(calls.lock().unwrap().len(), usize::from(approved));
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 
 #[tokio::test]
 async fn missing_storage_and_memory_paths_fail_build() {
     assert!(
-        AgentBuilder::new()
+        TestBuilder::new()
             .plugin(ChatModelPlugin::new(Script {
                 first: None,
                 requests: Arc::default()
@@ -270,7 +271,7 @@ async fn missing_storage_and_memory_paths_fail_build() {
             .is_err()
     );
     assert!(
-        AgentBuilder::new()
+        TestBuilder::new()
             .plugin(LocalStoragePlugin::new(":memory:", "artifacts"))
             .build()
             .await
@@ -327,7 +328,7 @@ async fn terminal_resume_repairs_transcript_without_repeating_the_model() {
         .await
         .unwrap();
     let seen = Arc::new(Mutex::new(vec![]));
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .plugin(state.clone().plugin())
         .plugin(ConversationStorePlugin::new(FailFinalAppend {
             inner: conversations.clone(),
@@ -357,7 +358,7 @@ async fn terminal_resume_repairs_transcript_without_repeating_the_model() {
     let mut check = conversations.open("s").await.unwrap();
     assert_eq!(check.snapshot().await.unwrap().messages.len(), 2);
     check.finish(ConversationOutcome::Completed).await.unwrap();
-    agent.close().await;
+    agent.framework().close().await;
     conversations.close().await.unwrap();
     state.close().await.unwrap();
 }

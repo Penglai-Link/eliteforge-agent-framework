@@ -70,7 +70,7 @@ pub async fn invoke(
         .await
         .unwrap();
     let run = agent.run(RunRequest::new("tools", "invoke")).await;
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     let value = output.lock().unwrap().take();
     value.unwrap_or_else(|| Err(run.expect_err("missing tool must fail").to_string()))
 }

@@ -1,5 +1,6 @@
 //! Acceptance coverage for cross-crate capability discovery and assembly.
 
+use eliteforge_agent_test_support::TestBuilder;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -14,8 +15,17 @@ use eliteforge_agent_official_plugin_skills::SkillsPlugin;
 use eliteforge_agent_test_support::TestConversationStore;
 use serde_json::json;
 
-fn builder(agent_loop: impl AgentLoop + 'static) -> AgentBuilder {
-    AgentBuilder::new()
+fn builder(agent_loop: impl AgentLoop + 'static) -> TestBuilder {
+    TestBuilder::new()
+        .skills([
+            "declared-review",
+            "declared-hidden",
+            "factory-skill",
+            "embedded-review",
+            "directory-review",
+            "fixture-review",
+            "packaged-review",
+        ])
         .default_models(false)
         .plugin(AgentLoopPlugin::new(agent_loop))
         .plugin(ConversationStorePlugin::new(
@@ -703,12 +713,12 @@ async fn third_party_extension_points_are_available_to_consumers_in_ready() {
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
         ["external-payment-rule"]
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
 async fn built_in_agent_loop_can_be_declared_directly_by_a_capability_package() {
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(ConversationStorePlugin::new(
             TestConversationStore::default(),
@@ -723,7 +733,7 @@ async fn built_in_agent_loop_can_be_declared_directly_by_a_capability_package() 
         .await
         .unwrap();
     assert!(matches!(result.status, RunStatus::Completed));
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -738,7 +748,7 @@ async fn built_in_chat_model_can_be_declared_directly_with_its_default_connectio
         agent.models(ModelOperation::Chat),
         vec![ModelRef::new("default", "default")]
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -761,11 +771,11 @@ async fn aliased_built_in_context_provider_uses_the_framework_service_adapter() 
             .iter()
             .any(|message| message == "aliased context provider")
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
-async fn a_shared_skills_plugin_creates_a_fresh_runtime_for_each_agent() {
+async fn separate_frameworks_create_independent_skills_runtimes() {
     let skills = Arc::new(SkillsPlugin::sources_only());
 
     let first = builder(UnusedLoop)
@@ -773,14 +783,14 @@ async fn a_shared_skills_plugin_creates_a_fresh_runtime_for_each_agent() {
         .build()
         .await
         .unwrap();
-    assert!(first.close().await.is_success());
+    assert!(first.framework().close().await.is_success());
 
     let second = builder(UnusedLoop)
         .plugin_arc(skills)
         .build()
         .await
         .unwrap();
-    assert!(second.close().await.is_success());
+    assert!(second.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -799,7 +809,7 @@ async fn single_third_party_extension_is_visible_once_and_rejects_duplicates() {
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
         ["primary-checkout-authority"]
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 
     let error = builder(UnusedLoop)
         .capability_pack(CapabilityPackBuilder::new("single-extension.primary", ()))
@@ -838,7 +848,7 @@ async fn context_storage_interfaces_can_be_declared_as_capabilities() {
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
         ["context-storage-ready"]
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -862,7 +872,7 @@ async fn declared_skill_provider_creates_the_shared_skills_runtime_without_files
             .any(|message| message.contains("declared-review")),
         "the capability SkillProvider must share the same Skills endpoint"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -885,7 +895,7 @@ async fn only_skills_filters_the_merged_capability_provider_catalog() {
         .join("\n");
     assert!(contexts.contains("declared-review"));
     assert!(!contexts.contains("declared-hidden"));
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -922,7 +932,7 @@ async fn capability_factory_skills_runtime_aggregates_package_sources_once() {
         [(1, 1)],
         "a configured SkillsPlugin must own the one aggregate endpoint"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -946,7 +956,7 @@ async fn duplicate_names_across_selected_skill_providers_are_rejected() {
         error.to_string().contains("provided by both"),
         "unexpected duplicate skill error: {error}"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -967,7 +977,7 @@ async fn factory_capabilities_can_register_non_trait_plugin_configuration() {
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
         ["factory-plugin-installed", "factory-plugin-ready"]
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1015,7 +1025,7 @@ async fn factory_capability_registers_a_configured_model_operation_binding() {
     let response = agent.embed(request).await.unwrap();
     assert_eq!(response.model, ModelRef::new("declared", "embedding-v1"));
     assert_eq!(response.vectors.len(), 2);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1047,7 +1057,7 @@ async fn factory_capability_registers_one_explicitly_described_tool() {
         })
     };
     assert!(exposes_declared_tool);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1083,7 +1093,7 @@ async fn selected_package_embedded_skills_are_prepared_and_exposed_once() {
         "selected skills should share one Skills runtime"
     );
     assert!(root.join("capability-packs").is_dir());
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(
         root.join("capability-packs").is_dir(),
         "the application-managed resource cache must outlive an Agent"
@@ -1144,7 +1154,7 @@ async fn selected_package_directory_skills_are_read_without_resource_preparation
             .iter()
             .any(|context| context.contains("directory-review"))
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1173,7 +1183,7 @@ async fn capability_skills_macro_embeds_the_conventional_skills_directory() {
             .iter()
             .any(|context| context.contains("fixture-review"))
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1208,7 +1218,7 @@ async fn selected_pack_uses_its_agent_configuration_and_leaves_linked_payment_in
             .any(|message| message == "shop:shop-a"),
         "the config passed to this Agent must reach the configured factory"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1229,7 +1239,7 @@ async fn explicitly_included_child_package_is_activated_with_its_own_configurati
         state.events().contains(&"factory:audit:audit".to_owned()),
         "a child package must be selected explicitly by its parent, not merely linked"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1257,7 +1267,7 @@ async fn dependencies_have_a_stable_order_despite_inventory_collection_order() {
                 format!("factory:ordered-second:{label}"),
             ]
         );
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
     }
 }
 
@@ -1290,7 +1300,7 @@ async fn one_implementation_contributing_two_interfaces_is_created_once() {
             .iter()
             .any(|message| message == "shared:one-instance")
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1320,7 +1330,7 @@ async fn two_agents_with_one_package_type_keep_configuration_and_lifecycle_isola
         .run(RunRequest::new("first", "inspect"))
         .await
         .unwrap();
-    assert!(first.close().await.is_success());
+    assert!(first.framework().close().await.is_success());
     second
         .run(RunRequest::new("second", "inspect"))
         .await
@@ -1340,7 +1350,7 @@ async fn two_agents_with_one_package_type_keep_configuration_and_lifecycle_isola
             .any(|message| message == "shop:second"),
         "closing the first Agent must not close the second package instance"
     );
-    assert!(second.close().await.is_success());
+    assert!(second.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1477,7 +1487,7 @@ async fn direct_plugins_and_pack_members_participate_in_the_capability_dependenc
             "install:mixed",
         ]
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     let closed: Vec<_> = state
         .events()
         .into_iter()
@@ -1541,7 +1551,7 @@ async fn default_factory_is_shared_across_modules_and_different_impl_paths() {
         1,
         "one concrete type must have one default instance regardless of the impl module"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1565,7 +1575,7 @@ async fn configured_factories_share_across_modules_and_aliases_with_implicit_or_
                 .events()
                 .contains(&format!("event:cross-module:{pack}"))
         );
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
     }
 }
 
@@ -1606,7 +1616,7 @@ async fn stacked_declarations_create_two_independent_instances_of_one_interface(
         .await
         .unwrap();
     assert_eq!(*observed.lock().unwrap(), ["repeated", "repeated"]);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 struct DeclaredDependencyPlugin {
@@ -1689,7 +1699,7 @@ async fn factory_order_follows_transitive_dependencies_through_ordinary_plugins(
         ],
         "z -> ordinary plugin -> a must override alphabetical capability order"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 fn test_pack() -> CapabilityPackBuilder<()> {

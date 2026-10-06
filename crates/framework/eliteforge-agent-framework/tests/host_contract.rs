@@ -627,13 +627,7 @@ async fn tool_identity_or_call_name_conflicts_are_rejected_before_model_executio
             ))
             .build()
             .await;
-        match agent {
-            Ok(agent) => {
-                let result = agent.run(RunRequest::new("session", "run")).await;
-                assert!(matches!(result, Err(AgentError::ToolSetup(_))));
-            }
-            Err(error) => assert!(matches!(error, AgentError::ToolSetup(_))),
-        }
+        assert!(matches!(agent, Err(AgentError::InvalidConfiguration(_))));
         assert!(model.requests().is_empty());
         assert_eq!(tool.count(), 0);
     }

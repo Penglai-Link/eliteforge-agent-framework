@@ -94,7 +94,7 @@ async fn scoped_runtime_is_authorized_and_selected_output_ceiling_precedes_assem
         assert_eq!(report.output_token_limit, ceiling);
         assert_eq!(report.input_capacity, window - ceiling as usize);
     }
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 #[tokio::test]
 async fn native_recovery_uses_real_authorized_candidate_with_its_smaller_window() {
@@ -132,7 +132,7 @@ async fn native_recovery_uses_real_authorized_candidate_with_its_smaller_window(
     assert_eq!(reports[1].model.model, "good");
     assert_eq!(reports[1].output_token_limit, 8);
     assert_eq!(reports[1].input_capacity, 1016);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 #[tokio::test]
 async fn denied_tree_dispatch_releases_unspent_tokens_and_never_calls_provider() {

@@ -74,7 +74,7 @@ async fn default_genai_environment_child() {
                 agent.models(ModelOperation::Chat),
                 vec![ModelRef::new("default", "configured-model")]
             );
-            agent.close().await;
+            agent.framework().close().await;
         }
         "custom" => {
             let agent = result.unwrap();
@@ -86,7 +86,7 @@ async fn default_genai_environment_child() {
                     .output,
                 "local"
             );
-            agent.close().await;
+            agent.framework().close().await;
         }
         _ => panic!("unknown test mode"),
     }

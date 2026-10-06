@@ -86,7 +86,7 @@ async fn json_and_media_results_preserve_typed_content_and_original_history() {
             .content,
             content
         );
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 
@@ -545,7 +545,7 @@ async fn terminal_callbacks_have_a_budget_independent_of_backlog_and_other_sinks
             1,
             "responsive sink receives the terminal exactly once"
         );
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 

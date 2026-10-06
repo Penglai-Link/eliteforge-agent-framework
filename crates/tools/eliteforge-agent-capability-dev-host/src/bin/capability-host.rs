@@ -17,7 +17,7 @@ fn error(error: impl std::fmt::Display) -> (StatusCode, String) {
 }
 struct Host {
     manager: CapabilityPackManager,
-    agent: tokio::sync::Mutex<Option<Agent>>,
+    agent: tokio::sync::Mutex<Option<(Framework, Agent)>>,
     pages: tokio::sync::Mutex<BTreeMap<String, Arc<PageSession>>>,
     page_topics: tokio::sync::Mutex<BTreeMap<String, tokio::sync::mpsc::Receiver<PageMessage>>>,
     source: PathBuf,
@@ -99,21 +99,82 @@ async fn build(State(host): State<Arc<Host>>, Json(input): Json<Build>) -> ApiRe
     if let Some(ids) = input.implementations {
         selection = selection.implementations(ids).map_err(error)?;
     }
-    let builder = AgentBuilder::new()
-        .default_models(false)
-        .capability_pack(selection);
-    let agent = host.agent.lock().await.clone();
-    if let Some(agent) = agent {
-        agent.reconfigure(builder).await.map_err(error)?;
-    } else {
-        let agent = builder.build().await.map_err(error)?;
-        let mut current = host.agent.lock().await;
-        if current.is_some() {
-            drop(current);
-            agent.close().await;
-            return Err(error("Agent was built concurrently"));
+    let mut current = host.agent.lock().await;
+    if let Some((_, agent)) = current.as_ref() {
+        let blockers = agent.reconfiguration_blockers().map_err(error)?;
+        let resources: Vec<_> = host
+            .manager
+            .usage()
+            .all_blockers()
+            .into_iter()
+            .filter(|item| !matches!(item.kind.as_str(), "runtime" | "selection"))
+            .collect();
+        let pins = host.manager.durable_pins().map_err(error)?;
+        if !blockers.is_empty() || !resources.is_empty() || !pins.is_empty() {
+            return Err(error(format!(
+                "Framework is busy: {blockers:?}; {resources:?}; {pins:?}"
+            )));
         }
-        *current = Some(agent);
+    }
+    let framework = Framework::builder()
+        .default_models(false)
+        .capability_pack(selection)
+        .build()
+        .await
+        .map_err(error)?;
+    let registry = framework.services().map_err(error)?;
+    fn one(ids: Vec<&str>) -> Result<Option<String>, (StatusCode, String)> {
+        match ids.len() {
+            0 => Ok(None),
+            1 => Ok(ids.first().map(|id| (*id).into())),
+            _ => Err(error(format!("Select one implementation: {ids:?}"))),
+        }
+    }
+    let choices = (|| -> Result<_, (StatusCode, String)> {
+        Ok(AgentSelection {
+            agent_loop: one(registry.providers::<LoopService>())?,
+            external_agent: one(registry.providers::<ExternalAgentService>())?,
+            model_strategy: one(registry.providers::<ModelStrategyService>())?,
+            context_assembler: one(registry.providers::<ContextAssemblerService>())?,
+            context_budget: one(registry.providers::<ContextBudgetPolicyService>())?,
+            context_reducer: one(registry.providers::<ContextReducerService>())?,
+            tool_providers: Some(
+                registry
+                    .providers::<ToolProviderService>()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            context_sources: Some(
+                registry
+                    .providers::<ContextContributorService>()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            workflow_nodes: Some(
+                registry
+                    .providers::<WorkflowNodeService>()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            ..Default::default()
+        })
+    })();
+    let candidate = match choices {
+        Ok(choices) => framework.agent(choices).build().await.map_err(error),
+        Err(error) => Err(error),
+    };
+    let agent = match candidate {
+        Ok(agent) => agent,
+        Err(error) => {
+            framework.close().await;
+            return Err(error);
+        }
+    };
+    if let Some((old, _)) = current.replace((framework, agent)) {
+        old.close().await;
     }
     Ok(Json(json!({"ready":true})))
 }
@@ -139,7 +200,8 @@ async fn run(State(host): State<Arc<Host>>, Json(input): Json<Value>) -> ApiResu
         .lock()
         .await
         .clone()
-        .ok_or_else(|| error("Build an Agent first"))?;
+        .ok_or_else(|| error("Build a Framework first"))?
+        .1;
     let result = agent
         .run(RunRequest::new(
             "debug.session",
@@ -358,16 +420,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 page.close();
             }
             closing.page_topics.lock().await.clear();
-            if let Some(agent) = closing.agent.lock().await.take() {
-                agent.close().await;
+            if let Some((framework, _)) = closing.agent.lock().await.take() {
+                framework.close().await;
             }
         })
         .await?;
     for page in host.pages.lock().await.values() {
         page.close();
     }
-    if let Some(agent) = host.agent.lock().await.take() {
-        agent.close().await;
+    if let Some((framework, _)) = host.agent.lock().await.take() {
+        framework.close().await;
     }
     Ok(())
 }

@@ -80,7 +80,7 @@ async fn one_connection_multiple_models_and_composed_stage_routing() {
     );
     assert!(calls[1].1.iter().any(|m| m.content.text() == "planner"));
     drop(calls);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -95,7 +95,7 @@ async fn invalid_catalog_fails_at_build_and_ambiguity_fails_at_dispatch() {
     let mut explicit = RunRequest::new("explicit", "hi");
     explicit.model = Some(ModelRef::new("x", "b"));
     assert_eq!(agent.run(explicit).await.unwrap().output, "b");
-    agent.close().await;
+    agent.framework().close().await;
     provider.calls.lock().unwrap().clear();
     assert!(
         TestBuilder::default()
@@ -179,7 +179,7 @@ async fn routing_rebuilds_context_for_smaller_model_and_reports_actual_target() 
     assert_eq!(usage, [ModelRef::new("backup", "small")]);
     drop(primary);
     drop(backup);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -208,7 +208,7 @@ async fn streaming_output_prevents_failover_and_retry_budget_is_shared() {
         assert!(agent.run(request).await.is_err());
         assert_eq!(failed.calls.lock().unwrap().len(), 1);
         assert_eq!(backup.calls.lock().unwrap().len(), usize::from(!partial));
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 
@@ -297,5 +297,5 @@ async fn custom_loop_changes_models_within_one_run() {
         "execute"
     );
     assert_eq!(provider.calls.lock().unwrap().len(), 2);
-    agent.close().await;
+    agent.framework().close().await;
 }

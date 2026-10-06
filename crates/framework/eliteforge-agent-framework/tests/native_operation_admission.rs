@@ -102,7 +102,7 @@ async fn closed_or_cancelled_typed_preflight_spends_neither_tokens_nor_tree_call
             .insert(ContinuationBudget::new(1, 4, 0, 0, 0, 0).unwrap());
         assert_eq!(agent.run(request).await.unwrap().output, "done");
         assert_eq!(adapter.0.load(Ordering::SeqCst), 0);
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
     }
 }
 

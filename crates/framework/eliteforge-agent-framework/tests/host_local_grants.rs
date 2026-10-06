@@ -205,7 +205,7 @@ async fn host_grants_confine_multiple_directories_and_commands_survive_turns() {
         missing_cwd.get("error").is_some(),
         "missing selected cwd must never fall back"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -259,7 +259,7 @@ async fn context_patch_envelope_is_atomic_and_dry_run_does_not_write() {
         root.join("a.txt").exists(),
         "earlier operations cannot commit before all contexts validate"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[cfg(unix)]
@@ -302,7 +302,7 @@ async fn symlink_targets_must_stay_inside_the_host_grant() {
     )
     .await;
     assert!(denied.get("error").is_some(), "{denied}");
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[cfg(unix)]
@@ -420,6 +420,6 @@ async fn official_terminal_tools_run_through_framework_with_scoped_identity_and_
     assert_eq!(stopped["stopped"], true);
     let list = invoke(&agent, "terminal-owner", scope, "terminal_list", json!({})).await;
     assert_eq!(list.as_array().unwrap().len(), 2);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(pty.read("terminal-owner", id, 0).is_err());
 }

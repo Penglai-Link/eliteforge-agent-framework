@@ -37,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             http::HeaderValue::from_str(&format!("Bearer {token}"))?,
         );
     }
-    let agent = AgentBuilder::new()
+    let framework = FrameworkBuilder::new()
         .plugin(LocalStoragePlugin::new("agent.sqlite", "agent-artifacts"))
         .plugin(AgentLoopPlugin::new(InspectOnly))
         .plugin(McpToolsPlugin::new(
@@ -46,12 +46,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .build()
         .await?;
+    let agent = framework
+        .agent(AgentSelection {
+            agent_loop: Some("framework.loop".into()),
+            tool_providers: Some(vec!["service".into()]),
+            ..AgentSelection::default()
+        })
+        .build()
+        .await?;
     let discovered = agent
         .execute(DiscoverMcpTools {
             plugin_id: "service".into(),
         })
         .await;
-    let closed = agent.close().await;
+    let closed = framework.close().await;
     for tool in discovered? {
         println!("{} -> {}", tool.id, tool.call_name);
     }

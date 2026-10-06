@@ -266,39 +266,9 @@ pub trait CapabilityPack: Send + Sync {
         Vec::new()
     }
 
-    /// Whether all members may be recreated for idle reconfiguration.
-    fn rebuildable(&self) -> bool {
-        self.plugins().is_empty()
-    }
-    /// Non-rebuildable members stay installed with their original configuration.
-    fn retained_plugins(&self) -> Vec<Arc<dyn Plugin>> {
-        if self.rebuildable() {
-            Vec::new()
-        } else {
-            self.plugins()
-        }
-    }
-
     /// Bind package resources to the shared Framework environment.
-    /// The compatibility hook supports existing external pack implementations.
-    fn for_framework_scope(&self, scope: &str) -> Option<Arc<dyn CapabilityPack>> {
-        self.for_agent_scope(scope)
-    }
-
-    /// Compatibility hook for private, single-Agent Framework environments.
-    /// New packs should implement `for_framework_scope`.
-    fn for_agent_scope(&self, _scope: &str) -> Option<Arc<dyn CapabilityPack>> {
+    fn for_framework_scope(&self, _scope: &str) -> Option<Arc<dyn CapabilityPack>> {
         None
-    }
-
-    /// Atomically suspend page/resource admission for this bound selection.
-    fn lock_reconfiguration(&self) -> Result<Box<dyn Send>, crate::AgentError> {
-        Ok(Box::new(()))
-    }
-
-    /// Persistent or external resources that prevent rebuilding this selection.
-    fn reconfiguration_blockers(&self) -> Result<Vec<String>, crate::AgentError> {
-        Ok(Vec::new())
     }
 
     fn version_bindings(&self) -> Vec<CapabilityVersionBinding> {
@@ -387,7 +357,7 @@ where
         self.skills(CapabilitySkillSource::directory(directory))
     }
 
-    /// Include an already configured plugin. This member is not rebuildable.
+    /// Include a configured plugin installed once by the owning Framework.
     pub fn plugin(self, plugin: impl Plugin + 'static) -> Self {
         self.plugin_arc(Arc::new(plugin))
     }
@@ -420,9 +390,6 @@ where
         &self.configuration
     }
 
-    fn retained_plugins(&self) -> Vec<Arc<dyn Plugin>> {
-        self.plugins.clone()
-    }
     fn included_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
         self.included_packs.clone()
     }
@@ -436,9 +403,6 @@ where
             .cloned()
             .chain(self.factories.iter().map(|f| f.plugin()))
             .collect()
-    }
-    fn rebuildable(&self) -> bool {
-        self.plugins.is_empty() && self.included_packs.iter().all(|p| p.rebuildable())
     }
 }
 

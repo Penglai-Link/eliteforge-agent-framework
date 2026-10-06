@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use eliteforge_agent_core::*;
 use eliteforge_agent_official_plugin_tools_local::ConfinedFileReader;
+#[cfg(test)]
+use eliteforge_agent_test_support::TestBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -317,7 +319,7 @@ fn failed(message: impl Into<String>) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eliteforge_agent_framework::AgentBuilder;
+
     use eliteforge_agent_test_support::TestConversationStore;
 
     struct QueueTimeout;
@@ -356,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn waiting_for_a_busy_decoder_is_bounded_without_cancelling_the_run() {
-        let agent = AgentBuilder::new()
+        let agent = TestBuilder::new()
             .default_models(false)
             .plugin(ConversationStorePlugin::new(
                 TestConversationStore::default(),
@@ -380,6 +382,6 @@ mod tests {
         .expect("must return within the deadline")
         .unwrap();
         assert_eq!(result.status, RunStatus::Completed);
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
     }
 }

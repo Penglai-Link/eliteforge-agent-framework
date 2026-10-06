@@ -159,20 +159,40 @@ async fn failed_and_interrupted_child_admission_refunds_locally_and_respects_unk
         AdmissionFailure::RollbackWrite,
     ] {
         let dispatched = Arc::new(AtomicUsize::new(0));
-        let child = AgentBuilder::new()
+        let child = FrameworkBuilder::new()
+            .defaults(AgentSelection {
+                agent_loop: Some("framework.loop".into()),
+                ..AgentSelection::default()
+            })
             .plugin(ConversationStorePlugin::new(UnusedConversations))
             .plugin(AgentLoopPlugin::new(CountedChildLoop(dispatched.clone())))
             .build()
             .await
+            .unwrap()
+            .agent(AgentSelection::default())
+            .build()
+            .await
             .unwrap();
-        let closed = AgentBuilder::new()
+        let closed = FrameworkBuilder::new()
+            .defaults(AgentSelection {
+                agent_loop: Some("framework.loop".into()),
+                ..AgentSelection::default()
+            })
             .plugin(ConversationStorePlugin::new(UnusedConversations))
             .plugin(AgentLoopPlugin::new(CountedChildLoop(dispatched.clone())))
+            .build()
+            .await
+            .unwrap()
+            .agent(AgentSelection::default())
             .build()
             .await
             .unwrap();
         closed.close().await;
-        let parent = AgentBuilder::new()
+        let parent = FrameworkBuilder::new()
+            .defaults(AgentSelection {
+                agent_loop: Some("framework.loop".into()),
+                ..AgentSelection::default()
+            })
             .plugin(ConversationStorePlugin::new(UnusedConversations))
             .plugin(AgentLoopPlugin::new(AdmissionProbe {
                 child: child.clone(),
@@ -184,6 +204,10 @@ async fn failed_and_interrupted_child_admission_refunds_locally_and_respects_unk
                     entered: tokio::sync::Notify::new(),
                 }),
             }))
+            .build()
+            .await
+            .unwrap()
+            .agent(AgentSelection::default())
             .build()
             .await
             .unwrap();

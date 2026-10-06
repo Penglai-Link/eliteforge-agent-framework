@@ -33,13 +33,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&artifact_root, std::fs::Permissions::from_mode(0o700))?;
     }
-    let agent = AgentBuilder::new()
+    let framework = FrameworkBuilder::new()
         .capability_pack(
             EliteForgeOfficialCapabilityPack::new(database, artifact_root)
                 .model(ChatModelPlugin::new(DemoModel)),
         )
         .build()
         .await?;
+    let agent = framework.agent(AgentSelection::default()).build().await?;
     let (handle, mut events) =
         agent.start_with_output::<AgUiStream>(RunRequest::new("chat-1", "介绍插件包"))?;
     let consume = async {
@@ -49,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok::<(), eliteforge_agent_official_capability_pack::agui::ag_ui::Error>(())
     };
     let (result, delivered) = tokio::join!(agent.wait(handle), consume);
-    let shutdown = agent.close().await;
+    let shutdown = framework.close().await;
     result?;
     delivered?;
     if !shutdown.is_success() {

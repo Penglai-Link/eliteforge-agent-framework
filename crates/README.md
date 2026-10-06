@@ -57,7 +57,7 @@ crates/
 
 | 层 | 内容 | 例子 |
 | --- | --- | --- |
-| Framework | 定义接口、调度执行、校验参数并管理插件安装和关闭；提供外部包协议与 SDK | `ToolProvider`、`PluginContext`、`AgentBuilder`、`CapabilityPackManager` |
+| Framework | 定义接口、调度执行、校验参数并管理插件安装和关闭；提供外部包协议与 SDK | `ToolProvider`、`PluginContext`、`FrameworkBuilder`、`CapabilityPackManager` |
 | Plugin | 实现接口，管理连接、工具或存储，并在结束时清理资源 | `GenaiPlugin`、`LocalStoragePlugin`、`SystemCommandPlugin` |
 | Capability | 组合实现和配置，供应用选择；工厂负责创建配置和插件 | `EliteForgeOfficialCapabilityPack`、`local_tools_pack(config)` |
 
@@ -105,7 +105,7 @@ crates/
 文件、搜索、写入和命令通过同一个官方包显式配置：
 
 ```rust,ignore
-use eliteforge_agent_framework::AgentBuilder;
+use eliteforge_agent_framework::{FrameworkBuilder, AgentSelection};
 use eliteforge_agent_official_capability_pack::{
     EliteForgeOfficialCapabilityPack,
     tools::{FileSystemToolsConfig, SystemCommandConfig},
@@ -116,7 +116,8 @@ let pack = EliteForgeOfficialCapabilityPack::new("agent.sqlite", "agent-artifact
     .write_filesystem(FileSystemToolsConfig::new("workspace"))
     .system_commands(SystemCommandConfig::restricted(["git"]));
 
-let agent = AgentBuilder::new().capability_pack(pack).build().await?;
+let framework = FrameworkBuilder::new().capability_pack(pack).build().await?;
+let agent = framework.agent(AgentSelection::default()).build().await?;
 ```
 
 ## 进程边界

@@ -49,7 +49,7 @@ async fn openai_embeddings_use_embedding_endpoint_even_with_responses_chat_proto
     assert_eq!(captured[0].1["input"], json!(["one", "two"]));
     assert_eq!(captured[0].1["dimensions"], 2);
     assert!(captured[0].1.get("messages").is_none());
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -90,7 +90,7 @@ async fn embedding_task_types_and_missing_usage_are_preserved() {
             assert_eq!(body["output_dimension"], 2);
             assert_eq!(body["truncate"], "NONE");
         }
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 
@@ -133,7 +133,7 @@ async fn invalid_embeddings_and_unsupported_capabilities_do_not_succeed() {
     assert!(agent.embed(request).await.is_err());
     assert_eq!(fixture.captured.lock().unwrap().len(), 1);
     assert!(agent.models(ModelOperation::ImageGeneration).is_empty());
-    agent.close().await;
+    agent.framework().close().await;
     assert!(
         TestBuilder::default()
             .plugin(
@@ -180,7 +180,7 @@ async fn one_connection_binds_chat_models_to_different_wire_protocols() {
     assert!(captured[1].0.starts_with("POST /v1/responses "));
     assert!(captured[0].1.get("messages").is_some());
     assert!(captured[1].1.get("input").is_some());
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -224,7 +224,7 @@ async fn gemini_chat_keeps_native_audio_and_video_parts() {
     let encoded = body["contents"][0]["parts"].to_string();
     assert!(encoded.contains("audio/wav"));
     assert!(encoded.contains("video/mp4"));
-    agent.close().await;
+    agent.framework().close().await;
 }
 struct Server {
     url: String,
@@ -482,7 +482,7 @@ async fn shared_auth_models_stream_tools_reasoning_and_history_round_trip() {
             .all(|m| m.get("reasoning_content").is_none())
     );
     drop(calls);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -550,7 +550,7 @@ async fn http_errors_retry_only_when_transient_and_redact_payloads() {
             fixture.captured.lock().unwrap().len(),
             if status == 429 { 2 } else { 1 }
         );
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 
@@ -588,7 +588,7 @@ async fn partial_stream_failure_does_not_retry_or_switch_models() {
     let result = agent.run(RunRequest::new("s", "test")).await.unwrap_err();
     assert!(!result.to_string().contains("fixture-secret"));
     assert_eq!(fixture.captured.lock().unwrap().len(), 1);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -649,7 +649,7 @@ async fn cancellation_drops_pending_http_stream_and_releases_session() {
     let second = agent.start(RunRequest::new("s", "again")).unwrap();
     agent.cancel(&second).unwrap();
     let _ = agent.wait(second).await;
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -720,7 +720,7 @@ async fn anthropic_signed_thinking_multiple_blocks_round_trip() {
                 .iter()
                 .any(|p| p["type"] == "tool_result" && p["tool_use_id"] == "c1")
         })));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -756,5 +756,5 @@ async fn anthropic_native_stream_and_auth() {
     );
     assert_eq!(calls[0].1["model"], "custom");
     drop(calls);
-    agent.close().await;
+    agent.framework().close().await;
 }

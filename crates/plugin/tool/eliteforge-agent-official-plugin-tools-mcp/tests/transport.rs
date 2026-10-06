@@ -2,6 +2,7 @@
 //! test-harness text on the MCP protocol stream. All servers use official rmcp.
 use eliteforge_agent_framework::{ContentBlock as FrameworkBlock, ToolError};
 use eliteforge_agent_official_plugin_tools_mcp::*;
+use eliteforge_agent_test_support::TestBuilder;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler, ServiceExt,
     model::*,
@@ -216,7 +217,7 @@ impl eliteforge_agent_framework::AgentLoop for InspectOnly {
 }
 
 async fn configured_mcp_plugins_are_discovered_and_closed_through_agent() {
-    use eliteforge_agent_framework::{AgentBuilder, AgentError, AgentLoopPlugin};
+    use eliteforge_agent_framework::{AgentError, AgentLoopPlugin};
     use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let dir = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir_in(dir.path()).unwrap();
@@ -235,7 +236,7 @@ async fn configured_mcp_plugins_are_discovered_and_closed_through_agent() {
             },
         )
     };
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .plugin(LocalStoragePlugin::new(
             dir.path().join("mcp.db"),
             artifacts.path(),
@@ -268,7 +269,7 @@ async fn configured_mcp_plugins_are_discovered_and_closed_through_agent() {
             .await
             .is_err()
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(matches!(
         agent
             .execute(DiscoverMcpTools {
@@ -654,7 +655,7 @@ impl eliteforge_agent_framework::AgentLoop for ReadResourceLoop {
 }
 
 async fn resource_operations_and_tools_are_agent_owned() {
-    use eliteforge_agent_framework::{AgentBuilder, AgentLoopPlugin, RunRequest};
+    use eliteforge_agent_framework::{AgentLoopPlugin, RunRequest};
     use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
     let dir = tempfile::tempdir().unwrap();
     let artifacts = tempfile::tempdir_in(dir.path()).unwrap();
@@ -669,7 +670,7 @@ async fn resource_operations_and_tools_are_agent_owned() {
         ..Default::default()
     })
     .await;
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(LocalStoragePlugin::new(
             dir.path().join("resources.db"),
@@ -722,7 +723,7 @@ async fn resource_operations_and_tools_are_agent_owned() {
         .run(RunRequest::new("resource-session", "read resource"))
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     stop.cancel();
     task.await.unwrap();
 }

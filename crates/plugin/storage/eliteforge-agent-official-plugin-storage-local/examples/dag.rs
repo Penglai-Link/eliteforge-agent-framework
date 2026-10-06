@@ -76,10 +76,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&artifact_root, std::fs::Permissions::from_mode(0o700))?;
     }
-    let agent = AgentBuilder::new()
+    let framework = FrameworkBuilder::new()
         .plugin(LocalStoragePlugin::new(path, artifact_root))
         .plugin(WorkflowNodePlugin::new("example.nodes", ArithmeticNodes))
         .plugin(AgentLoopPlugin::new(DagWorkflowLoop::new(definition)?))
+        .build()
+        .await?;
+    let agent = framework
+        .agent(AgentSelection {
+            agent_loop: Some("framework.loop".into()),
+            workflow_nodes: Some(vec!["example.nodes".into()]),
+            ..AgentSelection::default()
+        })
         .build()
         .await?;
     let handle = agent.start(RunRequest::new("arithmetic", input))?;
@@ -93,6 +101,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (id, node) in state.nodes {
         println!("{id}: {:?}", node.status);
     }
-    agent.close().await;
+    framework.close().await;
     Ok(())
 }

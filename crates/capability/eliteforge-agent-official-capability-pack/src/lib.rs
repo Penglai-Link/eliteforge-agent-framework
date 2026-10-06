@@ -1,4 +1,4 @@
-//! Official plugin configuration in one AgentBuilder::capability_pack call.
+//! Official plugin configuration in one FrameworkBuilder::capability_pack call.
 //!
 //! Defaults include Genai, local storage, human interaction, agent collaboration,
 //! Skills, AG-UI, MCP and telemetry. Local filesystem/command packs are opt-in.
@@ -28,7 +28,7 @@ pub use eliteforge_agent_official_plugin_tools_web as web;
 /// Official defaults and opt-in local tools with an explicit database path.
 ///
 /// Configure replacements on the pack itself. Adding a plugin with an existing
-/// ID through AgentBuilder::plugin is an error, not an override.
+/// ID through FrameworkBuilder::plugin is an error, not an override.
 pub struct EliteForgeOfficialCapabilityPack {
     model: Option<Arc<dyn Plugin>>,
     storage: Arc<storage::LocalStoragePlugin>,
@@ -91,7 +91,7 @@ impl EliteForgeOfficialCapabilityPack {
         self
     }
     /// Supply model plugins separately, or use a loop that needs no model.
-    /// AgentBuilder's independent `default_models` setting still applies.
+    /// FrameworkBuilder's independent `default_models` setting still applies.
     pub fn without_model(mut self) -> Self {
         self.model = None;
         self.model_factory = None;
@@ -241,13 +241,6 @@ impl CapabilityPack for EliteForgeOfficialCapabilityPack {
             packs.push(Arc::new(tools::tool_discovery_pack((**plugin).clone())));
         }
         packs
-    }
-    fn rebuildable(&self) -> bool {
-        self.retained_plugins().is_empty()
-    }
-    fn retained_plugins(&self) -> Vec<Arc<dyn Plugin>> {
-        #[allow(unused_mut)] // Optional features append retained provider instances.
-        self.model.iter().cloned().collect()
     }
     fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
         let telemetry = if self.telemetry.is_empty() {

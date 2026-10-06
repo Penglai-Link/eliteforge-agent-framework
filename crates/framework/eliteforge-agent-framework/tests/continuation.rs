@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_model_http as http;
 use eliteforge_agent_official_plugin_storage_local::{SqliteOptions, SqliteStateStore};
+use eliteforge_agent_test_support::TestBuilder;
 use serde_json::{Value, json};
 use std::sync::{
     Arc,
@@ -229,7 +230,7 @@ async fn driver(path: &std::path::Path) -> Agent {
             .await
             .unwrap(),
     );
-    AgentBuilder::new()
+    TestBuilder::new()
         .default_models(false)
         .plugin(StateStorePlugin(store))
         .plugin(AgentLoopPlugin::new(ContinuationLoop))
@@ -331,7 +332,7 @@ async fn direct_judge_and_step_share_original_calls_tokens_and_durable_journal()
     );
     assert_eq!(policy.provider.calls.load(Ordering::Acquire), 2);
     assert_eq!(http.calls.load(Ordering::Acquire), 2);
-    agent.close().await;
+    agent.framework().close().await;
     let reopened = driver(&path).await;
     let error = reopened
         .run(request("same-identity", policy.clone()))
@@ -419,7 +420,7 @@ async fn cancelled_judge_retains_intent_and_refuses_automatic_replay() {
     );
     assert_eq!(policy.provider.calls.load(Ordering::Acquire), 1);
     assert_eq!(policy.executed.load(Ordering::Acquire), 0);
-    agent.close().await;
+    agent.framework().close().await;
     let reopened = driver(&path).await;
     let error = reopened
         .run(request("interrupted", policy.clone()))
@@ -489,7 +490,7 @@ impl ContinuationPolicy for OpaquePolicy {
 async fn opaque_unknown_usage_is_charged_without_inventing_reported_usage() {
     let temp = tempfile::tempdir().unwrap();
     let agent = driver(&temp.path().join("state.sqlite")).await;
-    let child = AgentBuilder::new()
+    let child = TestBuilder::new()
         .default_models(false)
         .plugin(ExternalAgentPlugin::new(Opaque))
         .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
@@ -513,8 +514,8 @@ async fn opaque_unknown_usage_is_charged_without_inventing_reported_usage() {
     );
     assert_eq!(policy.executed.load(Ordering::Acquire), 0);
     assert_eq!(policy.paused.load(Ordering::Acquire), 1);
-    policy.child.close().await;
-    agent.close().await;
+    policy.child.framework().close().await;
+    agent.framework().close().await;
 }
 #[test]
 fn continuation_does_not_reset_expired_deadline_or_remove_explicit_call_ceiling() {
@@ -602,7 +603,7 @@ async fn initial_snapshot_observes_native_delegated_steps_before_goal_driver() {
         .build()
         .await
         .unwrap();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(AgentLoopPlugin::new(InitialDelegator {
             child: child.clone(),
@@ -627,8 +628,8 @@ async fn initial_snapshot_observes_native_delegated_steps_before_goal_driver() {
             output_tokens: 4
         }
     );
-    child.close().await;
-    agent.close().await;
+    child.framework().close().await;
+    agent.framework().close().await;
 }
 #[test]
 fn global_counters_preserve_child_local_caps_and_do_not_use_child_cap_as_root_cap() {
@@ -686,7 +687,7 @@ async fn expired_attach_to_start_wait_cannot_extend_original_deadline() {
     ));
     assert_eq!(policy.provider.calls.load(Ordering::Acquire), 0);
     policy.client.close().await;
-    agent.close().await;
+    agent.framework().close().await;
 }
 #[tokio::test]
 async fn initial_child_slots_are_not_refilled_before_first_judge() {
@@ -727,7 +728,7 @@ async fn initial_child_slots_are_not_refilled_before_first_judge() {
     assert_eq!(state.child_runs, 2);
     assert!(state.child_executions.is_empty());
     policy.client.close().await;
-    agent.close().await;
+    agent.framework().close().await;
 }
 #[tokio::test]
 async fn resumed_native_checkpoint_charges_saved_step_call_bound_with_original_limits() {
@@ -774,7 +775,7 @@ async fn resumed_native_checkpoint_charges_saved_step_call_bound_with_original_l
         }
     );
     assert_eq!(provider.calls.load(Ordering::Acquire), 2);
-    agent.close().await;
+    agent.framework().close().await;
 }
 #[test]
 fn exhausted_usize_max_dispatch_bound_rejects_without_overflow() {
@@ -876,6 +877,6 @@ async fn native_children_preserve_ancestor_per_step_cap_and_tighter_local_caps()
         budget.admit_model_call().unwrap();
     }
     assert!(budget.admit_model_call().is_err());
-    root.close().await;
-    child.close().await;
+    root.framework().close().await;
+    child.framework().close().await;
 }

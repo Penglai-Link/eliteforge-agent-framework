@@ -124,7 +124,7 @@ async fn run(
         request.limits.cleanup_timeout = Duration::from_millis(20);
     }
     let result = agent.run(request).await;
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     (
         result,
         closed.load(Ordering::SeqCst),

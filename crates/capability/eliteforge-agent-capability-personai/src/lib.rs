@@ -1,5 +1,7 @@
 //! Optional PersonAI integration. Account credentials remain owned by the host.
 
+#[cfg(test)]
+use eliteforge_agent_test_support::TestBuilder;
 mod connection;
 mod context;
 mod models;
@@ -57,7 +59,7 @@ impl PersonAiCapabilityPack {
         Self { connection }
     }
 
-    /// Host access before this pack is moved into `AgentBuilder::capability_pack`.
+    /// Host access before this pack is moved into `FrameworkBuilder::capability_pack`.
     pub fn services(&self) -> Arc<PersonAiServices> {
         self.connection.services()
     }
@@ -79,9 +81,6 @@ impl CapabilityPack for PersonAiCapabilityPack {
             runtime: ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![]))
                 .expect("empty model runtime is valid"),
         })]
-    }
-    fn rebuildable(&self) -> bool {
-        false
     }
 }
 
@@ -167,7 +166,7 @@ mod tests {
         let mut agents = Vec::new();
         for model in ["agent-a", "agent-b"] {
             agents.push(
-                AgentBuilder::new()
+                TestBuilder::new()
                     .default_models(false)
                     .capability_pack(PersonAiCapabilityPack::new(connection.clone()))
                     .plugin(eliteforge_agent_test_support::TestStoragePlugin::default())
@@ -197,7 +196,7 @@ mod tests {
             );
         }
         // Explicit Responses-only configuration is available during build validation.
-        let explicit = AgentBuilder::new()
+        let explicit = TestBuilder::new()
             .default_models(false)
             .capability_pack(PersonAiCapabilityPack::new(connection.clone()))
             .plugin(eliteforge_agent_test_support::TestStoragePlugin::default())

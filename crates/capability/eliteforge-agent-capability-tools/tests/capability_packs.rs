@@ -1,3 +1,4 @@
+use eliteforge_agent_test_support::TestBuilder;
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 use std::time::{Duration, Instant};
@@ -20,8 +21,8 @@ fn plugin_ids(pack: &impl CapabilityPack) -> Vec<String> {
         .collect()
 }
 
-fn builder(agent_loop: impl AgentLoop + 'static) -> AgentBuilder {
-    AgentBuilder::new()
+fn builder(agent_loop: impl AgentLoop + 'static) -> TestBuilder {
+    TestBuilder::new()
         .default_models(false)
         .plugin(AgentLoopPlugin::new(agent_loop))
         .plugin(ConversationStorePlugin::new(
@@ -84,7 +85,7 @@ async fn listed_tools(pack: impl CapabilityPack + 'static) -> Vec<String> {
         .run(RunRequest::new("tool-domain", "list"))
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     names.lock().unwrap().clone()
 }
 
@@ -148,7 +149,7 @@ async fn invoke(
         .run(RunRequest::new("filesystem-tools", "invoke"))
         .await
         .expect("tool loop should complete");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     output
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -175,7 +176,7 @@ async fn invoke_error(
         .run(RunRequest::new("filesystem-tools", "reject path escape"))
         .await
         .expect_err("filesystem tools must reject paths outside the configured root");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     error.to_string()
 }
 
@@ -332,7 +333,7 @@ async fn command_task_survives_runs_and_supports_cursor_reads_session_checks_and
     assert_eq!(stopped["status"], "cancelled");
     assert_eq!(stopped["stopRequested"], true);
     assert_eq!(stopped["stdout"], "");
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[cfg(unix)]
@@ -365,12 +366,12 @@ async fn default_command_handoff_returns_after_ten_seconds() {
         .await
         .unwrap();
     assert_eq!(stopped["status"], "cancelled");
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn closing_agent_terminates_its_background_command() {
+async fn closing_framework_terminates_its_background_command() {
     let harness =
         ToolHarness::new(SystemCommandConfig::new().with_async_after(Duration::from_millis(20)))
             .await;
@@ -394,7 +395,7 @@ async fn closing_agent_terminates_its_background_command() {
             .success()
     };
     assert!(is_running());
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
     assert!(
         !is_running(),
         "Agent shutdown must reap the command process"
@@ -479,7 +480,6 @@ async fn local_domain_pack_combines_selected_tools_without_duplicate_providers()
         tools.iter().filter(|name| *name == "system_exec").count(),
         1
     );
-    assert!(selection().rebuildable());
     let read = invoke(selection(), "fs_read_text", json!({"path":"note.txt"})).await;
     assert_eq!(read["content"], "from local pack");
 }
@@ -488,8 +488,6 @@ async fn local_domain_pack_combines_selected_tools_without_duplicate_providers()
 async fn human_and_collaboration_domain_packs_keep_official_tool_descriptors() {
     assert_eq!(plugin_ids(&human_interaction_pack()), ["tools.human"]);
     assert_eq!(plugin_ids(&agent_collaboration_pack()), ["tools.agents"]);
-    assert!(human_interaction_pack().rebuildable());
-    assert!(agent_collaboration_pack().rebuildable());
 
     let names = listed_tools(
         CapabilityPackBuilder::new("test.tool-domains", ())
@@ -506,7 +504,6 @@ async fn human_and_collaboration_domain_packs_keep_official_tool_descriptors() {
 async fn mcp_domain_pack_keeps_one_empty_default_and_multiple_named_servers() {
     let empty = mcp_tools_pack(Vec::<McpToolsPlugin>::new());
     assert_eq!(plugin_ids(&empty), ["tools.mcp"]);
-    assert!(empty.rebuildable());
     assert!(listed_tools(empty).await.is_empty());
 
     let server = |id: &str| {
@@ -523,7 +520,6 @@ async fn mcp_domain_pack_keeps_one_empty_default_and_multiple_named_servers() {
     };
     let named = mcp_tools_pack([server("mcp.first"), server("mcp.second")]);
     assert_eq!(plugin_ids(&named), ["mcp.first", "mcp.second"]);
-    assert!(named.rebuildable());
 }
 
 #[tokio::test]
@@ -549,7 +545,6 @@ async fn web_domain_pack_retains_host_backend_and_exposes_only_selected_tools() 
 
     let pack =
         web_tools_pack(WebToolsPlugin::new().fetch(WebFetchConfig::restricted(["127.0.0.1"])));
-    assert!(!pack.rebuildable());
     assert_eq!(plugin_ids(&pack), ["framework.web.tools"]);
     assert_eq!(listed_tools(pack).await, ["web_fetch"]);
 }
@@ -561,7 +556,6 @@ async fn media_domain_pack_recreates_reader_and_exposes_image_and_pdf_tools() {
 
     let root = tempfile::tempdir().unwrap();
     let pack = media_tools_pack(MediaToolsConfig::new(root.path()));
-    assert!(pack.rebuildable());
     assert_eq!(plugin_ids(&pack), ["framework.media.tools"]);
     assert_eq!(
         listed_tools(pack).await,
@@ -575,7 +569,6 @@ async fn discovery_domain_pack_retains_host_providers_and_exposes_search() {
     use eliteforge_agent_capability_tools::{ToolDiscoveryPlugin, tool_discovery_pack};
 
     let pack = tool_discovery_pack(ToolDiscoveryPlugin::new());
-    assert!(!pack.rebuildable());
     assert_eq!(plugin_ids(&pack), ["framework.tools.discovery"]);
     assert_eq!(listed_tools(pack).await, ["tool_search"]);
 }
@@ -792,7 +785,7 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
         .await
         .unwrap();
     assert_eq!(history["commands"][0]["status"], "completed");
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[cfg(unix)]
@@ -822,7 +815,7 @@ async fn pty_is_a_real_terminal_and_combines_output_and_accepts_input() {
     assert!(output.contains("answer=terminal-value\n"), "{output}");
     assert!(output.contains("error-stream\n"), "{output}");
     assert_eq!(finished["stderr"], "");
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[cfg(unix)]
@@ -856,13 +849,13 @@ async fn stopping_pipe_and_pty_commands_cleans_their_process_groups() {
         assert_eq!(stopped["status"], "cancelled");
         assert_process_gone(started["pid"].as_u64().unwrap() as u32).await;
         assert_process_gone(descendant).await;
-        assert!(harness.agent.close().await.is_success());
+        assert!(harness.agent.framework().close().await.is_success());
     }
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn timeout_and_agent_close_clean_managed_descendants() {
+async fn timeout_and_framework_close_clean_managed_descendants() {
     for timed_out in [false, true] {
         let config = SystemCommandConfig::new()
             .with_async_after(Duration::from_millis(50))
@@ -887,7 +880,7 @@ async fn timeout_and_agent_close_clean_managed_descendants() {
             let finished = command_until_terminal(&harness, &started["taskId"]).await;
             assert_eq!(finished["status"], "timed_out");
         }
-        assert!(harness.agent.close().await.is_success());
+        assert!(harness.agent.framework().close().await.is_success());
         assert_process_gone(descendant).await;
         assert_process_gone(started["pid"].as_u64().unwrap() as u32).await;
     }
@@ -919,7 +912,7 @@ async fn completed_shell_does_not_leave_background_children_and_plain_stdin_stil
         .unwrap();
     assert_eq!(finished["stdout"], "one-shot\n");
     assert_eq!(finished["success"], true);
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -990,7 +983,7 @@ async fn unified_patch_previews_versions_creates_deletes_and_rejects_stale_write
         std::fs::read_to_string(root.path().join("a.txt")).unwrap(),
         "new\n"
     );
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1032,7 +1025,7 @@ async fn patch_validates_all_files_before_changing_anything_and_honors_limits() 
     );
     let git = harness.call("owner", "fs_apply_unified_patch", json!({"format":"git","patch":"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-old\n+git\n","expectedVersions":{"a":read["version"]}})).await.unwrap();
     assert_eq!(git["applied"], true);
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1133,7 +1126,7 @@ async fn search_supports_globs_ignore_excludes_modes_and_stable_scoped_pages() {
         .await
         .unwrap();
     assert_eq!(dirs["entries"][0]["path"], "src");
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[cfg(unix)]
@@ -1173,7 +1166,7 @@ async fn git_rename_moves_content_and_requires_both_path_versions() {
         std::fs::read_to_string(root.path().join("sub/new.txt")).unwrap(),
         "keep\n"
     );
-    assert!(harness.agent.close().await.is_success());
+    assert!(harness.agent.framework().close().await.is_success());
 }
 
 #[cfg(unix)]
@@ -1202,7 +1195,7 @@ async fn pty_capability_closes_sessions_shared_with_host_adapters() {
             .unwrap()
             .running
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(service.read("host", &session.terminal_id, 0).is_err());
     assert!(
         service

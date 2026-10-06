@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_storage_local::*;
+use eliteforge_agent_test_support::TestBuilder;
 use rusqlite::{Connection, params};
 use serde_json::json;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -41,7 +42,7 @@ impl Fixture {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let agent = AgentBuilder::new()
+        let agent = TestBuilder::new()
             .plugin(LocalStoragePlugin::new(&path, &artifacts))
             .plugin(AgentLoopPlugin::new(Noop))
             .build()
@@ -157,7 +158,7 @@ impl Fixture {
     }
 
     async fn close(&self) {
-        assert!(self.agent.close().await.is_success());
+        assert!(self.agent.framework().close().await.is_success());
         self.state.close().await.unwrap();
     }
 }
@@ -230,7 +231,7 @@ async fn single_delete_removes_all_session_data_and_survives_reopen() {
             .unwrap()
     );
     fixture.close().await;
-    let reopened = AgentBuilder::new()
+    let reopened = TestBuilder::new()
         .plugin(LocalStoragePlugin::new(&fixture.path, &fixture.artifacts))
         .plugin(AgentLoopPlugin::new(Noop))
         .build()
@@ -261,7 +262,7 @@ async fn single_delete_removes_all_session_data_and_survives_reopen() {
             .messages
             .is_empty()
     );
-    assert!(reopened.close().await.is_success());
+    assert!(reopened.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -493,7 +494,7 @@ async fn execution_only_plugin_supports_cleanup_and_expired_leases_are_fenced() 
             .await
             .unwrap(),
     );
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .plugin(state.clone().plugin())
         .plugin(AgentLoopPlugin::new(Noop))
         .build()
@@ -540,6 +541,6 @@ async fn execution_only_plugin_supports_cleanup_and_expired_leases_are_fenced() 
         state.load(fresh.run_id).await,
         Err(StateError::NotFound)
     ));
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     state.close().await.unwrap();
 }

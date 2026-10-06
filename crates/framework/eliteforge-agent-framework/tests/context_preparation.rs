@@ -106,7 +106,7 @@ async fn auxiliary_reduction_finishes_before_answer_model() {
     agent.run(request()).await.unwrap();
     assert_eq!(*model.0.lock().unwrap(), ["summary", "main"]);
     assert_eq!(*completed.lock().unwrap(), ["compressed"]);
-    agent.close().await;
+    agent.framework().close().await;
 }
 #[tokio::test]
 async fn unchanged_source_is_rejected_before_a_second_summary_call() {
@@ -114,7 +114,7 @@ async fn unchanged_source_is_rejected_before_a_second_summary_call() {
     let error = agent.run(request()).await.unwrap_err();
     assert!(error.to_string().contains("no source progress"), "{error}");
     assert_eq!(*model.0.lock().unwrap(), ["summary"]);
-    agent.close().await;
+    agent.framework().close().await;
 }
 #[tokio::test]
 async fn failed_summary_cannot_be_silently_accepted_by_completion_hook() {
@@ -122,7 +122,7 @@ async fn failed_summary_cannot_be_silently_accepted_by_completion_hook() {
     assert!(agent.run(request()).await.is_err());
     assert_eq!(*model.0.lock().unwrap(), ["failure"]);
     assert_eq!(*completed.lock().unwrap(), ["failed"]);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -133,7 +133,7 @@ async fn auxiliary_calls_reserve_the_last_dispatch_for_the_answer() {
     assert!(agent.run(request).await.is_err());
     assert!(model.0.lock().unwrap().is_empty());
     assert_eq!(*completed.lock().unwrap(), ["failed"]);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct AccountBoundModel {
@@ -284,6 +284,6 @@ async fn auxiliary_reduction_keeps_step_bindings_and_never_uses_a_new_account() 
             new_calls.lock().unwrap().is_empty(),
             "an existing invocation used refreshed credentials"
         );
-        agent.close().await;
+        agent.framework().close().await;
     }
 }

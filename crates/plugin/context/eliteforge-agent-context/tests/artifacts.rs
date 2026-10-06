@@ -309,7 +309,7 @@ async fn loop_persists_reference_instead_of_large_structured_data() {
         original.structured.unwrap()["rows"].as_str().unwrap().len(),
         30_000
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 struct CountingLargeTool(Arc<std::sync::atomic::AtomicUsize>);
@@ -412,7 +412,7 @@ async fn workflow_offload_failure_ends_run_without_automatic_tool_replay() {
             .unwrap()
             .contains("artifact:")
     );
-    agent.close().await;
+    agent.framework().close().await;
     state.close().await.unwrap();
 }
 #[tokio::test]
@@ -499,7 +499,7 @@ async fn completed_workflow_replays_offloaded_reference_without_rerunning_tool()
         artifacts.read(&id, 0, 1, CancellationToken::new()).await,
         Err(ArtifactError::NotFound)
     ));
-    agent.close().await;
+    agent.framework().close().await;
     state.close().await.unwrap();
 }
 struct RejectToolHistory(TestConversationStore);
@@ -552,5 +552,5 @@ async fn history_failure_after_artifact_publish_preserves_original_without_repla
         original.structured.unwrap()["rows"].as_str().unwrap().len(),
         30000
     );
-    agent.close().await;
+    agent.framework().close().await;
 }

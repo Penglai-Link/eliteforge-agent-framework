@@ -1,6 +1,7 @@
 //! Version-1 wire compatibility is adapted into the unified native assembler.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
+use eliteforge_agent_test_support::TestBuilder;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
@@ -89,7 +90,7 @@ async fn version_one_provider_wire_installs_as_a_source_and_is_assembled_once() 
         .unwrap();
     let capture = Capture::default();
     let reports = Reports::default();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .capability_pack(selection)
         .plugin(ChatModelPlugin::new(capture.clone()))
@@ -106,7 +107,7 @@ async fn version_one_provider_wire_installs_as_a_source_and_is_assembled_once() 
         .run(RunRequest::new("legacy-wire-session", "question"))
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     let actual = capture.0.lock().unwrap();
     assert_eq!(actual.len(), 1);
     let texts = actual[0]

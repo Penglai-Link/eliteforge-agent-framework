@@ -130,8 +130,8 @@ async fn multiple_configured_outputs_are_ready_before_start_and_remain_owned_by_
     agent.wait(first).await.unwrap();
     agent.wait(second).await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    agent.close().await;
-    other.close().await;
+    agent.framework().close().await;
+    other.framework().close().await;
 }
 
 #[tokio::test]
@@ -167,7 +167,7 @@ async fn duplicate_and_incorrect_output_registrations_fail_before_execution() {
             .is_err()
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[derive(Default)]
@@ -252,7 +252,7 @@ async fn plugin_operations_are_cancelled_and_drained_before_shutdown() {
         } else {
             Some(task)
         };
-        let report = tokio::time::timeout(Duration::from_secs(2), agent.close())
+        let report = tokio::time::timeout(Duration::from_secs(2), agent.framework().close())
             .await
             .unwrap();
         assert!(report.is_success(), "{report:?}");
@@ -288,7 +288,7 @@ async fn missing_operation_service_is_an_error_and_does_not_block_close() {
         Err(AgentError::MissingService(_))
     ));
     assert!(
-        tokio::time::timeout(Duration::from_secs(2), agent.close())
+        tokio::time::timeout(Duration::from_secs(2), agent.framework().close())
             .await
             .unwrap()
             .is_success()
@@ -335,7 +335,7 @@ async fn plugin_panics_return_errors_and_release_operation_admission() {
     }
     assert_eq!(agent.execute(NumberOperation(0)).await.unwrap(), 42);
     assert!(
-        tokio::time::timeout(Duration::from_secs(2), agent.close())
+        tokio::time::timeout(Duration::from_secs(2), agent.framework().close())
             .await
             .unwrap()
             .is_success()

@@ -123,9 +123,9 @@ async fn actual_nested_invokers_inherit_identity_and_charge_parent_budget() {
             Some(parent.0)
         );
     }
-    root.close().await;
-    middle.close().await;
-    leaf.close().await;
+    root.framework().close().await;
+    middle.framework().close().await;
+    leaf.framework().close().await;
 }
 #[tokio::test]
 async fn inherited_depth_limit_prevents_descendant_dispatch() {
@@ -160,9 +160,9 @@ async fn inherited_depth_limit_prevents_descendant_dispatch() {
             .contains("depth limit")
     );
     assert!(trace.0.lock().unwrap().is_empty());
-    root.close().await;
-    middle.close().await;
-    leaf.close().await;
+    root.framework().close().await;
+    middle.framework().close().await;
+    leaf.framework().close().await;
 }
 
 struct PendingModel {
@@ -217,11 +217,11 @@ async fn parent_cancellation_reaches_child_provider_and_releases_its_future() {
         Err(AgentError::Cancelled)
     ));
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
-    tokio::time::timeout(Duration::from_secs(2), leaf.close())
+    tokio::time::timeout(Duration::from_secs(2), leaf.framework().close())
         .await
         .unwrap();
     assert_eq!(dropped.load(Ordering::SeqCst), 1);
-    root.close().await;
+    root.framework().close().await;
 }
 
 struct ConcurrentDelegator {
@@ -274,8 +274,8 @@ async fn concurrent_children_cannot_spend_the_same_parent_allowance() {
         root.run(request).await.unwrap().output,
         "capacity protected"
     );
-    root.close().await;
-    leaf.close().await;
+    root.framework().close().await;
+    leaf.framework().close().await;
 }
 
 struct AdmissionChecks {
@@ -360,7 +360,7 @@ async fn rejected_children_preserve_budget_and_admission_for_a_valid_child() {
         .build()
         .await
         .unwrap();
-    closed.close().await;
+    closed.framework().close().await;
     let parent = TestBuilder::default()
         .plugin(AgentLoopPlugin::new(AdmissionChecks {
             child: child.clone(),
@@ -377,8 +377,8 @@ async fn rejected_children_preserve_budget_and_admission_for_a_valid_child() {
     assert_eq!(answer.usage.input_tokens + answer.usage.output_tokens, 6);
     release.notify_one();
     child.wait(busy).await.unwrap();
-    parent.close().await;
-    child.close().await;
+    parent.framework().close().await;
+    child.framework().close().await;
 }
 
 struct CapacityRetry {
@@ -439,6 +439,6 @@ async fn budget_rejection_does_not_consume_a_child_slot() {
     request.limits.max_child_runs = 2;
     let answer = parent.run(request).await.unwrap();
     assert_eq!(answer.usage.input_tokens + answer.usage.output_tokens, 12);
-    parent.close().await;
-    child.close().await;
+    parent.framework().close().await;
+    child.framework().close().await;
 }

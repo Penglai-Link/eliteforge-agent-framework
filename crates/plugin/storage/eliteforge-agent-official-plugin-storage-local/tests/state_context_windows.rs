@@ -136,7 +136,7 @@ async fn react_workflow_and_dag_share_explicit_layout_and_isolate_node_snapshots
                 assert_ne!(histories[0], histories[1]);
             }
         }
-        agent.close().await;
+        agent.framework().close().await;
         state.close().await.unwrap();
     }
 }
@@ -247,7 +247,7 @@ async fn custom_node_commits_state_and_conversation_together_and_resumes_same_hi
         true
     );
     assert_eq!(original.revision, 3);
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
     let store = Arc::new(
         SqliteStateStore::open(&path, SqliteOptions::default())
@@ -276,6 +276,6 @@ async fn custom_node_commits_state_and_conversation_together_and_resumes_same_hi
         final_history.messages[3].structured,
         Some(json!({"done":true}))
     );
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 }

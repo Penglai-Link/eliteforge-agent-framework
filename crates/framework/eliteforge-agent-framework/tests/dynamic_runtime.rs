@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
+use eliteforge_agent_test_support::TestBuilder;
 use std::sync::Arc;
 
 struct EchoModel;
@@ -57,7 +58,7 @@ async fn agent_build_preserves_host_initialized_and_replaced_runtime_bindings() 
                 .output,
             "ok"
         );
-        standalone.close().await;
+        standalone.framework().close().await;
         let agent = eliteforge_agent_test_support::TestBuilder::default()
             .default_models(false)
             .plugin(ModelRuntimePlugin::new(runtime.clone()))
@@ -108,7 +109,7 @@ async fn agent_build_preserves_host_initialized_and_replaced_runtime_bindings() 
                 .get(&ModelRef::new("local", "other"))
                 .is_some()
         );
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 
@@ -233,7 +234,7 @@ impl ExternalAgent for FakeExternal {
 
 #[tokio::test]
 async fn external_loop_runs_without_framework_storage() {
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
         .plugin(ExternalAgentPlugin::new(FakeExternal))
@@ -273,7 +274,7 @@ async fn external_loop_runs_without_framework_storage() {
 
 #[tokio::test]
 async fn external_loop_rejects_framework_resume() {
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
         .plugin(ExternalAgentPlugin::new(FakeExternal))
@@ -304,7 +305,7 @@ impl ExternalAgent for PendingExternal {
 
 #[tokio::test]
 async fn external_loop_observes_cancel_and_timeout() {
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
         .plugin(ExternalAgentPlugin::new(PendingExternal))
@@ -385,7 +386,7 @@ async fn retired_default_and_stage_routes_do_not_block_directory_updates() {
     runtime
         .replace_connection("personai", update.clone())
         .unwrap();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(ModelRuntimePlugin::new(runtime.clone()))
         .plugin(ModelConnectionPlugin::new(connection("local", "other")))
@@ -449,7 +450,7 @@ async fn retired_default_and_stage_routes_do_not_block_directory_updates() {
             );
         }
     }
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct UncertainMedia(Arc<std::sync::atomic::AtomicUsize>);
@@ -500,7 +501,7 @@ async fn uncertain_media_submissions_are_not_retried_by_chat_recovery_policy() {
         .push(ImageGenerationModelService::new(model.clone(), provider));
     let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
     runtime.replace_connection("media", update).unwrap();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(ModelRuntimePlugin::new(runtime))
         .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
@@ -563,7 +564,7 @@ impl AgentLoop for OperationOnlyLoop {
 #[tokio::test]
 async fn retired_video_job_keeps_its_original_binding() {
     let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(ModelRuntimePlugin::new(runtime.clone()))
         .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
@@ -606,7 +607,7 @@ async fn retired_video_job_keeps_its_original_binding() {
 #[tokio::test]
 async fn video_job_retains_binding_across_same_model_token_refresh() {
     let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(ModelRuntimePlugin::new(runtime.clone()))
         .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
@@ -646,7 +647,7 @@ async fn video_job_retains_binding_across_same_model_token_refresh() {
 #[tokio::test]
 async fn identical_remote_video_ids_across_accounts_keep_distinct_bindings() {
     let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(ModelRuntimePlugin::new(runtime.clone()))
         .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
@@ -704,7 +705,7 @@ async fn identical_remote_video_ids_across_accounts_keep_distinct_bindings() {
     fresh_runtime
         .replace_connection("personai", refreshed)
         .unwrap();
-    let fresh_agent = AgentBuilder::new()
+    let fresh_agent = TestBuilder::new()
         .default_models(false)
         .plugin(ModelRuntimePlugin::new(fresh_runtime))
         .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
@@ -755,7 +756,7 @@ impl ImageGenerationModel for QueuedImage {
 #[tokio::test]
 async fn identical_remote_image_ids_across_accounts_keep_distinct_bindings() {
     let runtime = ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(ModelRuntimePlugin::new(runtime.clone()))
         .plugin(AgentLoopPlugin::new(OperationOnlyLoop))
@@ -799,7 +800,7 @@ async fn identical_remote_image_ids_across_accounts_keep_distinct_bindings() {
 
     let restored: ImageJob =
         serde_json::from_value(serde_json::to_value(&alice_job).unwrap()).unwrap();
-    let fresh_agent = AgentBuilder::new()
+    let fresh_agent = TestBuilder::new()
         .default_models(false)
         .plugin(ModelRuntimePlugin::new(
             ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![])).unwrap(),

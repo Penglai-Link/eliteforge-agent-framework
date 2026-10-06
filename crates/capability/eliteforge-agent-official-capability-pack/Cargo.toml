@@ -27,6 +27,7 @@ eliteforge-agent-official-plugin-tools-media = { path = "../../plugin/tool/elite
 eliteforge-agent-official-plugin-tools-discovery = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-discovery", optional = true }
 
 [dev-dependencies]
+eliteforge-agent-test-support = { path = "../../testing/eliteforge-agent-test-support" }
 eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
 async-trait.workspace = true
 tokio.workspace = true

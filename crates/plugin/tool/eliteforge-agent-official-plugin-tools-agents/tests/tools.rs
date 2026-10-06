@@ -267,7 +267,7 @@ async fn thread_tool_cannot_raise_the_current_run_limits() {
     request.limits.max_total_tokens = 100_000;
     let result = agent.run(request).await.unwrap();
     assert_eq!(result.output, "thread budget rejected");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -278,7 +278,7 @@ async fn agent_spawn_tool_runs_a_real_child_and_returns_its_result() {
         .await
         .unwrap();
     assert_eq!(result.output, "parent received child");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -289,7 +289,7 @@ async fn thread_tools_create_wait_and_read_an_independent_conversation() {
         .await
         .unwrap();
     assert_eq!(result.output, "parent received thread");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -309,7 +309,7 @@ async fn thread_answer_resumes_a_persisted_interaction_and_close_releases_it() {
         .await
         .unwrap();
     assert_eq!(result.output, "parent resumed and closed thread");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -415,5 +415,5 @@ async fn collaboration_runtime_publishes_child_and_thread_lifecycle_events() {
             .count(),
         1
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }

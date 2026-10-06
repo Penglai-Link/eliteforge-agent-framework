@@ -93,7 +93,7 @@ async fn model_aware_estimator_and_modality_routing_reach_final_admission() {
         assert_eq!(calls[0].0, "vision");
         assert_eq!(calls[0].1.options.max_output_tokens, Some(16));
     }
-    agent.close().await;
+    agent.framework().close().await;
 }
 #[tokio::test]
 async fn unsupported_structured_output_fails_before_provider_dispatch() {
@@ -123,7 +123,7 @@ async fn unsupported_structured_output_fails_before_provider_dispatch() {
             .contains("no compatible chat model")
     );
     assert!(calls.lock().unwrap().is_empty());
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct RevokeModel;
@@ -192,7 +192,7 @@ async fn tool_revocation_blocks_pending_sibling_and_next_model_exposure() {
         "revocation enforced"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct OneToolModel;
@@ -268,7 +268,7 @@ async fn host_revocation_during_middleware_is_rechecked_before_external_effect()
     release.notify_one();
     waiting.await.unwrap().unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct TemporaryExposureModel(AtomicUsize);
@@ -374,7 +374,7 @@ async fn temporary_exposure_can_collapse_and_reexpand_without_revoking_authority
         extensions.get::<ToolCallIdentity>().is_none(),
         "call identity must not leak into the parent run"
     );
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct BatchModel;
@@ -466,7 +466,7 @@ async fn partial_batch_admission_records_unexecuted_siblings_and_stops_at_budget
             assert!(rejected.tool_result.as_ref().unwrap().is_error);
             assert!(rejected.content.text().contains("not executed"));
         }
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 struct HostInput {
@@ -566,7 +566,7 @@ async fn host_steering_preserves_typed_content_and_atomically_seals_final_admiss
             .count(),
         1
     );
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -596,6 +596,6 @@ async fn hidden_tool_authority_requires_explicit_host_opt_in() {
         request.limits.allow_unexposed_tools = allowed;
         agent.run(request).await.unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), usize::from(allowed));
-        agent.close().await;
+        agent.framework().close().await;
     }
 }

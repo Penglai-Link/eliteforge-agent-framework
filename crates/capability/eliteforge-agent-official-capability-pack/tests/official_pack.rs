@@ -4,6 +4,7 @@ use eliteforge_agent_official_capability_pack::{
     EliteForgeOfficialCapabilityPack, agui::AgUiStream, human::AskUserPresentation,
     mcp::DiscoverMcpTools, model::GenaiPlugin, storage::LocalStoragePlugin,
 };
+use eliteforge_agent_test_support::TestBuilder;
 use serde_json::{Value, json};
 
 fn official_pack(path: impl AsRef<std::path::Path>) -> EliteForgeOfficialCapabilityPack {
@@ -73,7 +74,7 @@ async fn official_pack_supports_agent_output_questions_and_persistent_resume() {
             .without_skills()
             .model(ChatModelPlugin::new(AskThenReply))
     };
-    let builder = AgentBuilder::new()
+    let builder = TestBuilder::new()
         .default_models(false)
         .capability_pack(pack());
     assert!(
@@ -94,10 +95,10 @@ async fn official_pack_supports_agent_output_questions_and_persistent_resume() {
     assert_eq!(result.status, RunStatus::AwaitingInput);
     assert_eq!(agent.pending_interactions("chat").await.unwrap().len(), 1);
     let interaction = result.interactions[0].clone();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     drop(agent);
 
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .capability_pack(pack())
         .build()
@@ -138,7 +139,7 @@ async fn official_pack_supports_agent_output_questions_and_persistent_resume() {
             .iter()
             .any(|message| message.content.text() == result.output)
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(matches!(
         agent.pending_interactions("chat").await,
         Err(AgentError::Closed)
@@ -156,7 +157,7 @@ async fn official_pack_supports_agent_output_questions_and_persistent_resume() {
 #[tokio::test]
 async fn pack_installs_explicit_genai_even_when_framework_auto_models_are_disabled() {
     let directory = tempfile::tempdir().unwrap();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .capability_pack(
             official_pack(directory.path().join("agent.sqlite"))
@@ -168,7 +169,7 @@ async fn pack_installs_explicit_genai_even_when_framework_auto_models_are_disabl
     let models = agent.models(ModelOperation::Chat);
     assert_eq!(models.len(), 1);
     assert_eq!(models[0], ModelRef::new("gateway", "configured-chat"));
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[test]
@@ -259,7 +260,7 @@ async fn official_pack_enables_local_tools_only_when_explicitly_configured() {
                 .write_filesystem(FileSystemToolsConfig::new(directory.path()))
                 .system_commands(SystemCommandConfig::restricted(["git"]));
         }
-        let agent = AgentBuilder::new()
+        let agent = TestBuilder::new()
             .default_models(false)
             .capability_pack(pack)
             .build()
@@ -273,7 +274,7 @@ async fn official_pack_enables_local_tools_only_when_explicitly_configured() {
                 .output,
             "catalog checked",
         );
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
     }
 }
 
@@ -295,7 +296,7 @@ async fn defaults_can_be_explicitly_replaced_or_disabled() {
     let directory = tempfile::tempdir().unwrap();
     let original = directory.path().join("original.sqlite");
     let replacement = directory.path().join("replacement.sqlite");
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .capability_pack(
             official_pack(&original)
@@ -335,7 +336,7 @@ async fn defaults_can_be_explicitly_replaced_or_disabled() {
             .output,
         "plain"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[cfg(all(feature = "web", feature = "media", feature = "discovery"))]
@@ -386,7 +387,7 @@ async fn optional_features_compile_without_implicitly_installing_their_plugins()
                 .media(MediaToolsConfig::new(root.path()))
                 .tool_discovery(ToolDiscoveryPlugin::new());
         }
-        let agent = AgentBuilder::new()
+        let agent = TestBuilder::new()
             .default_models(false)
             .capability_pack(pack)
             .build()
@@ -399,6 +400,6 @@ async fn optional_features_compile_without_implicitly_installing_their_plugins()
             ))
             .await
             .unwrap();
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
     }
 }

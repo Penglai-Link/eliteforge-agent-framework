@@ -85,7 +85,7 @@ let writer = framework.agent(AgentSelection {
 - `agent.close()`：取消并排空该 Agent 的运行和操作；其他 Agent、共享存储和插件继续工作。
 - `framework.close()`：停止整个环境的新准入，取消管理操作，关闭全部 Agent，随后按逆序关闭插件。并发关闭只清理一次，调用者取消不会中断已启动的关闭任务。
 - `agent.reconfigure(framework.agent(new_selection))`：只改变该 Agent 的能力绑定。运行中拒绝重配置；新选择失败保留原配置；不重装插件、不重开数据库、不改变其他 Agent。
-- 能力包在 Framework 构建时绑定共享范围；任务仍保留版本保护与释放。新增 `CapabilityPack::for_framework_scope`，已有 `for_agent_scope` 实现通过兼容钩子继续工作。
+- 能力包在 Framework 构建时绑定共享范围；任务仍保留版本保护与释放。能力包通过 `CapabilityPack::for_framework_scope` 绑定资源。
 
 Framework 暂不提供运行中替换整个插件环境的接口；需要调整安装集合时，应用先排空旧环境，再构建新环境。Agent 重配置不承担插件安装或卸载。
 
@@ -100,8 +100,11 @@ let report = framework.execute(DeleteSessions(session_ids)).await?;
 
 共享存储不改变会话身份语义。多个 Agent 的独立执行应使用各自的 execution session ID；业务会话与这些执行 ID 的映射由应用管理。删除一个 ID 不隐式级联其他 ID，也不会自动删除共享长期记忆或工件文件。
 
-## 旧入口兼容
+## API 调整
 
-`AgentBuilder::new().plugin(...).capability_pack(...).build()` 保留为创建私有单 Agent Framework 的兼容入口。插件资源实际属于这个私有 Framework，关闭 Agent 时一起关闭。历史文档中的此类示例使用这一模式。
+插件、工厂、能力包及 Skills 资源目录只在 `FrameworkBuilder` 上配置。
+`AgentBuilder` 只能由 `framework.agent(AgentSelection)` 创建，不提供 `new()`、`Default` 或插件安装方法。
 
-新的共享入口使用 `FrameworkBuilder` 安装插件、能力包与工厂，使用 `framework.agent(AgentSelection)` 创建 Agent。在共享 AgentBuilder 上追加插件、工厂或能力包会明确报错，避免无意创建第二套存储。旧入口的完整装配重配置也只适用于私有环境。
+`agent.reconfigure(framework.agent(selection))` 只改变同一 Framework 内的能力选择。候选失败时继续使用原选择，插件和存储都不会重装。更换安装的插件或能力包版本，需要由宿主创建新的 Framework，并显式关闭旧环境。
+
+`agent.close()` 关闭该 Agent 的工作；`framework.close()` 关闭全部 Agent 和共享插件。

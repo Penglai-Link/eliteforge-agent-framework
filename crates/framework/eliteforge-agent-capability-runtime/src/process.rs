@@ -45,7 +45,6 @@ pub struct BackendInstance {
     selection: std::sync::Mutex<Option<UsageLease>>,
     version_lock: Arc<std::sync::Mutex<Option<std::fs::File>>>,
     retired: Arc<std::sync::atomic::AtomicBool>,
-    admission_paused: std::sync::atomic::AtomicBool,
     pub(crate) data_scope: std::sync::Mutex<String>,
     pub selected_implementations: std::collections::BTreeSet<String>,
     selected_pages: std::sync::Mutex<Option<std::collections::BTreeSet<String>>>,
@@ -147,7 +146,6 @@ impl BackendInstance {
             selection: std::sync::Mutex::new(Some(selection)),
             version_lock: Arc::new(std::sync::Mutex::new(Some(version_lock))),
             retired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            admission_paused: std::sync::atomic::AtomicBool::new(false),
             selected_implementations: selected,
             selected_pages: std::sync::Mutex::new(None),
             selected_plugins: std::sync::Mutex::new(None),
@@ -160,14 +158,6 @@ impl BackendInstance {
     }
     pub fn is_retired(&self) -> bool {
         self.retired.load(std::sync::atomic::Ordering::Acquire)
-    }
-    pub(crate) fn pause_admission(&self) {
-        self.admission_paused
-            .store(true, std::sync::atomic::Ordering::Release);
-    }
-    pub(crate) fn resume_admission(&self) {
-        self.admission_paused
-            .store(false, std::sync::atomic::Ordering::Release);
     }
     pub(crate) fn select_pages(
         &self,
@@ -357,9 +347,6 @@ impl BackendInstance {
     }
     fn admits_operations(&self) -> bool {
         !self.is_retired()
-            && !self
-                .admission_paused
-                .load(std::sync::atomic::Ordering::Acquire)
     }
     pub fn data_directory(&self) -> RuntimeResult<std::path::PathBuf> {
         let data = self

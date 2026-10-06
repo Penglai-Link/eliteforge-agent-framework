@@ -88,11 +88,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&artifact_root, std::fs::Permissions::from_mode(0o700))?;
     }
-    let agent = AgentBuilder::new().plugin(LocalStoragePlugin::new(&args[2], artifact_root)).plugin(ChatModelPlugin::new(Arithmetic))
+    let framework = FrameworkBuilder::new().plugin(LocalStoragePlugin::new(&args[2], artifact_root)).plugin(ChatModelPlugin::new(Arithmetic))
         .plugin(AgentLoopPlugin::new(WorkflowLoop::new(WorkflowDefinition { id:"approval-example".into(), version:1, stages:vec![WorkflowStage::new("calculate")] })?))
         .plugin(ToolPolicyPlugin::new("approval", Approval))
         .plugin(ToolProviderPlugin::new("tools", StaticToolProvider::new(vec![ToolBinding::new(ToolDescriptor::new("double", "double", "Double an integer", json!({"type":"object","properties":{"amount":{"type":"integer"}},"required":["amount"],"additionalProperties":false})), Double)])))
         .build().await?;
+    let agent = framework
+        .agent(AgentSelection {
+            agent_loop: Some("framework.loop".into()),
+            tool_providers: Some(vec!["tools".into()]),
+            ..AgentSelection::default()
+        })
+        .build()
+        .await?;
     let outcome = async {
         let handle = agent.start(request)?;
         let run_id = handle.run_id;
@@ -104,7 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok::<_, Box<dyn std::error::Error>>(())
     }
     .await;
-    let report = agent.close().await;
+    let report = framework.close().await;
     if !report.is_success() {
         return Err(format!("shutdown failed: {report:?}").into());
     }

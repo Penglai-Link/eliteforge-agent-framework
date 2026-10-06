@@ -5,6 +5,7 @@ use eliteforge_agent_official_capability_pack::{
     EliteForgeOfficialCapabilityPack,
     telemetry::{TelemetryConfig, TelemetryPlugin},
 };
+use eliteforge_agent_test_support::TestBuilder;
 use opentelemetry::{
     global,
     trace::{Span, Tracer, TracerProvider},
@@ -43,7 +44,7 @@ impl ChatModel for Reply {
 async fn default_pack_resolves_global_providers_at_build_and_explicit_telemetry_replaces_them() {
     let directory = tempfile::tempdir().unwrap();
     // Providers are configured after the pack has been added to the builder.
-    let builder = AgentBuilder::new().capability_pack(
+    let builder = TestBuilder::new().capability_pack(
         official_pack(directory.path().join("global.sqlite")).model(ChatModelPlugin::new(Reply)),
     );
     let exporter = InMemorySpanExporter::default();
@@ -66,7 +67,7 @@ async fn default_pack_resolves_global_providers_at_build_and_explicit_telemetry_
             .output,
         "done"
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     traces.force_flush().unwrap();
     metrics.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
@@ -90,7 +91,7 @@ async fn default_pack_resolves_global_providers_at_build_and_explicit_telemetry_
     let explicit_traces = SdkTracerProvider::builder()
         .with_simple_exporter(explicit_exporter.clone())
         .build();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .capability_pack(
             official_pack(directory.path().join("explicit.sqlite"))
                 .model(ChatModelPlugin::new(Reply))
@@ -111,7 +112,7 @@ async fn default_pack_resolves_global_providers_at_build_and_explicit_telemetry_
         .run(RunRequest::new("chat", "hello again"))
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     explicit_traces.force_flush().unwrap();
     assert_eq!(
         explicit_exporter

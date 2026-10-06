@@ -95,7 +95,7 @@ async fn retrieval_block_is_bounded_and_deleted_or_corrected_entries_do_not_reap
         assert!(first.contains(&initial.version));
         assert!(first.contains("explicit-user-input"));
     }
-    agent.close().await;
+    agent.framework().close().await;
 }
 struct ToolChecks(Arc<dyn LongTermMemory>);
 #[async_trait]
@@ -212,7 +212,7 @@ async fn explicit_memory_tools_use_fixed_scope_and_report_version_errors() {
         .await
         .unwrap();
     agent.run(RunRequest::new("tools", "unused")).await.unwrap();
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[derive(Clone, Default)]
@@ -308,7 +308,7 @@ async fn agent_reopen_reuses_summary_from_persisted_conversation_generation() {
         let mut request = RunRequest::new("chat", "next");
         request.limits.max_context_messages = 6;
         agent.run(request).await.unwrap();
-        agent.close().await;
+        agent.framework().close().await;
         conversations.close().await.unwrap();
         summaries.close().await.unwrap();
     }

@@ -148,7 +148,7 @@ async fn multiple_embeddings_select_by_request_then_stage_then_default_and_pin_s
                 .is_err()
         );
     }
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(matches!(
         models.embed(EmbeddingRequest::texts(["closed"])).await,
         Err(AgentError::Closed)
@@ -195,7 +195,7 @@ async fn duplicate_bindings_and_invalid_defaults_fail_at_build_ambiguity_at_call
             .contains("multiple compatible")
     );
     assert!(adapter.calls.lock().unwrap().is_empty());
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -244,7 +244,7 @@ async fn retired_embedding_with_host_space_is_unavailable_and_can_reappear() {
         adapter.calls.lock().unwrap()[0].dimensions,
         Some(space.dimensions)
     );
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -275,7 +275,7 @@ async fn multimodal_chat_filters_candidates_and_explicit_incompatible_choice_nev
         request.model = Some(ModelRef::new("local", "text"));
         assert!(agent.run(request).await.is_err());
     }
-    agent.close().await;
+    agent.framework().close().await;
 }
 fn media(mime: &str) -> MediaContent {
     MediaContent {
@@ -348,7 +348,7 @@ async fn operation_timeout_cancellation_and_agent_close_drop_inflight_calls() {
     let client = agent.clone();
     let task = tokio::spawn(async move { client.embed(EmbeddingRequest::texts(["close"])).await });
     entered.notified().await;
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(matches!(task.await.unwrap(), Err(AgentError::Closed)));
     assert_eq!(dropped.load(Ordering::SeqCst), 3);
 }
@@ -629,7 +629,7 @@ async fn dedicated_operations_dispatch_and_video_job_survives_serialization() {
             .await
             .is_err()
     );
-    agent.close().await;
+    agent.framework().close().await;
     assert!(agent.next_realtime(&session).await.is_err());
     agent.close_realtime(&session).await.unwrap();
 }
@@ -739,5 +739,5 @@ async fn embedding_only_workflow_uses_operation_default_and_shares_run_budget() 
         .unwrap();
     assert_eq!(result.usage.input_tokens, 4);
     assert_eq!(adapter.calls.lock().unwrap().len(), 1);
-    agent.close().await;
+    agent.framework().close().await;
 }

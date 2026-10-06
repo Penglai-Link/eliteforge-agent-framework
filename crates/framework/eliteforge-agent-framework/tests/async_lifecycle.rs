@@ -61,7 +61,7 @@ async fn cancelled_close_waiter_does_not_abandon_shutdown() {
         .build()
         .await
         .unwrap();
-    let closing = agent.clone();
+    let closing = agent.framework();
     let first = tokio::spawn(async move { closing.close().await });
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
@@ -70,7 +70,7 @@ async fn cancelled_close_waiter_does_not_abandon_shutdown() {
     let _ = first.await;
     release.notify_one();
     assert!(
-        tokio::time::timeout(Duration::from_secs(2), agent.close())
+        tokio::time::timeout(Duration::from_secs(2), agent.framework().close())
             .await
             .unwrap()
             .is_success()
@@ -118,7 +118,7 @@ async fn cancelled_loop_awaits_tool_resource_shutdown_before_result() {
         Err(AgentError::Cancelled)
     ));
     assert_eq!(count.load(Ordering::SeqCst), 1);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 #[tokio::test]
 async fn framework_validation_failure_after_install_awaits_plugin_shutdown() {
@@ -224,7 +224,7 @@ async fn resource_and_middleware_cleanup_failures_preserve_the_primary_error() {
             }
         }
         assert_eq!(terminals, 1);
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 
@@ -287,5 +287,5 @@ async fn memory_finish_failure_is_attached_to_the_original_model_error() {
     assert!(
         matches!(*cleanup, AgentError::ConversationStore(ConversationError::Other(message)) if message == "memory finish failed")
     );
-    agent.close().await;
+    agent.framework().close().await;
 }

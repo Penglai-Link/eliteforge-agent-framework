@@ -179,7 +179,7 @@ async fn effect_survives_process_death_without_automatic_reexecution() {
         std::fs::read(dir.path().join("external-effect")).unwrap(),
         b"exactly one effect"
     );
-    executor.close().await;
+    executor.framework().close().await;
     store.close().await.unwrap();
     let store = open(dir.path()).await;
     let offline = agent(dir.path(), "offline", store.clone()).await;
@@ -205,7 +205,7 @@ async fn in_flight_model_reservation_survives_process_death() {
     let executor = agent(dir.path(), "offline", store.clone()).await;
     // For this nonterminal case use available tools, but a model which panics if
     // called: the restored exhausted ledger must reject it before dispatch.
-    executor.close().await;
+    executor.framework().close().await;
     let executor = TestBuilder::default()
         .plugin(ChatModelPlugin::new(CrashModel {
             directory: dir.path().into(),
@@ -220,7 +220,7 @@ async fn in_flight_model_reservation_survives_process_death() {
         .unwrap();
     let error = executor.run(resume(saved.run_id)).await.unwrap_err();
     assert!(error.to_string().contains("budget exhausted"), "{error}");
-    executor.close().await;
+    executor.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -332,7 +332,7 @@ async fn dag_process_crash_preserves_json_tools_and_budget(mode: &str) {
         let error = executor.run(resume(saved.run_id)).await.unwrap_err();
         assert!(error.to_string().contains("budget exhausted"), "{error}");
     }
-    executor.close().await;
+    executor.framework().close().await;
     store.close().await.unwrap();
 }
 #[tokio::main]

@@ -9,6 +9,7 @@ pub use external_loop::ExternalAgentLoop;
 pub mod dag;
 pub use dag::*;
 mod agent;
+mod assembly;
 pub use agent::*;
 pub mod models;
 pub use models::*;

@@ -132,5 +132,5 @@ async fn second_native_dispatch_retains_non_tool_media_resource_structure_and_mo
         );
         assert_eq!(assistant.tool_calls[0].id, "call");
     }
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }

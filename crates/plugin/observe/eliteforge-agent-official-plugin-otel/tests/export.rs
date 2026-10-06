@@ -83,7 +83,7 @@ async fn real_exporters_record_parentage_tool_link_usage_and_no_payloads() {
     let mut request = RunRequest::new("private-session", "private-prompt");
     request.extensions.insert(TraceParent(parent.clone()));
     agent.run(request).await.unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     // Closing the Agent does not shut down host-owned providers.
     parent.span().end();
     let mut after = traces.tracer("host").start("after-agent-close");
@@ -171,7 +171,7 @@ async fn cancelled_model_future_ends_spans_with_cancelled_outcome() {
         agent.wait(handle).await,
         Err(AgentError::Cancelled)
     ));
-    agent.close().await;
+    agent.framework().close().await;
     let spans = exporter.get_finished_spans().unwrap();
     assert_eq!(spans.len(), 2);
     assert!(
@@ -220,7 +220,7 @@ async fn cleanup_failure_does_not_reclassify_a_cancelled_run() {
     let error = agent.wait(handle).await.unwrap_err();
     assert!(matches!(error, AgentError::WithCleanup { .. }));
     assert!(matches!(error.primary(), AgentError::Cancelled));
-    agent.close().await;
+    agent.framework().close().await;
     let spans = exporter.get_finished_spans().unwrap();
     let run = spans.iter().find(|s| s.name == "agent.run").unwrap();
     assert!(
@@ -325,7 +325,7 @@ async fn parallel_dag_spans_and_duplicate_provider_call_ids_stay_with_their_node
         .await
         .unwrap()
         .unwrap();
-    agent.close().await;
+    agent.framework().close().await;
     db.close().await.unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     let run = spans.iter().find(|s| s.name == "agent.run").unwrap();
@@ -431,7 +431,7 @@ async fn failed_run_replay_after_reopening_does_not_dispatch_a_node() {
     let before: DagWorkflowState =
         serde_json::from_value(db.load(run_id).await.unwrap().state).unwrap();
     let invocation = before.nodes["private-node"].invocation_id;
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
     drop(a);
     drop(db);
@@ -455,7 +455,7 @@ async fn failed_run_replay_after_reopening_does_not_dispatch_a_node() {
         ..Default::default()
     });
     assert!(matches!(a.run(request).await, Err(AgentError::Run(_))));
-    a.close().await;
+    a.framework().close().await;
     let after: DagWorkflowState =
         serde_json::from_value(db.load(run_id).await.unwrap().state).unwrap();
     db.close().await.unwrap();
@@ -553,7 +553,7 @@ async fn node_middleware_unwinds_in_order_and_exports_redacted_primary_and_clean
         .await
         .unwrap();
     assert!(a.run(RunRequest::new("s", "input")).await.is_err());
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
     assert_eq!(
         *order.lock().unwrap(),
@@ -620,7 +620,7 @@ async fn cancelled_dag_node_ends_its_model_and_node_spans() {
         agent.wait(handle).await,
         Err(AgentError::Cancelled)
     ));
-    agent.close().await;
+    agent.framework().close().await;
     db.close().await.unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     assert_eq!(spans.len(), 3);
@@ -666,7 +666,7 @@ async fn cancelled_node_stays_terminal_across_agent_recreation() {
         .unwrap();
     a.cancel(&h).unwrap();
     assert!(a.wait(h).await.is_err());
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
     drop(a);
     drop(db);
@@ -690,7 +690,7 @@ async fn cancelled_node_stays_terminal_across_agent_recreation() {
         ..Default::default()
     });
     assert!(matches!(a.run(request).await, Err(AgentError::Cancelled)));
-    a.close().await;
+    a.framework().close().await;
     assert_eq!(
         db.load(run_id).await.unwrap().status,
         ExecutionStatus::Cancelled
@@ -779,7 +779,7 @@ async fn node_panics_denials_and_invalid_routes_have_failed_spans() {
         if id == "denied" {
             assert_eq!(error.to_string(), "run failed: denied by middleware");
         }
-        a.close().await;
+        a.framework().close().await;
         db.close().await.unwrap();
         let spans = exporter.get_finished_spans().unwrap();
         let node = spans
@@ -898,7 +898,7 @@ async fn sibling_failure_drains_unfinished_tool_before_ending_its_node() {
             .unwrap()
             .is_err()
     );
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     let tool = spans.iter().find(|s| s.name == "agent.tool").unwrap();
@@ -974,7 +974,7 @@ async fn approval_resume_parents_restored_tools_and_models_to_the_new_node_span(
         } else {
             assert_eq!(result.status, RunStatus::Completed);
         }
-        a.close().await;
+        a.framework().close().await;
         db.close().await.unwrap();
     }
     let spans = exporter.get_finished_spans().unwrap();
@@ -1031,7 +1031,7 @@ async fn model_error_report_is_correlated_at_model_node_and_run_without_raw_text
         .await
         .unwrap();
     assert!(a.run(RunRequest::new("s", "input")).await.is_err());
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     assert_eq!(spans.len(), 3);
@@ -1079,7 +1079,7 @@ async fn tool_interceptor_attaches_its_span_while_polling_the_executor() {
         .await
         .unwrap();
     a.run(RunRequest::new("s", "input")).await.unwrap();
-    a.close().await;
+    a.framework().close().await;
     let spans = exporter.get_finished_spans().unwrap();
     let tool = spans.iter().find(|s| s.name == "agent.tool").unwrap();
     assert_eq!(*observed.lock().unwrap(), Some(tool.span_context.span_id()));
@@ -1140,7 +1140,7 @@ async fn telemetry_distinguishes_assembly_from_final_dispatch_after_middleware_w
         .run(RunRequest::new("private-session", "private-input"))
         .await
         .unwrap();
-    agent.close().await;
+    agent.framework().close().await;
     traces.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     let run = spans.iter().find(|span| span.name == "agent.run").unwrap();
@@ -1238,7 +1238,7 @@ async fn context_failure_keeps_block_metadata_and_typed_cause_but_exports_no_err
     assert_eq!(report.blocks.last().unwrap().position, 1);
     assert!(report.error.message.is_none());
     assert!(capture.0.lock().unwrap().is_empty());
-    agent.close().await;
+    agent.framework().close().await;
     traces.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     let run = spans.iter().find(|span| span.name == "agent.run").unwrap();
@@ -1310,7 +1310,7 @@ async fn auxiliary_summary_dispatch_has_its_own_model_span_and_purpose() {
         .await
         .unwrap();
     agent.run(RunRequest::new("s", "unused")).await.unwrap();
-    agent.close().await;
+    agent.framework().close().await;
     traces.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     let model = spans
@@ -1358,7 +1358,7 @@ async fn context_no_gain_exports_explicit_outcome_without_source_payload() {
         .run(RunRequest::new("private-session", "private-input"))
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     traces.force_flush().unwrap();
     let spans = exporter.get_finished_spans().unwrap();
     let run = spans.iter().find(|span| span.name == "agent.run").unwrap();

@@ -1,3 +1,4 @@
+use eliteforge_agent_test_support::TestBuilder;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -10,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use eliteforge_agent_core::*;
-use eliteforge_agent_framework::AgentBuilder;
+
 use eliteforge_agent_official_plugin_skills::{
     FileSystemSkillProvider, FileSystemSkillsConfig, SkillsPlugin,
 };
@@ -18,6 +19,29 @@ use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
 use eliteforge_agent_test_support::TestConversationStore;
 use serde_json::{Value, json};
 use tokio::sync::Notify;
+
+const FIXTURE_SKILLS: &[&str] = &[
+    "allowed",
+    "cached",
+    "cancelled",
+    "code-review",
+    "different-name",
+    "excluded",
+    "header-only",
+    "included",
+    "limited",
+    "other",
+    "other-name",
+    "parallel",
+    "present",
+    "rag-backed",
+    "release-notes",
+    "resume-test",
+    "révision",
+    "safe-files",
+    "tagged",
+    "代码审查",
+];
 
 fn write_skill(directory: &Path, name: &str, description: &str, body: &str) -> PathBuf {
     let root = directory.join(name);
@@ -410,7 +434,8 @@ fn completed() -> RunResult {
 
 async fn run_probe(plugin: SkillsPlugin, action: ProbeAction) -> Probe {
     let probe = Arc::new(Mutex::new(Probe::default()));
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(AgentLoopPlugin::new(ProbeLoop {
             action,
@@ -427,7 +452,7 @@ async fn run_probe(plugin: SkillsPlugin, action: ProbeAction) -> Probe {
         .run(RunRequest::new("skills-probe", "probe"))
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     let mut probe = probe
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -631,7 +656,8 @@ async fn unknown_selected_skill_fails_before_model_or_tool_dispatch() {
     let local = directory.path().join("local");
     write_skill(&local, "present", "available", "instructions");
     let probe = Arc::new(Mutex::new(Probe::default()));
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(AgentLoopPlugin::new(ProbeLoop {
             action: ProbeAction::ContextOnly,
@@ -652,7 +678,7 @@ async fn unknown_selected_skill_fails_before_model_or_tool_dispatch() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("not-present"));
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[cfg(unix)]
@@ -754,7 +780,8 @@ impl AgentLoop for CancellationLoop {
 async fn cancellation_releases_the_execution_skill_snapshot() {
     let releases = Arc::new(AtomicUsize::new(0));
     let discovered = Arc::new(Notify::new());
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(AgentLoopPlugin::new(CancellationLoop {
             discovered: discovered.clone(),
@@ -779,7 +806,7 @@ async fn cancellation_releases_the_execution_skill_snapshot() {
         Err(AgentError::Cancelled)
     ));
     assert_eq!(releases.load(Ordering::Acquire), 1);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 struct ExecutionScopedProvider;
@@ -859,7 +886,8 @@ impl AgentLoop for ParallelLoadLoop {
 #[tokio::test]
 async fn concurrent_executions_keep_independent_skill_snapshots() {
     let probe = Arc::new(Mutex::new(Probe::default()));
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(AgentLoopPlugin::new(ParallelLoadLoop {
             barrier: Arc::new(tokio::sync::Barrier::new(2)),
@@ -882,7 +910,7 @@ async fn concurrent_executions_keep_independent_skill_snapshots() {
     let (first, second) = tokio::join!(agent.wait(first), agent.wait(second));
     first.unwrap();
     second.unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 
     let probe = probe
         .lock()
@@ -947,7 +975,8 @@ impl AgentLoop for ConcurrentSnapshotLoop {
 #[tokio::test]
 async fn one_execution_discovers_skills_once_when_context_and_tools_are_concurrent() {
     let catalog_calls = Arc::new(AtomicUsize::new(0));
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(AgentLoopPlugin::new(ConcurrentSnapshotLoop))
         .plugin(ConversationStorePlugin::new(
@@ -965,7 +994,7 @@ async fn one_execution_discovers_skills_once_when_context_and_tools_are_concurre
         .await
         .unwrap();
     assert_eq!(catalog_calls.load(Ordering::Acquire), 1);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1147,7 +1176,8 @@ async fn react_model_loop_uses_the_skill_tools_and_receives_loaded_details() {
         "Write concise release notes.",
     );
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(ChatModelPlugin::new(LoadSkillModel {
             requests: requests.clone(),
@@ -1163,7 +1193,7 @@ async fn react_model_loop_uses_the_skill_tools_and_receives_loaded_details() {
         .await
         .unwrap();
     assert_eq!(result.output, "loaded");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     let requests = requests
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1261,7 +1291,8 @@ async fn approved_skill_resource_read_survives_a_rebuilt_agent_resume() {
     let requests = Arc::new(Mutex::new(Vec::new()));
     let config = skills_config(&system, &local);
 
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(ChatModelPlugin::new(LoadThenReadResourceModel {
             requests: requests.clone(),
@@ -1282,9 +1313,10 @@ async fn approved_skill_resource_read_survives_a_rebuilt_agent_resume() {
         .unwrap();
     assert_eq!(waiting.status, RunStatus::AwaitingInput);
     let interaction = waiting.interactions[0].clone();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(ChatModelPlugin::new(LoadThenReadResourceModel {
             requests: requests.clone(),
@@ -1304,7 +1336,7 @@ async fn approved_skill_resource_read_survives_a_rebuilt_agent_resume() {
         .unwrap();
     let result = agent.run(resume).await.unwrap();
     assert_eq!(result.output, "resource loaded");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 
     let requests = requests
         .lock()
@@ -1331,7 +1363,8 @@ async fn in_process_skill_resume_keeps_the_original_file_snapshot() {
     let resource = root.join("references").join("style.md");
     fs::write(&resource, "RESOURCE_OK").unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(ChatModelPlugin::new(LoadThenReadResourceModel {
             requests: requests.clone(),
@@ -1366,7 +1399,7 @@ async fn in_process_skill_resume_keeps_the_original_file_snapshot() {
         .unwrap();
     let result = agent.run(resume).await.unwrap();
     assert_eq!(result.output, "resource changed");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 struct ReadResourceWithoutLoadingModel;
@@ -1416,7 +1449,8 @@ async fn rebuilt_agent_resume_does_not_bypass_skill_load() {
     );
     fs::create_dir_all(root.join("references")).unwrap();
     fs::write(root.join("references").join("style.md"), "RESOURCE_OK").unwrap();
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(ChatModelPlugin::new(ReadResourceWithoutLoadingModel))
         .plugin(local_storage(&database))
@@ -1438,9 +1472,10 @@ async fn rebuilt_agent_resume_does_not_bypass_skill_load() {
         .unwrap();
     assert_eq!(waiting.status, RunStatus::AwaitingInput);
     let interaction = waiting.interactions[0].clone();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(ChatModelPlugin::new(ReadResourceWithoutLoadingModel))
         .plugin(local_storage(&database))
@@ -1458,7 +1493,7 @@ async fn rebuilt_agent_resume_does_not_bypass_skill_load() {
         .unwrap();
     let result = agent.run(resume).await.unwrap();
     assert_eq!(result.output, "unloaded resource rejected");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 struct DenySkillLoad;
@@ -1522,7 +1557,8 @@ async fn skill_loading_flows_through_existing_tool_policy() {
         "secret instructions",
     );
     let requests = Arc::new(Mutex::new(Vec::new()));
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
+        .skills(FIXTURE_SKILLS.iter().copied())
         .default_models(false)
         .plugin(ChatModelPlugin::new(DeniedLoadModel {
             requests: requests.clone(),
@@ -1539,7 +1575,7 @@ async fn skill_loading_flows_through_existing_tool_policy() {
         .await
         .unwrap();
     assert_eq!(result.output, "denied");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     let requests = requests
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

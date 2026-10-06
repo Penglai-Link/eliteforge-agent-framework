@@ -172,7 +172,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("MODEL_ENDPOINT")?,
         AuthData::from_env("MODEL_API_KEY"),
     )?);
-    let agent = AgentBuilder::new()
+    let framework = FrameworkBuilder::new()
         .plugin(MemoryContextPlugin {
             directory,
             model: model.clone(),
@@ -183,6 +183,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 vec![ModelDescriptor::new(model)],
             ),
         )
+        .build()
+        .await?;
+    let agent = framework
+        .agent(AgentSelection {
+            context_sources: Some(vec!["example.memory-context".into()]),
+            ..AgentSelection::default()
+        })
         .build()
         .await?;
     let result = async {
@@ -214,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok::<_, Box<dyn std::error::Error>>(agent.run(request).await?)
     }
     .await;
-    let shutdown = agent.close().await;
+    let shutdown = framework.close().await;
     println!("{}", result?.output);
     if !shutdown.is_success() {
         return Err(format!("shutdown failed: {shutdown:?}").into());

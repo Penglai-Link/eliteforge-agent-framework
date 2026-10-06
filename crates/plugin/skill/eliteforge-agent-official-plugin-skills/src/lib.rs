@@ -666,7 +666,7 @@ impl CapabilitySkillsSourcePlugin {
                 .as_deref()
                 .ok_or_else(|| {
                     PluginError::message(format!(
-                        "capability package `{}` embeds skills; configure AgentBuilder::capability_skills_root(...) to prepare them",
+                        "capability package `{}` embeds skills; configure FrameworkBuilder::capability_skills_root(...) to prepare them",
                         self.pack_id
                     ))
                 })

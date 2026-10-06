@@ -129,7 +129,7 @@ async fn cancellation_releases_run_resources_and_allows_reusing_the_session() {
 }
 
 #[tokio::test]
-async fn closing_an_agent_cancels_active_runs_cleans_plugins_and_rejects_new_runs() {
+async fn closing_framework_cancels_active_runs_cleans_plugins_and_rejects_new_runs() {
     let model = GatedModel::default();
     let cleaned = Arc::new(AtomicUsize::new(0));
     let agent = TestBuilder::default()
@@ -141,7 +141,7 @@ async fn closing_an_agent_cancels_active_runs_cleans_plugins_and_rejects_new_run
     let handle = agent.start(RunRequest::new("session", "run")).unwrap();
     timeout(DEADLINE, model.entered.notified()).await.unwrap();
 
-    timeout(DEADLINE, agent.close()).await.unwrap();
+    timeout(DEADLINE, agent.framework().close()).await.unwrap();
 
     assert!(agent.is_closed());
     assert_eq!(cleaned.load(Ordering::SeqCst), 1);
@@ -153,7 +153,7 @@ async fn closing_an_agent_cancels_active_runs_cleans_plugins_and_rejects_new_run
         agent.start(RunRequest::new("other", "new run")),
         Err(AgentError::Closed)
     ));
-    agent.close().await;
+    agent.framework().close().await;
     assert_eq!(cleaned.load(Ordering::SeqCst), 1);
 }
 
@@ -202,10 +202,11 @@ async fn concurrent_close_callers_wait_for_the_same_plugin_cleanup() {
             .unwrap(),
     );
     let first_agent = agent.clone();
-    let first_close = tokio::spawn(async move { first_agent.close().await });
+    let first_close = tokio::spawn(async move { first_agent.framework().close().await });
     timeout(DEADLINE, entered.notified()).await.unwrap();
 
-    let mut second_close = Box::pin(agent.close());
+    let framework = agent.framework();
+    let mut second_close = Box::pin(framework.close());
     assert!(futures::poll!(second_close.as_mut()).is_pending());
     assert_eq!(cleaned.load(Ordering::SeqCst), 0);
     release.send(()).unwrap();
@@ -343,7 +344,7 @@ async fn retained_controls_do_not_prevent_owner_drop_from_cancelling_the_run() {
         assert_ne!(next.run_id, control.run_id());
         agent.cancel(&control).unwrap();
         assert_eq!(agent.wait(next).await.unwrap().status, RunStatus::Completed);
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 

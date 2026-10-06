@@ -155,7 +155,7 @@ async fn react_compression_uses_shared_invoker_without_rewriting_source_or_strea
             );
         }
     }
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -205,7 +205,7 @@ async fn workflow_projection_compresses_while_sqlite_keeps_complete_history() {
             .unwrap()
             >= 18
     );
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -243,7 +243,7 @@ async fn unusable_summaries_fail_without_silently_truncating_or_calling_main_mod
                 .iter()
                 .all(|(id, _)| id == "summary")
         );
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 
@@ -338,7 +338,7 @@ async fn reduction_preserves_newest_signed_tool_exchange_exactly() {
         .unwrap();
     let result = agent.run(RunRequest::new("s", "unused")).await.unwrap();
     assert_eq!(result.usage.input_tokens, 9);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct CachedProjection {
@@ -423,7 +423,7 @@ async fn cached_projection(provider: Fixture, projection: CachedProjection) {
         .run(RunRequest::new("summary-chat", "unused"))
         .await
         .unwrap();
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -588,7 +588,7 @@ async fn auxiliary_failure_keeps_typed_model_error_instead_of_flattening_it() {
         AgentError::Model(ModelError::Fatal(_))
     ));
     assert_eq!(error.report(&OmitErrorMessages).kind, "model_fatal");
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct DoubleEstimate;
@@ -674,7 +674,7 @@ async fn summary_packing_uses_its_connection_estimator_and_output_reservation() 
             );
         }
     }
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -693,5 +693,5 @@ async fn summary_provider_can_return_only_the_structured_response_field() {
         .await
         .unwrap();
     assert_eq!(agent.run(request()).await.unwrap().output, "answer");
-    agent.close().await;
+    agent.framework().close().await;
 }

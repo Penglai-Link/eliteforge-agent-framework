@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ContextBlockConfig::new(HISTORY_BLOCK, BlockBudget::tokens(9000))
             .reduce_with(RecentConversation),
     ]);
-    let agent = AgentBuilder::new()
+    let framework = FrameworkBuilder::new()
         .plugin(
             eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin::new(
                 "agent.sqlite",
@@ -51,10 +51,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(ContextLayoutPlugin(layout))
         .build()
         .await?;
+    let agent = framework
+        .agent(AgentSelection {
+            context_sources: Some(vec!["prompt".into(), "task-data".into()]),
+            ..AgentSelection::default()
+        })
+        .build()
+        .await?;
     let mut request = RunRequest::new("blocks-1", "先列出三个实现步骤");
     request.limits.max_context_tokens = 12_000;
     let result = agent.run(request).await;
-    let shutdown = agent.close().await;
+    let shutdown = framework.close().await;
     println!("{}", result?.output);
     if !shutdown.is_success() {
         return Err(format!("shutdown failed: {shutdown:?}").into());

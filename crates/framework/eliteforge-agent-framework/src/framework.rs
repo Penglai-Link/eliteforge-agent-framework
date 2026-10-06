@@ -158,13 +158,13 @@ impl AgentSelection {
 /// Installs capability packs and plugins once for a Framework environment.
 #[derive(Clone)]
 pub struct FrameworkBuilder {
-    assembly: AgentBuilder,
+    assembly: crate::assembly::FrameworkAssembly,
     defaults: AgentSelection,
 }
 impl Default for FrameworkBuilder {
     fn default() -> Self {
         Self {
-            assembly: AgentBuilder::default(),
+            assembly: crate::assembly::FrameworkAssembly::default(),
             defaults: AgentSelection {
                 tool_providers: Some(Vec::new()),
                 skills: Some(Vec::new()),
@@ -220,7 +220,7 @@ impl FrameworkBuilder {
     pub async fn build(mut self) -> Result<Framework, AgentError> {
         self.assembly.prepare_framework()?;
         let packs = self.assembly.installed_packs()?;
-        let mut container = self.assembly.install_plugins(None).await?;
+        let mut container = self.assembly.install_plugins().await?;
         let registry = container.services().clone();
         if self.defaults.agent_loop.is_none()
             && registry.providers::<LoopService>() == ["builtin.framework-defaults"]
@@ -389,29 +389,6 @@ impl Framework {
             cancellation: CancellationToken::new(),
         }))
     }
-    pub(crate) fn detach_plugins(
-        &self,
-        ids: &std::collections::HashSet<String>,
-    ) -> PluginContainer {
-        self.0
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .container
-            .as_mut()
-            .expect("live environment")
-            .detach_plugins(ids)
-    }
-    pub(crate) fn adopt_retained(&self, retained: &mut PluginContainer) {
-        self.0
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .container
-            .as_mut()
-            .expect("live environment")
-            .adopt_retained(retained);
-    }
     pub(crate) fn capability_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
         self.0.packs.clone()
     }
@@ -423,6 +400,10 @@ impl Framework {
     }
     pub(crate) fn same_environment(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
+    }
+    /// Read-only snapshot of installed services and provider identifiers.
+    pub fn services(&self) -> Result<ServiceRegistry, AgentError> {
+        self.registry()
     }
     pub(crate) fn registry(&self) -> Result<ServiceRegistry, AgentError> {
         if self.is_closed() {

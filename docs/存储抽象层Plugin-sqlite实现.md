@@ -66,10 +66,11 @@ let mut storage = LocalStoragePlugin::new("data/agent.sqlite", "data/artifacts")
 storage.config.conversations.max_sessions = 2048;
 storage.config.execution.max_checkpoint_bytes = 48 * 1024 * 1024;
 
-let agent = AgentBuilder::new()
+let framework = FrameworkBuilder::new()
     .plugin(storage)
     .build()
     .await?;
+let agent = framework.agent(AgentSelection::default()).build().await?;
 ```
 
 | 配置项 | 默认值 | 作用 |
@@ -126,10 +127,11 @@ let mut extensions = ExtensionConfig::new("data/sqlite-native");
 extensions.simple = ExtensionMode::Required;
 extensions.vector = ExtensionMode::Preferred;
 
-let agent = AgentBuilder::new()
+let framework = FrameworkBuilder::new()
     .plugin(LocalStoragePlugin::new("data/agent.sqlite", "data/artifacts").with_extensions(extensions))
     .build()
     .await?;
+let agent = framework.agent(AgentSelection::default()).build().await?;
 
 let reports = agent.execute(ReadSqliteCapabilities).await?;
 ```

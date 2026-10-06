@@ -126,7 +126,7 @@ async fn external_agent(
     fail: bool,
 ) -> (Agent, Arc<Notify>) {
     let release = Arc::new(Notify::new());
-    let agent = AgentBuilder::new()
+    let agent = TestBuilder::new()
         .default_models(false)
         .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
         .plugin(ExternalAgentPlugin::new(ControlledExternal {
@@ -315,7 +315,7 @@ async fn streaming_suffix_reasoning_sse_and_multiple_runs_remain_isolated() {
             .collect::<BTreeSet<_>>()
     };
     assert!(messages(&a_events).is_disjoint(&messages(&b_events)));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct ToolModel {
@@ -427,7 +427,7 @@ async fn offloaded_tool_results_preserve_reference_and_tool_lifecycle() {
             .starts_with("artifact:")
     );
     assert!(!result.content.contains(&"x".repeat(2048)));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -484,7 +484,7 @@ async fn parallel_dag_nodes_with_identical_provider_call_ids_have_distinct_messa
     // Two workflow nodes and two model calls per node.
     assert_eq!(types(&events, EventType::StepStarted), 6);
     assert_eq!(types(&events, EventType::StepFinished), 6);
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -584,7 +584,7 @@ async fn approval_round_trip(approved: bool, legacy: bool) {
         store.release(&lease).await.unwrap();
     }
     // Restart both the executor and adapter: correlation cannot rely on their maps.
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
     let store = Arc::new(
         SqliteStateStore::open(&path, SqliteOptions::default())
@@ -668,7 +668,7 @@ async fn approval_round_trip(approved: bool, legacy: bool) {
             .count(),
         1
     );
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -750,7 +750,7 @@ async fn state_activity_custom_and_final_only_loop_outputs_work_with_the_sdk_cli
     assert_eq!(text(&events), "render complete");
     assert_eq!(types(&events, EventType::StateDelta), 1);
     assert_eq!(types(&events, EventType::ActivityDelta), 1);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct CollaborationPresentationLoop;
@@ -924,7 +924,7 @@ async fn collaboration_events_map_to_subagent_lifecycle_and_thread_custom_events
             .map(Vec::len),
         Some(1)
     );
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -945,7 +945,7 @@ async fn malformed_patch_fails_the_stream_without_changing_execution() {
     assert!(result.is_ok());
     assert_eq!(code(&events), Some("AGUI_INVALID_PATCH"));
     assert_eq!(types(&events, EventType::RunFinished), 0);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -972,7 +972,7 @@ async fn overflow_reports_incomplete_output_and_never_fabricates_run_success() {
     assert_eq!(types(&events, EventType::RunStarted), 1);
     assert_eq!(code(&events), Some("AGUI_STREAM_OVERFLOW"));
     assert_eq!(types(&events, EventType::RunFinished), 0);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct Mismatch;
@@ -1006,7 +1006,7 @@ async fn rejected_final_text_still_closes_previously_visible_messages() {
     assert_eq!(types(&events, EventType::TextMessageStart), 1);
     assert_eq!(types(&events, EventType::TextMessageEnd), 1);
     assert_eq!(code(&events), Some("AGUI_TEXT_MISMATCH"));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct Gated {
@@ -1052,7 +1052,7 @@ async fn cloned_control_cancellation_closes_the_stream_once() {
     assert_eq!(types(&events, EventType::TextMessageEnd), 1);
     assert_eq!(types(&events, EventType::RunError), 1);
     assert_eq!(code(&events), Some("AGENT_CANCELLED"));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -1066,7 +1066,7 @@ async fn missing_plugin_is_rejected_before_an_unobserved_run_can_continue() {
         agent.start_with_output::<AgUiStream>(RunRequest::new("missing", "task")),
         Err(AgentError::MissingService(_))
     ));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct StartProbe(Arc<AtomicUsize>);
@@ -1096,7 +1096,7 @@ async fn configured_plugin_is_prepared_by_agent_without_retaining_its_instance()
     assert!(result.is_ok());
     validate_client(&events).await;
     assert_eq!(started.load(Ordering::SeqCst), 1);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -1141,7 +1141,7 @@ async fn escaped_session_id_is_checked_before_admission_and_valid_ids_keep_run_s
         );
     }
     assert_eq!(started.load(Ordering::SeqCst), 2);
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[test]
@@ -1174,7 +1174,7 @@ fn dropping_the_executor_runtime_without_terminal_publication_ends_the_stream() 
         assert_eq!(code(&events), Some("AGUI_STREAM_INTERRUPTED"));
         assert_eq!(types(&events, EventType::TextMessageStart), 1);
         assert_eq!(types(&events, EventType::TextMessageEnd), 1);
-        agent.close().await;
+        agent.framework().close().await;
     });
 }
 
@@ -1218,7 +1218,7 @@ async fn a_model_retry_without_visible_output_does_not_create_phantom_messages()
             .unwrap()
             .contains("private provider error")
     );
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct Oversized;
@@ -1257,7 +1257,7 @@ async fn oversized_payloads_fail_explicitly_after_closing_visible_text() {
     assert_eq!(text(&events), "visible");
     assert_eq!(types(&events, EventType::TextMessageEnd), 1);
     assert_eq!(code(&events), Some("AGUI_EVENT_TOO_LARGE"));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct Failing;
@@ -1298,7 +1298,7 @@ async fn run_error_details_are_hidden_unless_explicitly_enabled() {
                 .contains("private credential detail"),
             visible
         );
-        agent.close().await;
+        agent.framework().close().await;
     }
 }
 
@@ -1347,7 +1347,7 @@ async fn slow_observers_cannot_drop_agui_messages_or_the_terminal_event() {
     validate_client(&events).await;
     assert_eq!(types(&events, EventType::TextMessageContent), 400);
     assert_eq!(text(&events), "x".repeat(400));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct AuxiliaryLoop;
@@ -1411,7 +1411,7 @@ async fn auxiliary_model_text_and_reasoning_never_enter_the_ui_stream() {
     assert_eq!(text(&events), "public answer");
     assert_eq!(types(&events, EventType::ReasoningMessageStart), 0);
     assert!(!serde_json::to_string(&events).unwrap().contains("推理摘要"));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct SharedResponseModel {
@@ -1536,7 +1536,7 @@ async fn parallel_calls_in_custom_loop_preserve_distinct_invocations() {
     assert_eq!(proposals.len(), 2);
     assert_eq!(proposals, results);
     validate_client(&events).await;
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct FinalAfterProgress;
@@ -1591,5 +1591,5 @@ async fn final_only_output_after_progress_is_visible() {
         text(&events),
         result.output
     );
-    agent.close().await;
+    agent.framework().close().await;
 }

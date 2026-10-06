@@ -194,7 +194,7 @@ async fn parallel_nodes_overlap_join_json_and_replay_after_reopening_database() 
             .windows(2)
             .all(|p| p[0].sequence + 1 == p[1].sequence)
     );
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
     let reopened = store(&path).await;
     let fresh = TestNode::default();
@@ -204,7 +204,7 @@ async fn parallel_nodes_overlap_join_json_and_replay_after_reopening_database() 
         Some(json!(14))
     );
     assert!(fresh.calls.lock().unwrap().is_empty());
-    replay.close().await;
+    replay.framework().close().await;
     reopened.close().await.unwrap();
 }
 
@@ -259,7 +259,7 @@ async fn selected_branch_skips_transitively_and_join_does_not_wait_for_pruned_in
                 .iter()
                 .any(|id| id.starts_with("right"))
         );
-        a.close().await;
+        a.framework().close().await;
         db.close().await.unwrap();
     }
 }
@@ -293,7 +293,7 @@ async fn cancellation_drops_owned_tasks_and_is_terminal() {
         Err(AgentError::Cancelled)
     ));
     assert_eq!(implementation.calls.lock().unwrap().as_slice(), &["effect"]);
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
 }
 
@@ -326,7 +326,7 @@ async fn failing_node_cancels_pending_sibling_and_does_not_start_downstream() {
         s.nodes["fail"].error.as_deref(),
         Some("run failed: fixture failed")
     );
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
 }
 
@@ -428,7 +428,7 @@ async fn persistence_errors_stop_dispatch_and_uncertain_result_is_not_overwritte
             Fault::CommittedResult => WorkflowNodeStatus::Succeeded,
         };
         assert_eq!(s.nodes["a"].status, expected);
-        a.close().await;
+        a.framework().close().await;
         if matches!(fault, Fault::CommittedResult) {
             let recovered = agent(db.clone(), graph, implementation.clone()).await;
             recovered.run(resume("fault", id)).await.unwrap();
@@ -450,7 +450,7 @@ async fn persistence_errors_stop_dispatch_and_uncertain_result_is_not_overwritte
                     .value,
                 json!({"nested":[1,2,3]})
             );
-            recovered.close().await;
+            recovered.framework().close().await;
         }
         db.close().await.unwrap();
     }
@@ -551,7 +551,7 @@ async fn parallel_react_nodes_share_budget_without_losing_nested_checkpoints() {
         assert_eq!(cp.status, ExecutionStatus::Completed);
         cp.validate().unwrap();
     }
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
 }
 
@@ -656,7 +656,7 @@ async fn embedded_react_approval_resumes_only_after_matching_answer() {
     });
     assert_eq!(a.run(r).await.unwrap().output, "finished");
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
 }
 
@@ -690,7 +690,7 @@ async fn cancelled_embedded_tool_is_not_repeated() {
         Err(AgentError::Cancelled)
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
 }
 
@@ -765,7 +765,7 @@ async fn concurrency_limit_and_repeated_lease_renewals_preserve_fencing() {
         db.load(id).await.unwrap().status,
         ExecutionStatus::Completed
     );
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
 }
 
@@ -813,7 +813,7 @@ async fn failed_node_is_not_retried_by_resume_but_a_new_run_can_start() {
     assert_ne!(next.run_id, id);
     assert_eq!(a.wait(next).await.unwrap().output, "recovered");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
 }
 
@@ -873,7 +873,7 @@ async fn parallel_approvals_can_be_answered_individually_without_replaying_sibli
     );
     assert_eq!(a.run(second).await.unwrap().status, RunStatus::Completed);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
 }
 
@@ -896,7 +896,7 @@ async fn invalid_route_does_not_dispatch_a_successor() {
         Err(AgentError::InvalidConfiguration(_))
     ));
     assert_eq!(implementation.calls.lock().unwrap().as_slice(), &["a"]);
-    a.close().await;
+    a.framework().close().await;
     db.close().await.unwrap();
 }
 
@@ -959,7 +959,7 @@ async fn tool_parallel_safety_and_run_wide_slot_limit_apply_across_dag_nodes() {
         assert_eq!(a.wait(h).await.unwrap().status, RunStatus::Completed);
         assert_eq!(peak.load(Ordering::SeqCst), expected_peak);
         assert_eq!(active.load(Ordering::SeqCst), 0);
-        a.close().await;
+        a.framework().close().await;
         db.close().await.unwrap();
     }
 }
@@ -1017,7 +1017,7 @@ async fn react_step_and_tool_admission_limits_are_shared_across_nodes() {
             a.run(resume("admission", id)).await.unwrap().status,
             expected
         );
-        a.close().await;
+        a.framework().close().await;
         db.close().await.unwrap();
     }
 }

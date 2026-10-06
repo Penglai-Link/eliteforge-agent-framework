@@ -208,7 +208,7 @@ async fn run(mode: u8) -> (tempfile::TempDir, Arc<Script>) {
         .run(RunRequest::new("same-run", "execute"))
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     (temp, script)
 }
 #[tokio::test]
@@ -324,7 +324,7 @@ async fn blocked_scope(deadline: bool) {
     }
     assert!(agent.wait(handle).await.is_err());
     assert!(scope.dropped.load(Ordering::SeqCst));
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 #[tokio::test]
 async fn async_scope_snapshot_is_cancelled_with_the_run() {

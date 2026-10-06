@@ -141,7 +141,7 @@ async fn one_plugin_contributes_hooks_and_interceptors_with_distinct_order_and_d
             ]
         };
         assert_eq!(*log.lock().unwrap(), expected);
-        a.close().await;
+        a.framework().close().await;
     }
 }
 struct BadHook(bool);
@@ -210,7 +210,7 @@ async fn lifecycle_hook_panics_and_timeouts_are_reported_without_changing_result
             LifecycleHookFailure::TimedOut
         )
     ));
-    a.close().await;
+    a.framework().close().await;
 }
 
 struct Effect(Arc<AtomicUsize>);
@@ -316,6 +316,6 @@ async fn tool_denials_deadlines_and_post_dispatch_failures_cannot_be_hidden_by_o
             );
             assert_eq!(calls.load(Ordering::SeqCst), 1);
         }
-        a.close().await;
+        a.framework().close().await;
     }
 }

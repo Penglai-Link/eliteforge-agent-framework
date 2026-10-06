@@ -197,7 +197,7 @@ async fn layout_order_is_independent_of_registration_order_and_reports_explain_o
     let mut request = RunRequest::new("ordered", "question");
     request.limits.max_context_tokens = 200;
     agent.run(request).await.unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     let requests = capture.0.lock().unwrap();
     assert_eq!(
         requests[0]
@@ -249,7 +249,7 @@ async fn required_block_does_not_borrow_unused_history_quota() {
     request.limits.max_context_tokens = 1000;
     assert!(agent.run(request).await.is_err());
     assert!(capture.0.lock().unwrap().is_empty());
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -307,7 +307,7 @@ async fn structured_assistant_output_is_saved_and_old_messages_still_decode() {
     )
     .unwrap();
     assert!(old.structured.is_none());
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct InvalidAllocation;
@@ -343,7 +343,7 @@ async fn custom_policy_cannot_bypass_total_capacity_or_return_missing_quotas() {
         AgentError::Context(ContextError::BudgetExceeded(_))
     ));
     assert!(capture.0.lock().unwrap().is_empty());
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -432,7 +432,7 @@ async fn bounded_sources_fail_required_blocks_and_report_optional_omissions_with
                         .contains("private")
                 );
             }
-            agent.close().await;
+            agent.framework().close().await;
         }
     }
 }
@@ -467,5 +467,5 @@ async fn middleware_cannot_send_an_oversized_rewrite_after_successful_assembly()
         AgentError::Model(ModelError::ContextOverflow(_))
     ));
     assert!(capture.0.lock().unwrap().is_empty());
-    agent.close().await;
+    agent.framework().close().await;
 }

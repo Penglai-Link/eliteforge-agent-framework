@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_tools_mcp::DiscoverMcpTools;
+use eliteforge_agent_test_support::TestBuilder;
 use serde_json::{Value, json};
 use std::{path::Path, sync::Arc};
 
@@ -25,7 +26,7 @@ async fn remote_native_chat_sdk_can_call_host_and_dependencies_with_trace_contex
             .output
             .starts_with("host-context:nested-model:00-1111")
     );
-    agent.close().await;
+    agent.framework().close().await;
 }
 #[tokio::test]
 async fn remote_loop_routes_to_a_dependency_package_and_denies_undeclared_calls() {
@@ -78,7 +79,7 @@ async fn remote_loop_routes_to_a_dependency_package_and_denies_undeclared_calls(
             .output,
         "reply@1.0.0"
     );
-    agent.close().await;
+    agent.framework().close().await;
 }
 struct Inspect;
 #[async_trait]
@@ -133,7 +134,7 @@ async fn mcp_only_package_owns_an_extra_child_and_unselected_mcp_stays_inert() {
         .unwrap();
     let storage = directory.path().join("agent.sqlite");
     let make = |pack: ManagedCapabilityPack| {
-        AgentBuilder::new()
+        TestBuilder::new()
             .default_models(false)
             .capability_pack(pack)
             .plugin_factory(ConfiguredPluginFactory::from_config(
@@ -164,7 +165,7 @@ async fn mcp_only_package_owns_an_extra_child_and_unselected_mcp_stays_inert() {
         .remove(0);
     let instance = manager.instance(&identity).unwrap();
     assert!(!instance.data_directory().unwrap().join("mcp.pid").exists());
-    agent.close().await;
+    agent.framework().close().await;
     let agent = make(selected).build().await.unwrap();
     let tools = agent
         .execute(DiscoverMcpTools {
@@ -184,7 +185,7 @@ async fn mcp_only_package_owns_an_extra_child_and_unselected_mcp_stays_inert() {
         .unwrap()
         .parse()
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     #[cfg(unix)]
     assert_eq!(
         unsafe { libc::kill(pid, 0) },
@@ -239,11 +240,8 @@ async fn waiting_remote_tool_pins_original_version_across_host_restart() {
     assert_eq!(result.status, RunStatus::AwaitingInput);
     let checkpoint = agent.latest_checkpoint("waiting").await.unwrap().unwrap();
     assert_eq!(checkpoint.capability_versions[0].version, "1.0.0");
-    assert!(matches!(
-        agent.reconfigure(builder(select("2.0.0"))).await,
-        Err(ReconfigureError::Busy(_))
-    ));
-    agent.close().await;
+    assert!(!manager.durable_pins().unwrap().is_empty());
+    agent.framework().close().await;
     assert!(matches!(
         manager.remove("demo.pack", &"1.0.0".parse().unwrap()),
         Err(RuntimeError::Busy(_))
@@ -281,14 +279,14 @@ async fn waiting_remote_tool_pins_original_version_across_host_restart() {
         }),
     });
     assert!(wrong.run(request.clone()).await.is_err());
-    wrong.close().await;
+    wrong.framework().close().await;
     let restored = builder(select("1.0.0")).build().await.unwrap();
     assert_eq!(
         restored.run(request).await.unwrap().status,
         RunStatus::Completed
     );
     assert!(manager.durable_pins().unwrap().is_empty());
-    restored.close().await;
+    restored.framework().close().await;
     manager
         .remove("demo.pack", &"1.0.0".parse().unwrap())
         .unwrap();
@@ -331,7 +329,7 @@ async fn remote_tools_policy_middleware_and_skills_use_native_execution_lifecycl
         .unwrap();
     assert_eq!(result.tool_calls, 2);
     assert_eq!(result.output, "reply@1.0.0");
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(manager.usage().blockers("demo.pack").is_empty());
 }
 #[async_trait]
@@ -428,7 +426,11 @@ async fn context_discovery_budget_estimation_reduction_memory_and_output_are_rem
             .is_some()
     );
     assert!(
-        matches!(agent.reconfigure(builder(pack.clone())).await,Err(ReconfigureError::Busy(blockers))if blockers.iter().any(|b|b.label.contains("output_stream")))
+        manager
+            .usage()
+            .blockers("demo.pack")
+            .iter()
+            .any(|item| format!("{item:?}").contains("output_stream"))
     );
     drop(outputs);
     assert_eq!(
@@ -465,7 +467,7 @@ async fn context_discovery_budget_estimation_reduction_memory_and_output_are_rem
         .delete_memory("private", "fact", &entry.version)
         .await
         .unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -507,7 +509,7 @@ async fn independently_selected_remote_context_assembler_and_workflow_nodes_run(
             .output,
         "reply@1.0.0"
     );
-    agent.close().await;
+    agent.framework().close().await;
     let graph = DagWorkflowDefinition {
         id: "remote-graph".into(),
         version: 1,
@@ -543,7 +545,7 @@ async fn independently_selected_remote_context_assembler_and_workflow_nodes_run(
         .unwrap();
     assert_eq!(result.status, RunStatus::Completed);
     assert_eq!(result.structured, Some(json!({"value":1})));
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 fn install(manager: &CapabilityPackManager, version: &str) -> InstalledCapabilityPack {
@@ -620,9 +622,10 @@ fn selection(
         .implementations(ids)
         .unwrap()
 }
-fn builder(selection: ManagedCapabilityPack) -> AgentBuilder {
+fn builder(selection: ManagedCapabilityPack) -> TestBuilder {
     // Explicitly include the selection through a local parent to test recursive scope binding.
-    AgentBuilder::new()
+    TestBuilder::new()
+        .skills(["demo-skill"])
         .default_models(false)
         .capability_pack(CapabilityPackBuilder::new("application", ()).include(selection))
 }
@@ -717,7 +720,11 @@ async fn every_dedicated_model_operation_and_realtime_lease_crosses_the_sidecar(
         .await
         .unwrap();
     assert!(
-        matches!(agent.reconfigure(builder(pack.clone())).await, Err(ReconfigureError::Busy(items)) if items.iter().any(|item|item.label.contains("model_job")))
+        manager
+            .usage()
+            .blockers("demo.pack")
+            .iter()
+            .any(|item| format!("{item:?}").contains("model_job"))
     );
     let serialized: VideoJob = serde_json::from_value(json!(job)).unwrap();
     assert_eq!(
@@ -768,11 +775,18 @@ async fn every_dedicated_model_operation_and_realtime_lease_crosses_the_sidecar(
         matches!(agent.next_realtime(&realtime).await.unwrap(),Some(RealtimeEvent::Transcript(text))if text=="realtime")
     );
     assert!(
-        matches!(agent.reconfigure(builder(pack.clone())).await,Err(ReconfigureError::Busy(blockers))if blockers.iter().any(|b|b.kind=="realtime"))
+        matches!(agent.reconfigure(agent.framework().agent(eliteforge_agent_test_support::fixture_selection(&agent.framework()).unwrap())).await, Err(ReconfigureError::Busy(blockers)) if blockers.iter().any(|item| item.kind == "realtime"))
     );
     agent.close_realtime(&realtime).await.unwrap();
-    agent.reconfigure(builder(pack)).await.unwrap();
-    agent.close().await;
+    agent
+        .reconfigure(
+            agent.framework().agent(
+                eliteforge_agent_test_support::fixture_selection(&agent.framework()).unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    agent.framework().close().await;
     assert!(manager.usage().blockers("demo.pack").is_empty());
 }
 #[tokio::test]
@@ -812,7 +826,11 @@ async fn real_stdio_process_streaming_storage_middleware_and_idle_update() {
     assert_eq!(event.topic, "chart");
     assert_eq!(event.data["source"], "page-only");
     assert!(
-        matches!(agent.reconfigure(builder(selection(&manager,"2.0.0","agent.one",false))).await,Err(ReconfigureError::Busy(blockers)) if blockers.iter().any(|b|b.label.contains("page")))
+        manager
+            .usage()
+            .blockers("demo.pack")
+            .iter()
+            .any(|item| format!("{item:?}").contains("page"))
     );
     page.close();
     assert_eq!(
@@ -834,10 +852,13 @@ async fn real_stdio_process_streaming_storage_middleware_and_idle_update() {
             .unwrap(),
         json!(42)
     );
-    agent
-        .reconfigure(builder(selection(&manager, "2.0.0", "agent.one", false)))
+    agent.framework().close().await;
+    assert!(clone.is_closed());
+    let agent = builder(selection(&manager, "2.0.0", "agent.one", false))
+        .build()
         .await
         .unwrap();
+    let clone = agent.clone();
     assert_eq!(
         clone
             .run(RunRequest::new("session", "again"))
@@ -853,12 +874,12 @@ async fn real_stdio_process_streaming_storage_middleware_and_idle_update() {
     );
     assert!(instance.is_retired());
     manager.remove("demo.pack", &v1.manifest.version).unwrap();
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(manager.running_instances().is_empty());
     assert!(manager.usage().blockers("demo.pack").is_empty());
 }
 #[tokio::test]
-async fn agent_scopes_are_isolated_and_remote_loop_can_call_host_model() {
+async fn framework_scopes_are_isolated_and_remote_loop_can_call_host_model() {
     let directory = tempfile::tempdir().unwrap();
     let manager = CapabilityPackManager::new(directory.path()).unwrap();
     install(&manager, "1.0.0");
@@ -876,9 +897,44 @@ async fn agent_scopes_are_isolated_and_remote_loop_can_call_host_model() {
             .output,
         "reply@1.0.0"
     );
-    first.close().await;
-    second.close().await;
+    first.framework().close().await;
+    second.framework().close().await;
     assert!(manager.running_instances().is_empty());
+}
+#[tokio::test]
+async fn agents_share_one_framework_backend_until_framework_shutdown() {
+    let directory = tempfile::tempdir().unwrap();
+    let manager = CapabilityPackManager::new(directory.path()).unwrap();
+    install(&manager, "1.0.0");
+    let pack = selection(&manager, "1.0.0", "shared.framework", true);
+    let framework = Framework::builder()
+        .default_models(false)
+        .capability_pack(CapabilityPackBuilder::new("application", ()).include(pack))
+        .build()
+        .await
+        .unwrap();
+    let choices = eliteforge_agent_test_support::fixture_selection(&framework).unwrap();
+    let first = framework.agent(choices.clone()).build().await.unwrap();
+    let second = framework.agent(choices).build().await.unwrap();
+    let a = first.execute(ListCapabilityInstances).await.unwrap();
+    let b = second.execute(ListCapabilityInstances).await.unwrap();
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].scope, b[0].scope);
+    assert_eq!(manager.running_instances().len(), 1);
+    first.close().await;
+    assert_eq!(manager.running_instances().len(), 1);
+    assert_eq!(
+        second
+            .run(RunRequest::new("shared.second", "call through host"))
+            .await
+            .unwrap()
+            .output,
+        "reply@1.0.0"
+    );
+    framework.close().await;
+    assert!(second.is_closed());
+    assert!(manager.running_instances().is_empty());
+    assert!(manager.usage().blockers("demo.pack").is_empty());
 }
 #[tokio::test]
 async fn process_crash_returns_unknown_write_result_and_requires_explicit_rebuild() {
@@ -979,12 +1035,7 @@ async fn remote_agent_loop_uses_scoped_host_state_and_persisted_interaction_on_r
     assert_eq!(waiting.status, RunStatus::AwaitingInput);
     let pinned = manager.durable_pins().unwrap();
     assert!(!pinned.is_empty());
-    assert!(matches!(
-        agent
-            .reconfigure(builder(selection(&manager, "2.0.0", "custom.wait", true)))
-            .await,
-        Err(ReconfigureError::Busy(_))
-    ));
+    assert!(!manager.durable_pins().unwrap().is_empty());
     let resume = agent
         .answer(
             "custom-loop",
@@ -995,7 +1046,7 @@ async fn remote_agent_loop_uses_scoped_host_state_and_persisted_interaction_on_r
         .unwrap();
     assert_eq!(agent.run(resume).await.unwrap().output, "persisted answer");
     assert!(manager.durable_pins().unwrap().is_empty());
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[derive(Clone, Default)]
@@ -1089,7 +1140,7 @@ async fn remote_summary_cas_and_artifact_ranges_survive_restart_with_typed_error
         artifacts.put(vec![1], cancelled).await,
         Err(ArtifactError::Cancelled)
     ));
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(summary.load(&key).await.is_err());
     let restored = build().build().await.unwrap();
     let summary = probe.summaries.lock().unwrap().clone().unwrap();
@@ -1120,7 +1171,7 @@ async fn remote_summary_cas_and_artifact_ranges_survive_restart_with_typed_error
             .await,
         Err(ArtifactError::NotFound)
     ));
-    assert!(restored.close().await.is_success());
+    assert!(restored.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1169,7 +1220,7 @@ async fn backend_receives_exact_plugin_and_page_selection_before_acquiring_resou
         )
         .is_err()
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     let selected = builder(select(true)).build().await.unwrap();
     let instance = selected
         .execute(ListCapabilityInstances)
@@ -1184,7 +1235,7 @@ async fn backend_receives_exact_plugin_and_page_selection_before_acquiring_resou
             .join("selected-plugin.marker")
             .exists()
     );
-    assert!(selected.close().await.is_success());
+    assert!(selected.framework().close().await.is_success());
 }
 struct StaticSkillLoop;
 #[async_trait]
@@ -1284,7 +1335,8 @@ async fn static_skills_and_resources_package_uses_native_runtime_without_a_backe
         )
         .unwrap();
     let make = |pack| {
-        AgentBuilder::new()
+        TestBuilder::new()
+            .skills(["pack-skill"])
             .default_models(false)
             .capability_pack(pack)
             .plugin_factory(ConfiguredPluginFactory::from_config(
@@ -1315,7 +1367,7 @@ async fn static_skills_and_resources_package_uses_native_runtime_without_a_backe
             .iter()
             .any(|item| item.kind == "runtime")
     );
-    assert!(selected.close().await.is_success());
+    assert!(selected.framework().close().await.is_success());
     let excluded = make(
         selection
             .contributions(CapabilityContributionSelection {
@@ -1335,7 +1387,7 @@ async fn static_skills_and_resources_package_uses_native_runtime_without_a_backe
             .output
             .contains("Static skill body")
     );
-    assert!(excluded.close().await.is_success());
+    assert!(excluded.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -1367,7 +1419,7 @@ async fn agent_operation_reports_unknown_effect_and_does_not_replay_the_write() 
             .await
             .is_err()
     );
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 #[tokio::test]
@@ -1382,7 +1434,7 @@ async fn nested_extension_callback_scopes_share_the_run_call_budget() {
     let mut request = RunRequest::new("nested", "nested-budget");
     request.limits.max_steps = 1;
     assert_eq!(agent.run(request).await.unwrap().output, "quota preserved");
-    agent.close().await;
+    agent.framework().close().await;
 }
 
 struct CompressionDirectiveLoop(Arc<dyn ContextReducer>);
@@ -1526,6 +1578,6 @@ async fn remote_reducer_transports_block_global_targets_and_accepts_legacy_no_di
     let legacy = remote.invoke("reduce", json!({"block": ContextBlock::data("remote", "legacy request data"), "budget": ContextBudget { max_tokens: 512, max_messages: 1 }})).await.unwrap();
     let messages: Vec<Message> = serde_json::from_value(legacy).unwrap();
     assert_eq!(messages, vec![Message::user("legacy request data")]);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert!(manager.usage().blockers("demo.pack").is_empty());
 }

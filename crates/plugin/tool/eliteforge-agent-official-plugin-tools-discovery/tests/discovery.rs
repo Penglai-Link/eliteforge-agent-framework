@@ -162,7 +162,7 @@ async fn discovery_loads_schemas_then_uses_the_original_executor_and_resets_next
             .iter()
             .all(|r| r.tools.iter().all(|t| t.id != "private.read"))
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]
@@ -187,7 +187,7 @@ async fn collision_with_discovery_name_is_rejected_before_the_model() {
     ));
     assert!(model.requests().is_empty());
     assert_eq!(tool.count(), 0);
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 struct DenyApp(Arc<AtomicUsize>);
@@ -263,7 +263,7 @@ async fn discovered_calls_still_validate_schema_evaluate_policy_and_close_leases
             .iter()
             .any(|m| m.content.text().contains("host denied"))
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 struct RevokeApp;
@@ -310,5 +310,5 @@ async fn revoked_tools_are_not_returned_or_reactivated_by_search() {
             .iter()
             .all(|r| r.tools.iter().all(|t| t.id != "app.page"))
     );
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }

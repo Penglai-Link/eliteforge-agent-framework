@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
+use eliteforge_agent_test_support::TestBuilder;
 use eliteforge_agent_test_support::TestConversationStore;
 use std::sync::{Arc, Mutex};
 
@@ -83,7 +84,7 @@ impl CapabilityPack for ApplicationPack {
 #[tokio::test]
 async fn nested_packs_and_individual_plugins_share_dependency_order_and_shutdown() {
     let log = Log::default();
-    let builder = AgentBuilder::new()
+    let builder = TestBuilder::new()
         .default_models(false)
         .capability_pack(ApplicationPack(log.clone()))
         .plugin_arc(Arc::new(recorded("outside", Some("nested"), &log)))
@@ -99,8 +100,8 @@ async fn nested_packs_and_individual_plugins_share_dependency_order_and_shutdown
         *log.lock().unwrap(),
         ["install nested", "install outside", "install dependent"]
     );
-    assert!(agent.close().await.is_success());
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
     assert_eq!(
         *log.lock().unwrap(),
         [
@@ -118,7 +119,7 @@ async fn nested_packs_and_individual_plugins_share_dependency_order_and_shutdown
 async fn duplicates_across_packs_and_individual_plugins_fail_before_installation() {
     for between_packs in [false, true] {
         let log = Log::default();
-        let builder = AgentBuilder::new().capability_pack(test_pack().plugin(recorded(
+        let builder = TestBuilder::new().capability_pack(test_pack().plugin(recorded(
             "duplicate",
             None,
             &log,
@@ -139,7 +140,7 @@ async fn duplicates_across_packs_and_individual_plugins_fail_before_installation
 #[tokio::test]
 async fn missing_dependencies_and_cycles_across_pack_boundaries_fail_before_installation() {
     let log = Log::default();
-    let error = AgentBuilder::new()
+    let error = TestBuilder::new()
         .capability_pack(ApplicationPack(log.clone()))
         .build()
         .await
@@ -148,7 +149,7 @@ async fn missing_dependencies_and_cycles_across_pack_boundaries_fail_before_inst
     assert!(
         matches!(error, AgentError::Plugin(PluginError::MissingDependency { dependency, .. }) if dependency == "outside")
     );
-    let error = AgentBuilder::new()
+    let error = TestBuilder::new()
         .capability_pack(ApplicationPack(log.clone()))
         .plugin(recorded("outside", Some("dependent"), &log))
         .build()
@@ -165,7 +166,7 @@ async fn missing_dependencies_and_cycles_across_pack_boundaries_fail_before_inst
 #[tokio::test]
 async fn failed_pack_member_rolls_back_individual_and_nested_members_in_reverse_order() {
     let log = Log::default();
-    let error = AgentBuilder::new()
+    let error = TestBuilder::new()
         .plugin(recorded("outside", None, &log))
         .capability_pack(
             test_pack()

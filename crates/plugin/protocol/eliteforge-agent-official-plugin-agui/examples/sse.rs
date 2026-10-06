@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     artifacts.mode(0o700);
     artifacts.create("agent-artifacts")?;
-    let agent = AgentBuilder::new()
+    let framework = FrameworkBuilder::new()
         .plugin(
             eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin::new(
                 "agent.sqlite",
@@ -39,6 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(AgUiPlugin::default())
         .build()
         .await?;
+    let agent = framework.agent(AgentSelection::default()).build().await?;
     let (handle, mut events) =
         agent.start_with_output::<AgUiStream>(RunRequest::new("chat-1", "你好"))?;
     let control = agent.control(&handle)?;
@@ -50,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok::<(), eliteforge_agent_official_plugin_agui::ag_ui::Error>(())
     };
     let (result, delivered) = tokio::join!(agent.wait(handle), consume);
-    let shutdown = agent.close().await;
+    let shutdown = framework.close().await;
     delivered?;
     result?;
     eprintln!("run {} finished", control.run_id());

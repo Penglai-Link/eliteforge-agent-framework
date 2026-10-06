@@ -1289,7 +1289,7 @@ async fn direct_judge_http_shares_parent_accounting_without_publishing_private_o
     assert_parent_presentation(&presentation.callbacks.lock().unwrap());
     server.drained().await;
     client.close().await;
-    assert!(agent.close().await.is_success());
+    assert!(agent.framework().close().await.is_success());
 }
 
 #[tokio::test]

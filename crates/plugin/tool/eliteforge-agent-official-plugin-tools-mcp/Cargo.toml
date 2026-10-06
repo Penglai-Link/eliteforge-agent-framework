@@ -18,6 +18,7 @@ http = "1"
 sha2 = "0.10"
 
 [dev-dependencies]
+eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }
 tempfile = "3"
 eliteforge-agent-official-plugin-storage-local = { path = "../../storage/eliteforge-agent-official-plugin-storage-local" }
 eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }

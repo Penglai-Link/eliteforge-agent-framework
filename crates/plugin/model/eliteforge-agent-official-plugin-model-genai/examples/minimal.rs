@@ -1,6 +1,6 @@
 //! Default ReAct Agent using one genai model connection.
 //! Running this example calls MODEL_ENDPOINT with MODEL_API_KEY.
-use eliteforge_agent_framework::{AgentBuilder, RunRequest};
+use eliteforge_agent_framework::{AgentSelection, FrameworkBuilder, RunRequest};
 use eliteforge_agent_official_plugin_model_genai::GenaiPlugin;
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
@@ -12,7 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     artifacts.mode(0o700);
     artifacts.create("agent-artifacts")?;
-    let agent = AgentBuilder::new()
+    let framework = FrameworkBuilder::new()
         .plugin(
             eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin::new(
                 "agent.sqlite",
@@ -22,11 +22,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(GenaiPlugin::default())
         .build()
         .await?;
+    let agent = framework.agent(AgentSelection::default()).build().await?;
 
     let result = agent
         .run(RunRequest::new("chat-1", "你好，请介绍一下自己"))
         .await;
-    let shutdown = agent.close().await;
+    let shutdown = framework.close().await;
     println!("{}", result?.output);
     if !shutdown.is_success() {
         return Err(format!("shutdown failed: {shutdown:?}").into());

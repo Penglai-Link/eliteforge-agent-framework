@@ -152,7 +152,7 @@ async fn loose_model_call_cannot_expand_effective_retry_or_auxiliary_answer_rese
         if aux {
             assert_eq!(*usage.lock().unwrap(), Some(Usage::default()));
         }
-        assert!(agent.close().await.is_success());
+        assert!(agent.framework().close().await.is_success());
     }
 }
 struct LooseWorkflow;

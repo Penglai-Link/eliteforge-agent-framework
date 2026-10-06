@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     execute.instructions.push(Message::system(
         "Implement the previous stage's plan and return the Rust source.",
     ));
-    let agent = AgentBuilder::new()
+    let framework = FrameworkBuilder::new()
         .plugin(
             eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin::new(
                 std::env::var("STATE_DB").unwrap_or_else(|_| "agent.sqlite".into()),
@@ -74,13 +74,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .plugin(ModelStrategyPlugin(Arc::new(strategy)))
         .build()
         .await?;
+    let agent = framework
+        .agent(AgentSelection {
+            agent_loop: Some("framework.loop".into()),
+            model_strategy: Some("model.strategy".into()),
+            ..AgentSelection::default()
+        })
+        .build()
+        .await?;
     let outcome = agent
         .run(RunRequest::new(
             "demo",
             "Create a small Rust CLI that adds two integers.",
         ))
         .await;
-    let report = agent.close().await;
+    let report = framework.close().await;
     println!("{}", outcome?.output);
     if !report.is_success() {
         return Err(format!("shutdown failed: {report:?}").into());

@@ -141,7 +141,7 @@ async fn final_reply_steering_records_ordered_live_and_durable_events_without_re
         .collect();
     assert_eq!(journal, live);
     validate_messages(&saved.transcript).unwrap();
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 
     let reopened = database(&path).await;
@@ -164,7 +164,7 @@ async fn final_reply_steering_records_ordered_live_and_durable_events_without_re
         serde_json::to_value(&saved.events).unwrap()
     );
     assert_eq!(after.transcript, saved.transcript);
-    agent.close().await;
+    agent.framework().close().await;
     reopened.close().await.unwrap();
 }
 
@@ -210,7 +210,7 @@ async fn failed_final_reply_steering_save_does_not_publish_a_steered_event() {
         assert!(!matches!(envelope.event, AgentEvent::Steered(_)));
     }
     assert_eq!(model.requests.lock().unwrap().len(), 1);
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
     let reopened = database(&path).await;
     let saved = reopened.load(control.run_id()).await.unwrap();
@@ -370,7 +370,7 @@ async fn deny_policy_wins_before_an_earlier_policy_requests_approval() {
     assert!(result.interactions.is_empty());
     assert_eq!(effects.load(Ordering::SeqCst), 0);
     assert_eq!(calls.load(Ordering::SeqCst), 2);
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -400,7 +400,7 @@ async fn approval_survives_restart_and_duplicate_answer_replays_without_executio
             invocation_id: executions[0].invocation_id
         }
     );
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
     let store = database(&path).await;
     let agent = arithmetic_agent(store.clone(), calls.clone(), effects.clone()).await;
@@ -454,7 +454,7 @@ async fn approval_survives_restart_and_duplicate_answer_replays_without_executio
             .is_err()
     );
     validate_messages(&store.load(run_id).await.unwrap().transcript).unwrap();
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -513,7 +513,7 @@ async fn cancellation_after_side_effect_is_terminal_and_never_repeats_it() {
         store.load(run_id).await.unwrap().status,
         ExecutionStatus::Cancelled
     );
-    agent.close().await;
+    agent.framework().close().await;
     let agent = TestBuilder::default()
         .plugin(store.clone().plugin())
         .plugin(ChatModelPlugin::new(Arithmetic {
@@ -540,7 +540,7 @@ async fn cancellation_after_side_effect_is_terminal_and_never_repeats_it() {
     ));
     assert_eq!(effects.load(Ordering::SeqCst), 1);
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -631,7 +631,7 @@ async fn input_pauses_before_sibling_effects_and_forces_replanning_after_answer(
             .count(),
         2
     );
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -817,7 +817,7 @@ async fn acquired_checkpoint_is_revalidated_after_another_executor_changes_defin
             .iter()
             .all(|event| event.scope == EventScope::Journal)
     );
-    executor.close().await;
+    executor.framework().close().await;
     store.close().await.unwrap();
     competing.close().await.unwrap();
 }
@@ -903,8 +903,8 @@ async fn simultaneous_resume_across_connections_has_one_effect_owner() {
         "24"
     );
     assert_eq!(effects.load(Ordering::SeqCst), 1);
-    owner.close().await;
-    other.close().await;
+    owner.framework().close().await;
+    other.framework().close().await;
     first.close().await.unwrap();
     second.close().await.unwrap();
 }
@@ -1036,7 +1036,7 @@ async fn policy_and_post_effect_interceptor_failures_end_the_run() {
             Err(AgentError::Run(_))
         ));
         assert_eq!(effects.load(Ordering::SeqCst), usize::from(after));
-        agent.close().await;
+        agent.framework().close().await;
         store.close().await.unwrap();
     }
 }
@@ -1115,7 +1115,7 @@ async fn finished_tool_is_preserved_when_a_later_sibling_is_cancelled() {
         Err(AgentError::Cancelled)
     ));
     assert_eq!(effects.load(Ordering::SeqCst), 2);
-    agent.close().await;
+    agent.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -1195,8 +1195,8 @@ async fn delegated_budget_and_count_are_durable_before_child_provider_dispatch()
         agent.run(resume("parent", id, None)).await,
         Err(AgentError::Cancelled)
     ));
-    agent.close().await;
-    child.close().await;
+    agent.framework().close().await;
+    child.framework().close().await;
     store.close().await.unwrap();
 }
 
@@ -1378,7 +1378,7 @@ async fn workflow_preserves_primary_and_release_failures_with_bounded_cleanup() 
             Err(StateError::Busy)
         ));
         database.release(&lease).await.unwrap();
-        agent.close().await;
+        agent.framework().close().await;
         database.close().await.unwrap();
     }
 }
@@ -1411,7 +1411,7 @@ async fn transient_or_uncertain_release_is_retried_without_masking_execution_err
             .unwrap();
         assert!(replacement.generation > previous.generation);
         database.release(&replacement).await.unwrap();
-        agent.close().await;
+        agent.framework().close().await;
         database.close().await.unwrap();
     }
 }
@@ -1438,7 +1438,7 @@ async fn release_failure_after_success_is_reported_without_rewriting_terminal_ch
         ExecutionStatus::Completed
     );
     assert_eq!(store.release_calls.load(Ordering::SeqCst), 2);
-    agent.close().await;
+    agent.framework().close().await;
     database.close().await.unwrap();
 }
 
@@ -1478,6 +1478,6 @@ async fn terminal_write_failure_retains_the_execution_error_and_leaves_durable_s
         .await
         .unwrap();
     database.release(&next).await.unwrap();
-    agent.close().await;
+    agent.framework().close().await;
     database.close().await.unwrap();
 }

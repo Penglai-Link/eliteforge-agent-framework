@@ -191,7 +191,7 @@ async fn selection_reconfiguration_does_not_reinstall_plugins_and_failed_selecti
     );
     assert!(matches!(
         agent.reconfigure(framework.agent(select("missing"))).await,
-        Err(ReconfigureError::Restored(_))
+        Err(ReconfigureError::Rejected(_))
     ));
     assert_eq!(
         agent
@@ -223,14 +223,6 @@ async fn ambiguous_missing_and_conflicting_bindings_fail_and_defaults_are_explic
             .is_err()
     );
     assert!(framework.agent(select("missing")).build().await.is_err());
-    assert!(
-        framework
-            .agent(select("loop.a"))
-            .plugin(AgentLoopPlugin::new(Probe("wrong")))
-            .build()
-            .await
-            .is_err()
-    );
     let directory2 = tempfile::tempdir().unwrap();
     let other = environment(&directory2).await;
     let agent = framework.agent(select("loop.a")).build().await.unwrap();
