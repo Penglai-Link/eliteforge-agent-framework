@@ -13,7 +13,9 @@ impl Plugin for SqliteExecutionPlugin {
         context.provide(StateStoreService(state_store.clone()))?;
         context.contribute_extension(state_store)?;
         context.provide(InteractionStoreService(interaction_store.clone()))?;
-        context.contribute_extension(interaction_store)
+        context.contribute_extension(interaction_store)?;
+        context.provide(SessionStoreService(self.0.clone()))?;
+        context.contribute_extension(self.0.clone() as Arc<dyn SessionStore>)
     }
 }
 

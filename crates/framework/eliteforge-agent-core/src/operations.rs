@@ -8,6 +8,37 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 
+/// Delete one session through the installed storage plugin.
+pub struct DeleteSession(pub String);
+/// Attempt every distinct session independently and return partial failures.
+pub struct DeleteSessions(pub Vec<String>);
+
+#[async_trait]
+impl AgentOperation for DeleteSession {
+    type Service = SessionStoreService;
+    type Output = bool;
+    async fn execute(
+        self,
+        service: Arc<Self::Service>,
+        _: CancellationToken,
+    ) -> Result<Self::Output, AgentError> {
+        Ok(service.0.delete_session(&self.0).await?)
+    }
+}
+
+#[async_trait]
+impl AgentOperation for DeleteSessions {
+    type Service = SessionStoreService;
+    type Output = SessionDeletionReport;
+    async fn execute(
+        self,
+        service: Arc<Self::Service>,
+        _: CancellationToken,
+    ) -> Result<Self::Output, AgentError> {
+        Ok(service.0.delete_sessions(&self.0).await)
+    }
+}
+
 /// A typed request, not a plugin instance. Agent supplies the installed service
 /// and owns admission, cancellation and shutdown ordering.
 /// The cancellation token covers this invocation: completion, caller drop and

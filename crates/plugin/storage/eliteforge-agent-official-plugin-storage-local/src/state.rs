@@ -1,4 +1,5 @@
 mod interactions;
+mod sessions;
 pub use interactions::SqliteExecutionPlugin;
 // Atomic checkpoint + transcript + event persistence. SQLite owns the clock
 // used for leases. Multiple store instances/processes compete through SQL.

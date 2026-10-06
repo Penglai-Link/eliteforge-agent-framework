@@ -33,6 +33,10 @@ pub use eliteforge_agent_context_contracts::{
     SummaryStoreService, VersionedSummary,
 };
 use eliteforge_agent_core::*;
+pub use eliteforge_agent_core::{
+    DeleteSession, DeleteSessions, SessionDeletionFailure, SessionDeletionReport, SessionStore,
+    SessionStorePlugin, SessionStoreService,
+};
 use std::{path::PathBuf, sync::Arc};
 
 pub struct SqliteCapabilitiesService(pub Vec<(String, ExtensionReport)>);
@@ -136,7 +140,9 @@ impl Plugin for LocalStoragePlugin {
         context.provide(StateStoreService(state.clone()))?;
         context.contribute_extension(state.clone() as Arc<dyn StateStore>)?;
         context.provide(InteractionStoreService(state.clone()))?;
-        context.contribute_extension(state as Arc<dyn InteractionStore>)?;
+        context.contribute_extension(state.clone() as Arc<dyn InteractionStore>)?;
+        context.provide(SessionStoreService(state.clone()))?;
+        context.contribute_extension(state as Arc<dyn SessionStore>)?;
 
         let conversations = Arc::new(
             SqliteConversationStore::open(&config.database_path, config.conversations.clone())
