@@ -1,13 +1,11 @@
 //! Last successfully synchronized model metadata. Credentials and runtime
 //! adapters are intentionally absent from the serializable snapshot.
+use crate::SqliteDatabase as Connection;
 use async_trait::async_trait;
 use eliteforge_agent_core::{ModelCatalogSnapshot, ModelCatalogStore, ModelError};
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
-use tokio_rusqlite::{
-    Connection,
-    rusqlite::{self, OptionalExtension, params},
-};
+use tokio_rusqlite::rusqlite::{self, OptionalExtension, params};
 
 const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 
@@ -33,12 +31,15 @@ fn validate_scope(scope: &str) -> Result<(), ModelError> {
 impl SqliteModelCatalogStore {
     pub async fn open(path: impl AsRef<Path>) -> Result<Self, ModelError> {
         let connection = Connection::open(path).await.map_err(error)?;
+        Self::with_database(connection).await
+    }
+    pub async fn with_database(connection: Connection) -> Result<Self, ModelError> {
         connection
             .call(|c| -> Result<(), ModelError> {
                 c.busy_timeout(Duration::from_secs(5)).map_err(error)?;
                 c.execute_batch(
                     "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-                 CREATE TABLE IF NOT EXISTS model_catalog_snapshots (
+                 CREATE TABLE IF NOT EXISTS ef_model_catalog_snapshots (
                      account_scope TEXT PRIMARY KEY, revision INTEGER NOT NULL,
                      synced_at_unix_ms INTEGER NOT NULL, snapshot TEXT NOT NULL
                  );",
@@ -55,7 +56,7 @@ impl SqliteModelCatalogStore {
 
     pub async fn close(&self) -> Result<(), ModelError> {
         self.admission.close();
-        self.connection.clone().close().await.map_err(error)
+        Ok(())
     }
 
     async fn work<T: Send + 'static>(
@@ -90,7 +91,7 @@ impl ModelCatalogStore for SqliteModelCatalogStore {
             let row: Option<(u64, u64, String)> = c
                 .query_row(
                     "SELECT revision,synced_at_unix_ms,snapshot
-                 FROM model_catalog_snapshots WHERE account_scope=?1
+                 FROM ef_model_catalog_snapshots WHERE account_scope=?1
                    AND length(CAST(snapshot AS BLOB))<=?2",
                     params![scope, MAX_SNAPSHOT_BYTES],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -130,16 +131,16 @@ impl ModelCatalogStore for SqliteModelCatalogStore {
         }
         let scope = snapshot.account_scope.clone();
         self.work(move |c| {
-            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(error)?;
+            let tx = crate::database::begin(c).map_err(error)?;
             let previous: Option<u64> = tx.query_row(
-                "SELECT revision FROM model_catalog_snapshots WHERE account_scope=?1",
+                "SELECT revision FROM ef_model_catalog_snapshots WHERE account_scope=?1",
                 [&scope], |row| row.get(0)
             ).optional().map_err(error)?;
             if previous.is_some_and(|previous| previous > revision as u64) {
                 return Err(ModelError::Unavailable("stale model catalog revision".into()));
             }
             tx.execute(
-                "INSERT INTO model_catalog_snapshots(account_scope,revision,synced_at_unix_ms,snapshot)
+                "INSERT INTO ef_model_catalog_snapshots(account_scope,revision,synced_at_unix_ms,snapshot)
                  VALUES (?1,?2,?3,?4)
                  ON CONFLICT(account_scope) DO UPDATE SET
                    revision=excluded.revision,

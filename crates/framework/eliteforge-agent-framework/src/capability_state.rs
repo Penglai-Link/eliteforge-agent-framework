@@ -57,6 +57,17 @@ impl StateStore for CapabilityBoundState {
         }
         Ok(checkpoint)
     }
+    async fn latest_scope(
+        &self,
+        session: &str,
+        scope: &str,
+    ) -> Result<Option<Checkpoint>, StateError> {
+        let checkpoint = self.store.latest_scope(session, scope).await?;
+        if let Some(checkpoint) = &checkpoint {
+            self.validate(checkpoint)?;
+        }
+        Ok(checkpoint)
+    }
     async fn claim(
         &self,
         run: RunId,

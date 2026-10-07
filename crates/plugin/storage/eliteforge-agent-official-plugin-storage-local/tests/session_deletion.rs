@@ -149,11 +149,11 @@ impl Fixture {
     fn counts(&self, id: &str) -> Vec<usize> {
         let connection = Connection::open(&self.path).unwrap();
         [
-            "SELECT count(*) FROM agent_session_heads WHERE session_id=?1",
-            "SELECT count(*) FROM agent_checkpoints WHERE session_id=?1",
-            "SELECT count(*) FROM agent_interactions WHERE session_id=?1",
-            "SELECT count(*) FROM conversations WHERE session=?1",
-            "SELECT count(*) FROM context_summaries WHERE json_extract(key, '$.conversation.session_id')=?1",
+            "SELECT count(*) FROM ef_session_heads WHERE session_id=?1",
+            "SELECT count(*) FROM ef_checkpoints WHERE session_id=?1",
+            "SELECT count(*) FROM ef_interactions WHERE session_id=?1",
+            "SELECT count(*) FROM ef_conversations WHERE session=?1",
+            "SELECT count(*) FROM ef_context_summaries WHERE json_extract(key, '$.conversation.session_id')=?1",
         ].iter().map(|sql| connection.query_row(sql, [id], |row| row.get(0)).unwrap()).collect()
     }
 
@@ -258,9 +258,7 @@ async fn single_delete_removes_all_session_data_and_survives_reopen() {
         reopened
             .conversation(&ConversationKey::new(id))
             .await
-            .unwrap()
-            .messages
-            .is_empty()
+            .is_err()
     );
     assert!(reopened.framework().close().await.is_success());
 }
@@ -297,12 +295,13 @@ async fn batch_is_exact_idempotent_and_not_limited_by_sql_parameter_count() {
 async fn invalid_ids_are_reported_and_do_not_stop_later_deletions() {
     let fixture = Fixture::new().await;
     for invalid in ["", " \t\n"] {
-        fixture.seed("a").await;
+        let id = format!("a-{}", invalid.len());
+        fixture.seed(&id).await;
         let report = fixture
             .agent
             .execute(DeleteSessions(vec![
                 invalid.into(),
-                "a".into(),
+                id.clone(),
                 invalid.into(),
             ]))
             .await
@@ -315,7 +314,7 @@ async fn invalid_ids_are_reported_and_do_not_stop_later_deletions() {
             fixture.agent.execute(DeleteSession(invalid.into())).await,
             Err(AgentError::State(StateError::Invalid(_)))
         ));
-        assert_eq!(fixture.counts("a"), vec![0; 5]);
+        assert_eq!(fixture.counts(&id), vec![0; 5]);
     }
     fixture.close().await;
 }
@@ -410,7 +409,7 @@ async fn sql_failure_rolls_back_only_its_session_and_preserves_other_successes()
     fixture.seed("b").await;
     fixture.seed("c").await;
     let connection = Connection::open(&fixture.path).unwrap();
-    connection.execute_batch("CREATE TRIGGER reject_delete BEFORE DELETE ON agent_interactions WHEN OLD.session_id='b' BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_delete BEFORE DELETE ON ef_interactions WHEN OLD.session_id='b' BEGIN SELECT RAISE(ABORT, 'test failure'); END;").unwrap();
     let report = fixture
         .agent
         .execute(DeleteSessions(vec!["a".into(), "b".into(), "c".into()]))
@@ -450,7 +449,7 @@ async fn batch_returns_every_failure_in_input_order_and_deduplicates_retries() {
         .await
         .unwrap();
     Connection::open(&fixture.path).unwrap().execute_batch(
-        "CREATE TRIGGER reject_delete BEFORE DELETE ON agent_interactions WHEN OLD.session_id='broken' BEGIN SELECT RAISE(ABORT, 'test failure'); END;"
+        "CREATE TRIGGER reject_delete BEFORE DELETE ON ef_interactions WHEN OLD.session_id='broken' BEGIN SELECT RAISE(ABORT, 'test failure'); END;"
     ).unwrap();
     let report = fixture
         .agent
@@ -515,7 +514,7 @@ async fn execution_only_plugin_supports_cleanup_and_expired_leases_are_fenced() 
     Connection::open(path)
         .unwrap()
         .execute(
-            "UPDATE agent_checkpoints SET expires=0 WHERE run_id=?1",
+            "UPDATE ef_checkpoints SET expires=0 WHERE run_id=?1",
             params![snapshot.run_id.to_string()],
         )
         .unwrap();
@@ -526,17 +525,12 @@ async fn execution_only_plugin_supports_cleanup_and_expired_leases_are_fenced() 
     ));
     let fresh = state
         .create(
-            Checkpoint::new(RunId::new_v4(), "expired", "test", 1, json!({})),
+            Checkpoint::new(RunId::new_v4(), "fresh", "test", 1, json!({})),
             None,
         )
         .await
         .unwrap();
-    assert!(
-        agent
-            .execute(DeleteSession("expired".into()))
-            .await
-            .unwrap()
-    );
+    assert!(agent.execute(DeleteSession("fresh".into())).await.unwrap());
     assert!(matches!(
         state.load(fresh.run_id).await,
         Err(StateError::NotFound)

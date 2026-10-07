@@ -94,6 +94,9 @@ impl ExternalAgentEventSink for ExternalEvents<'_> {
 
 #[async_trait]
 impl AgentLoop for ExternalAgentLoop {
+    fn execution_kind(&self) -> &str {
+        "EXTERNAL"
+    }
     fn supports_steering(&self) -> bool {
         false
     }

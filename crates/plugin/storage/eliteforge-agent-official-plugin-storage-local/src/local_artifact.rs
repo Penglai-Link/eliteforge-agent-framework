@@ -1,15 +1,13 @@
 //! SQLite metadata plus filesystem payloads. The legacy agent_artifacts BLOB
 //! table is deliberately ignored: its IDs have no local metadata rows.
+use crate::SqliteDatabase as Connection;
 use crate::{
     ArtifactChunk, ArtifactError, ArtifactId, ArtifactMetadata, ArtifactStore, FileArtifactStore,
 };
 use async_trait::async_trait;
 use std::{collections::HashSet, path::Path, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
-use tokio_rusqlite::{
-    Connection,
-    rusqlite::{self, OptionalExtension, params},
-};
+use tokio_rusqlite::rusqlite::{self, OptionalExtension, params};
 use tokio_util::sync::CancellationToken;
 
 const ORPHAN_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
@@ -31,17 +29,24 @@ impl LocalArtifactStore {
         files: FileArtifactStore,
     ) -> Result<Self, ArtifactError> {
         let connection = Connection::open(path).await.map_err(error)?;
+        Self::with_database(connection, files).await
+    }
+    pub async fn with_database(
+        connection: Connection,
+        files: FileArtifactStore,
+    ) -> Result<Self, ArtifactError> {
         connection
             .call(|c| -> Result<(), ArtifactError> {
                 c.busy_timeout(Duration::from_secs(5)).map_err(error)?;
                 c.execute_batch(
                     "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-                 CREATE TABLE IF NOT EXISTS local_artifact_metadata (
+                 CREATE TABLE IF NOT EXISTS ef_local_artifact_metadata (
                      id TEXT PRIMARY KEY, size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
                      created_at_unix_ms INTEGER NOT NULL
                  );",
                 )
-                .map_err(error)
+                .map_err(error)?;
+                crate::lifecycle::initialize(c).map_err(error)
             })
             .await
             .map_err(error)?;
@@ -56,7 +61,7 @@ impl LocalArtifactStore {
 
     pub async fn close(&self) -> Result<(), ArtifactError> {
         self.admission.close();
-        self.connection.clone().close().await.map_err(error)
+        Ok(())
     }
 
     async fn work<T: Send + 'static>(
@@ -86,7 +91,7 @@ impl LocalArtifactStore {
         self.work(move |c| {
             let size_bytes: Option<u64> = c
                 .query_row(
-                    "SELECT size_bytes FROM local_artifact_metadata WHERE id=?1",
+                    "SELECT size_bytes FROM ef_local_artifact_metadata WHERE id=?1",
                     [id.as_str()],
                     |row| row.get(0),
                 )
@@ -113,7 +118,7 @@ impl LocalArtifactStore {
         let referenced = self
             .work(|c| {
                 let mut stmt = c
-                    .prepare("SELECT id FROM local_artifact_metadata")
+                    .prepare("SELECT id FROM ef_local_artifact_metadata")
                     .map_err(error)?;
                 let rows = stmt
                     .query_map([], |row| row.get::<_, String>(0))
@@ -226,7 +231,7 @@ mod tests {
             .await
             .unwrap();
         db.call(|c| -> rusqlite::Result<()> {
-            c.execute_batch("DROP TABLE local_artifact_metadata")
+            c.execute_batch("DROP TABLE ef_local_artifact_metadata")
         })
         .await
         .unwrap();
@@ -272,7 +277,7 @@ impl ArtifactStore for LocalArtifactStore {
         let recorded = self
             .work(move |c| {
                 c.execute(
-                    "INSERT INTO local_artifact_metadata(id,size_bytes,created_at_unix_ms)
+                    "INSERT INTO ef_local_artifact_metadata(id,size_bytes,created_at_unix_ms)
                  VALUES (?1,?2,CAST(unixepoch('subsec') * 1000 AS INTEGER))",
                     params![id.as_str(), size_bytes],
                 )
@@ -318,27 +323,47 @@ impl ArtifactStore for LocalArtifactStore {
         let id = id.clone();
         let deleted_id = id.clone();
         self.work(move |c| {
-            if c.execute(
-                "DELETE FROM local_artifact_metadata WHERE id=?1",
-                [deleted_id.as_str()],
-            )
-            .map_err(error)?
+            let tx = crate::database::begin(c).map_err(error)?;
+            let referenced: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM ef_session_artifact_refs WHERE artifact_id=?1)",
+                    [deleted_id.as_str()],
+                    |r| r.get(0),
+                )
+                .map_err(error)?;
+            if referenced {
+                return Err(ArtifactError::Worker(
+                    "artifact is referenced by a session".into(),
+                ));
+            }
+            if tx
+                .execute(
+                    "DELETE FROM ef_local_artifact_metadata WHERE id=?1",
+                    [deleted_id.as_str()],
+                )
+                .map_err(error)?
                 == 0
             {
                 return Err(ArtifactError::NotFound);
             }
-            Ok(())
+            tx.execute(
+                "INSERT OR IGNORE INTO ef_artifact_cleanup(artifact_id) VALUES (?1)",
+                [deleted_id.as_str()],
+            )
+            .map_err(error)?;
+            tx.commit().map_err(error)
         })
         .await?;
-        // The metadata row is the visibility boundary. Failure to unlink is
-        // cleaned by the delayed orphan collector.
-        match self.files.remove(&id, CancellationToken::new()).await {
-            Ok(()) => Ok(()),
-            Err(ArtifactError::NotFound) => Ok(()),
-            Err(_) => Err(ArtifactError::Indeterminate(
-                "metadata removed; filesystem cleanup pending".into(),
-            )),
+        let database = self.connection.clone();
+        let files = self.files.clone();
+        if database.in_transaction() {
+            self.connection.after_commit(async move {
+                crate::lifecycle::cleanup_artifacts(&database, &files).await;
+            });
+        } else {
+            crate::lifecycle::cleanup_artifacts(&database, &files).await;
         }
+        Ok(())
     }
 }
 

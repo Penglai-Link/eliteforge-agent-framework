@@ -175,6 +175,8 @@ pub struct Checkpoint {
     pub schema_version: u32,
     pub run_id: RunId,
     pub session_id: String,
+    #[serde(default = "default_execution_scope")]
+    pub execution_scope: String,
     pub revision: u64,
     pub loop_id: String,
     pub loop_version: u32,
@@ -184,7 +186,15 @@ pub struct Checkpoint {
     pub events: Vec<EventEnvelope>,
 }
 
+fn default_execution_scope() -> String {
+    "main".into()
+}
+
 impl Checkpoint {
+    pub fn with_execution_scope(mut self, scope: impl Into<String>) -> Self {
+        self.execution_scope = scope.into();
+        self
+    }
     pub fn new(
         run_id: RunId,
         session_id: impl Into<String>,
@@ -197,6 +207,7 @@ impl Checkpoint {
             schema_version: 1,
             run_id,
             session_id: session_id.into(),
+            execution_scope: default_execution_scope(),
             revision: 0,
             loop_id: loop_id.into(),
             loop_version,
@@ -212,6 +223,7 @@ impl Checkpoint {
         }
         if self.run_id.is_nil()
             || self.session_id.trim().is_empty()
+            || self.execution_scope.trim().is_empty()
             || self.loop_id.trim().is_empty()
         {
             return Err(StateError::Invalid(
@@ -241,6 +253,7 @@ impl Checkpoint {
         next.validate()?;
         if self.run_id != next.run_id
             || self.session_id != next.session_id
+            || self.execution_scope != next.execution_scope
             || self.loop_id != next.loop_id
             || self.loop_version != next.loop_version
         {
@@ -306,7 +319,7 @@ pub enum StateError {
 #[crate::extension_point(single, adapter = crate::StateStorePlugin)]
 #[async_trait]
 pub trait StateStore: Send + Sync {
-    /// Atomically replace the session head iff it is `previous_run` and terminal.
+    /// Atomically replace the session/scope head iff it is `previous_run` and terminal.
     /// A new checkpoint must retain that head's transcript as an exact prefix.
     async fn create(
         &self,
@@ -315,6 +328,12 @@ pub trait StateStore: Send + Sync {
     ) -> Result<Checkpoint, StateError>;
     async fn load(&self, run_id: RunId) -> Result<Checkpoint, StateError>;
     async fn latest(&self, session_id: &str) -> Result<Option<Checkpoint>, StateError>;
+    /// Latest checkpoint in one execution scope; scopes are independent heads.
+    async fn latest_scope(
+        &self,
+        session_id: &str,
+        scope: &str,
+    ) -> Result<Option<Checkpoint>, StateError>;
     /// Acquire exclusive ownership with a newer fencing generation. Reclaiming
     /// an expired/released lease must fence its former owner, even if reused.
     async fn claim(

@@ -1,13 +1,11 @@
 //! Persistent append-only conversations with exclusive renewable leases. These
 //! leases serialize history writers; workflow execution still uses StateStore.
+use crate::SqliteDatabase as Connection;
 use async_trait::async_trait;
 use eliteforge_agent_core::*;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
-use tokio_rusqlite::{
-    Connection,
-    rusqlite::{self, OptionalExtension, params},
-};
+use tokio_rusqlite::rusqlite::{self, OptionalExtension, params};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone)]
@@ -60,14 +58,36 @@ impl SqliteConversationStore {
             return Err(invalid("invalid conversation limits or lease duration"));
         }
         let connection = Connection::open(path).await.map_err(db_error)?;
+        Self::with_database(connection, options).await
+    }
+    pub async fn with_database(
+        connection: Connection,
+        options: SqliteConversationOptions,
+    ) -> Result<Self, ConversationError> {
+        if [
+            options.max_sessions,
+            options.max_messages,
+            options.max_bytes,
+            options.max_pending_operations,
+        ]
+        .contains(&0)
+            || options.max_pending_operations > Semaphore::MAX_PERMITS
+            || options.lease_duration < Duration::from_millis(30)
+            || options.lease_duration.as_millis() > i64::MAX as u128
+            || options.session_ttl.as_millis() > i64::MAX as u128
+        {
+            return Err(invalid("invalid conversation limits or lease duration"));
+        }
+
         connection.call(|connection| -> Result<(), ConversationError> {
             connection.busy_timeout(Duration::from_secs(5)).map_err(db_error)?;
             connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;").map_err(db_error)?;
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
-            tx.execute_batch("CREATE TABLE IF NOT EXISTS conversation_meta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
-                INSERT OR IGNORE INTO conversation_meta VALUES (1,1);
-                CREATE TABLE IF NOT EXISTS conversations (session TEXT NOT NULL, branch TEXT NOT NULL, generation TEXT NOT NULL, revision INTEGER NOT NULL, messages TEXT NOT NULL, accessed INTEGER NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session,branch));").map_err(db_error)?;
-            let version: u32 = tx.query_row("SELECT version FROM conversation_meta WHERE id=1", [], |r| r.get(0)).map_err(db_error)?;
+            let tx = crate::database::begin(connection).map_err(db_error)?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS ef_conversation_meta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
+                INSERT OR IGNORE INTO ef_conversation_meta VALUES (1,1);
+                CREATE TABLE IF NOT EXISTS ef_conversations (session TEXT NOT NULL, branch TEXT NOT NULL, generation TEXT NOT NULL, revision INTEGER NOT NULL, messages TEXT NOT NULL, accessed INTEGER NOT NULL, owner TEXT, lease_until INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(session,branch));").map_err(db_error)?;
+            crate::lifecycle::initialize(&tx).map_err(|e|invalid(&e.to_string()))?;
+            let version: u32 = tx.query_row("SELECT version FROM ef_conversation_meta WHERE id=1", [], |r| r.get(0)).map_err(db_error)?;
             if version != 1 { return Err(invalid("unsupported conversation format version")); }
             tx.commit().map_err(db_error)
         }).await.map_err(worker_error)?;
@@ -82,11 +102,7 @@ impl SqliteConversationStore {
     pub async fn close(&self) -> Result<(), ConversationError> {
         self.shutdown.cancel();
         self.admission.close();
-        self.connection
-            .clone()
-            .close()
-            .await
-            .map_err(|_| invalid("conversation database close failed"))
+        Ok(())
     }
     async fn execute<T: Send + 'static>(
         &self,
@@ -108,7 +124,7 @@ impl SqliteConversationStore {
     }
     async fn release(&self, key: ConversationKey, owner: String) -> Result<(), ConversationError> {
         self.execute(move |connection| {
-            connection.execute("UPDATE conversations SET owner=NULL, lease_until=0, accessed=?3 WHERE session=?1 AND branch=?2 AND owner=?4", params![key.session_id,key.branch,now_ms()?,owner]).map_err(db_error)?;
+            connection.execute("UPDATE ef_conversations SET owner=NULL, lease_until=0, accessed=?3 WHERE session=?1 AND branch=?2 AND owner=?4", params![key.session_id,key.branch,now_ms()?,owner]).map_err(db_error)?;
             Ok(())
         }).await
     }
@@ -136,18 +152,19 @@ impl ConversationStore for SqliteConversationStore {
         let owner_for_open = owner.clone();
         self.execute(move |connection| {
             let now = now_ms()?;
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
+            let tx = crate::database::begin(connection).map_err(db_error)?;
+            crate::lifecycle::ensure_session(&tx,&key_for_open.session_id).map_err(|e|invalid(&e.to_string()))?;
             if !options.session_ttl.is_zero() {
-                tx.execute("DELETE FROM conversations WHERE lease_until<=?1 AND accessed<=?2", params![now,now.saturating_sub(options.session_ttl.as_millis() as i64)]).map_err(db_error)?;
+                tx.execute("DELETE FROM ef_conversations WHERE lease_until<=?1 AND accessed<=?2", params![now,now.saturating_sub(options.session_ttl.as_millis() as i64)]).map_err(db_error)?;
             }
-            let previous: Option<(Option<String>, i64)> = tx.query_row("SELECT owner,lease_until FROM conversations WHERE session=?1 AND branch=?2", params![key_for_open.session_id,key_for_open.branch], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(db_error)?;
+            let previous: Option<(Option<String>, i64)> = tx.query_row("SELECT owner,lease_until FROM ef_conversations WHERE session=?1 AND branch=?2", params![key_for_open.session_id,key_for_open.branch], |r| Ok((r.get(0)?,r.get(1)?))).optional().map_err(db_error)?;
             if previous.as_ref().is_some_and(|(owner, expiry)| owner.is_some() && *expiry > now) { return Err(ConversationError::Conflict); }
             if previous.is_none() {
-                let count: usize = tx.query_row("SELECT count(*) FROM conversations", [], |r| r.get(0)).map_err(db_error)?;
+                let count: usize = tx.query_row("SELECT count(*) FROM ef_conversations", [], |r| r.get(0)).map_err(db_error)?;
                 if count >= options.max_sessions { return Err(ConversationError::BudgetExceeded("persistent conversation count limit reached; expire or remove unused conversations".into())); }
-                tx.execute("INSERT INTO conversations(session,branch,generation,revision,messages,accessed) VALUES (?1,?2,?3,0,'[]',?4)", params![key_for_open.session_id,key_for_open.branch,uuid::Uuid::new_v4().to_string(),now]).map_err(db_error)?;
+                tx.execute("INSERT INTO ef_conversations(session,branch,generation,revision,messages,accessed) VALUES (?1,?2,?3,0,'[]',?4)", params![key_for_open.session_id,key_for_open.branch,uuid::Uuid::new_v4().to_string(),now]).map_err(db_error)?;
             }
-            tx.execute("UPDATE conversations SET owner=?3,lease_until=?4,accessed=?5 WHERE session=?1 AND branch=?2", params![key_for_open.session_id,key_for_open.branch,owner_for_open,now.saturating_add(options.lease_duration.as_millis() as i64),now]).map_err(db_error)?;
+            tx.execute("UPDATE ef_conversations SET owner=?3,lease_until=?4,accessed=?5 WHERE session=?1 AND branch=?2", params![key_for_open.session_id,key_for_open.branch,owner_for_open,now.saturating_add(options.lease_duration.as_millis() as i64),now]).map_err(db_error)?;
             tx.commit().map_err(db_error)
         }).await?;
         let cancellation = self.shutdown.child_token();
@@ -170,7 +187,7 @@ impl ConversationStore for SqliteConversationStore {
                 let renewed = store.execute(move |connection| {
                     let now = now_ms()?;
                     // Renewal changes only expiry, keeping the fencing owner stable.
-                    Ok(connection.execute("UPDATE conversations SET lease_until=?4,accessed=?5 WHERE session=?1 AND branch=?2 AND owner=?3 AND lease_until>?5", params![key.session_id,key.branch,owner,now.saturating_add(duration),now]).map_err(db_error)? == 1)
+                    Ok(connection.execute("UPDATE ef_conversations SET lease_until=?4,accessed=?5 WHERE session=?1 AND branch=?2 AND owner=?3 AND lease_until>?5", params![key.session_id,key.branch,owner,now.saturating_add(duration),now]).map_err(db_error)? == 1)
                 }).await;
                 if !matches!(renewed, Ok(true)) {
                     cancellation.cancel();
@@ -228,7 +245,7 @@ impl SqliteConversationSession {
         let owner = self.owner.clone();
         let options = self.store.options.clone();
         self.store.execute(move |connection| {
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(db_error)?;
+            let tx = crate::database::begin(connection).map_err(db_error)?;
             let mut snapshot = load_snapshot(&tx, &key, &owner, &options)?;
             if expected.is_some_and(|revision| revision != snapshot.revision) { return Err(ConversationError::Conflict); }
             if snapshot.messages.len().saturating_add(messages.len()) > options.max_messages { return Err(ConversationError::BudgetExceeded("message count limit exceeded".into())); }
@@ -236,7 +253,7 @@ impl SqliteConversationSession {
             validate_messages(&snapshot.messages)?;
             let encoded = encode_messages(&snapshot.messages, options.max_bytes)?;
             let now = now_ms()?;
-            let changed = tx.execute("UPDATE conversations SET messages=?4,revision=?5,accessed=?6 WHERE session=?1 AND branch=?2 AND owner=?3 AND lease_until>?6", params![key.session_id,key.branch,owner,encoded,snapshot.messages.len() as u64,now]).map_err(db_error)?;
+            let changed = tx.execute("UPDATE ef_conversations SET messages=?4,revision=?5,accessed=?6 WHERE session=?1 AND branch=?2 AND owner=?3 AND lease_until>?6", params![key.session_id,key.branch,owner,encoded,snapshot.messages.len() as u64,now]).map_err(db_error)?;
             if changed != 1 { return Err(ConversationError::Conflict); }
             tx.commit().map_err(db_error)
         }).await
@@ -278,7 +295,7 @@ fn load_snapshot(
     owner: &str,
     options: &SqliteConversationOptions,
 ) -> Result<ConversationSnapshot, ConversationError> {
-    let row: Option<(String, u64, String)> = connection.query_row("SELECT generation,revision,length(CAST(messages AS BLOB)),messages FROM conversations WHERE session=?1 AND branch=?2 AND owner=?3 AND lease_until>?4", params![key.session_id,key.branch,owner,now_ms()?], |row| {
+    let row: Option<(String, u64, String)> = connection.query_row("SELECT generation,revision,length(CAST(messages AS BLOB)),messages FROM ef_conversations WHERE session=?1 AND branch=?2 AND owner=?3 AND lease_until>?4", params![key.session_id,key.branch,owner,now_ms()?], |row| {
         let size: usize = row.get(2)?;
         let count: u64 = row.get(1)?;
         if size > options.max_bytes || count > options.max_messages as u64 { return Err(rusqlite::Error::InvalidQuery); }

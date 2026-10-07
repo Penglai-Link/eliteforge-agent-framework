@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::{SessionEvent, SessionLifecycleStore, SessionPersistenceFailure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -537,6 +538,12 @@ impl RunLimits {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRequest {
     pub session_id: String,
+    #[serde(default)]
+    pub execution_scope: Option<String>,
+    #[serde(default)]
+    pub conversation_branch: Option<String>,
+    #[serde(default)]
+    pub goal_id: Option<String>,
     pub input: crate::Content,
     pub generation: crate::GenerationOptions,
     pub limits: RunLimits,
@@ -551,9 +558,23 @@ pub struct RunRequest {
 }
 
 impl RunRequest {
+    pub fn scope(&self) -> &str {
+        self.execution_scope.as_deref().unwrap_or("main")
+    }
+    pub fn occupancy_key(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.session_id.len(),
+            self.session_id,
+            self.scope()
+        )
+    }
     pub fn new(session_id: impl Into<String>, input: impl Into<crate::Content>) -> Self {
         Self {
             session_id: session_id.into(),
+            execution_scope: None,
+            conversation_branch: None,
+            goal_id: None,
             input: input.into(),
             generation: crate::GenerationOptions::default(),
             limits: RunLimits::default(),
@@ -694,6 +715,9 @@ pub trait EventSink: Send + Sync {
 #[crate::extension_point(select, adapter = crate::AgentLoopPlugin)]
 #[async_trait]
 pub trait AgentLoop: Send + Sync {
+    fn execution_kind(&self) -> &str {
+        "CUSTOM"
+    }
     /// Loops that own their history externally can run without a ConversationStore.
     fn requires_conversations(&self) -> bool {
         true
@@ -1111,6 +1135,21 @@ impl RunContext {
             .closed = true;
     }
     pub async fn emit(&self, event: AgentEvent) {
+        if let Some(store) = self.extensions.get::<Arc<dyn SessionLifecycleStore>>() {
+            let mut persisted = SessionEvent::new(
+                &self.session_id,
+                "EXECUTION_EVENT",
+                serde_json::to_value(&event).unwrap_or_default(),
+            );
+            persisted.run_id = Some(self.run_id);
+            if let Err(error) = store.append_event(persisted).await {
+                if let Some(failure) = self.extensions.get::<SessionPersistenceFailure>() {
+                    *failure.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+                }
+                self.cancellation.cancel();
+                return;
+            }
+        }
         self.publish(event);
     }
     pub fn emit_output(&self, event: crate::OutputEvent) {

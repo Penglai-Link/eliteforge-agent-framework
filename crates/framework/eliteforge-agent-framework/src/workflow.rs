@@ -14,6 +14,9 @@ impl WorkflowLoop {
 }
 #[async_trait]
 impl AgentLoop for WorkflowLoop {
+    fn execution_kind(&self) -> &str {
+        "WORKFLOW"
+    }
     fn supports_resume(&self) -> bool {
         true
     }

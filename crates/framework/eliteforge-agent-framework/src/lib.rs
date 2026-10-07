@@ -43,3 +43,6 @@ pub use continuation::*;
 
 mod framework;
 pub use framework::*;
+
+mod goals;
+pub use goals::{GOAL_LOOP_ID, GoalPlugin, ModelGoalPolicy};

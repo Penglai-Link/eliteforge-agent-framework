@@ -1,3 +1,4 @@
+use crate::SqliteDatabase as Connection;
 mod interactions;
 mod sessions;
 pub use interactions::SqliteExecutionPlugin;
@@ -7,16 +8,14 @@ use async_trait::async_trait;
 use eliteforge_agent_core::*;
 use std::{path::Path, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
-use tokio_rusqlite::{
-    Connection,
-    rusqlite::{self, OptionalExtension, TransactionBehavior, params},
-};
+use tokio_rusqlite::rusqlite::{self, OptionalExtension, params};
 
 #[derive(Clone)]
 pub struct SqliteStateStore {
     connection: Connection,
     admission: Arc<Semaphore>,
     max_checkpoint_bytes: usize,
+    artifact_files: Option<Arc<crate::FileArtifactStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,21 +44,36 @@ impl SqliteStateStore {
             return Err(StateError::Invalid("SQLite limits must be positive".into()));
         }
         let connection = Connection::open(path).await.map_err(database_error)?;
+        Self::with_database(connection, options).await
+    }
+    pub async fn with_database(
+        connection: Connection,
+        options: SqliteOptions,
+    ) -> Result<Self, StateError> {
+        if options.busy_timeout.is_zero()
+            || options.max_pending_operations == 0
+            || options.max_pending_operations > Semaphore::MAX_PERMITS
+            || options.max_checkpoint_bytes == 0
+        {
+            return Err(StateError::Invalid("SQLite limits must be positive".into()));
+        }
+
         let timeout = options.busy_timeout;
         connection.call(move |connection| -> Result<(), StateError> {
             connection.busy_timeout(timeout).map_err(database_error)?;
             connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;").map_err(database_error)?;
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(database_error)?;
-            tx.execute_batch("CREATE TABLE IF NOT EXISTS agent_core_metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
-                INSERT OR IGNORE INTO agent_core_metadata VALUES ('schema_version', 1);
-                CREATE TABLE IF NOT EXISTS agent_checkpoints (
+            let tx = crate::database::begin(connection).map_err(database_error)?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS ef_core_metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+                INSERT OR IGNORE INTO ef_core_metadata VALUES ('schema_version', 1);
+                CREATE TABLE IF NOT EXISTS ef_checkpoints (
                     run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, revision INTEGER NOT NULL,
                     checkpoint TEXT NOT NULL, owner TEXT, generation INTEGER NOT NULL DEFAULT 0, expires INTEGER NOT NULL DEFAULT 0);
-                CREATE TABLE IF NOT EXISTS agent_session_heads (session_id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES agent_checkpoints(run_id));
-                CREATE INDEX IF NOT EXISTS agent_checkpoint_sessions ON agent_checkpoints(session_id);
-                CREATE TABLE IF NOT EXISTS agent_interactions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL, answered INTEGER NOT NULL, record TEXT NOT NULL);
-                CREATE INDEX IF NOT EXISTS agent_interactions_pending ON agent_interactions(session_id,answered);").map_err(database_error)?;
-            let version: i64 = tx.query_row("SELECT value FROM agent_core_metadata WHERE key='schema_version'", [], |row| row.get(0)).map_err(database_error)?;
+                CREATE TABLE IF NOT EXISTS ef_session_heads (session_id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'main', run_id TEXT NOT NULL REFERENCES ef_checkpoints(run_id), PRIMARY KEY(session_id,scope));
+                CREATE INDEX IF NOT EXISTS ef_checkpoint_sessions ON ef_checkpoints(session_id);
+                CREATE TABLE IF NOT EXISTS ef_interactions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL, answered INTEGER NOT NULL, record TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS ef_interactions_pending ON ef_interactions(session_id,answered);").map_err(database_error)?;
+            crate::lifecycle::initialize(&tx)?;
+            let version: i64 = tx.query_row("SELECT value FROM ef_core_metadata WHERE key='schema_version'", [], |row| row.get(0)).map_err(database_error)?;
             if version != 1 { return Err(StateError::UnsupportedVersion); }
             tx.commit().map_err(database_error)
         }).await.map_err(worker_error)?;
@@ -67,6 +81,7 @@ impl SqliteStateStore {
             connection,
             admission: Arc::new(Semaphore::new(options.max_pending_operations)),
             max_checkpoint_bytes: options.max_checkpoint_bytes,
+            artifact_files: None,
         })
     }
 
@@ -74,13 +89,14 @@ impl SqliteStateStore {
         SqliteExecutionPlugin(self)
     }
 
+    pub(crate) fn with_artifact_files(mut self, files: Arc<crate::FileArtifactStore>) -> Self {
+        self.artifact_files = Some(files);
+        self
+    }
+
     pub async fn close(&self) -> Result<(), StateError> {
         self.admission.close();
-        self.connection
-            .clone()
-            .close()
-            .await
-            .map_err(|_| StateError::Backend("SQLite close failed".into()))
+        Ok(())
     }
 
     async fn execute<T: Send + 'static>(
@@ -135,7 +151,7 @@ fn load(
 ) -> Result<Checkpoint, StateError> {
     let (revision, encoded): (u64, String) = connection
         .query_row(
-            "SELECT revision, checkpoint FROM agent_checkpoints WHERE run_id=?1",
+            "SELECT revision, checkpoint FROM ef_checkpoints WHERE run_id=?1",
             [run_id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -184,7 +200,7 @@ fn verify_lease(
 ) -> Result<(), StateError> {
     let (owner, generation, expires): (Option<String>, u64, u64) = connection
         .query_row(
-            "SELECT owner, generation, expires FROM agent_checkpoints WHERE run_id=?1",
+            "SELECT owner, generation, expires FROM ef_checkpoints WHERE run_id=?1",
             [lease.run_id.to_string()],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -216,18 +232,20 @@ impl StateStore for SqliteStateStore {
         let encoded = encode(&checkpoint, self.max_checkpoint_bytes)?;
         let max_bytes = self.max_checkpoint_bytes;
         self.execute(move |connection| {
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(database_error)?;
-            let head: Option<String> = tx.query_row("SELECT run_id FROM agent_session_heads WHERE session_id=?1", [&checkpoint.session_id], |row| row.get(0)).optional().map_err(database_error)?;
+            let tx = crate::database::begin(connection).map_err(database_error)?;
+            crate::lifecycle::ensure_session(&tx, &checkpoint.session_id)?;
+            let head: Option<String> = tx.query_row("SELECT run_id FROM ef_session_heads WHERE session_id=?1 AND scope=?2", params![checkpoint.session_id,checkpoint.execution_scope], |row| row.get(0)).optional().map_err(database_error)?;
             if head != previous_run.map(|id| id.to_string()) { return Err(StateError::Conflict); }
             if let Some(previous) = previous_run {
                 let previous = load(&tx, previous, max_bytes)?;
                 if !previous.status.is_terminal() { return Err(StateError::Busy); }
                 if !checkpoint.transcript.starts_with(&previous.transcript) { return Err(StateError::Invalid("new run must retain previous transcript".into())); }
             }
-            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_checkpoints WHERE run_id=?1)", [checkpoint.run_id.to_string()], |row| row.get(0)).map_err(database_error)?;
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ef_checkpoints WHERE run_id=?1)", [checkpoint.run_id.to_string()], |row| row.get(0)).map_err(database_error)?;
             if exists { return Err(StateError::Conflict); }
-            tx.execute("INSERT INTO agent_checkpoints(run_id, session_id, revision, checkpoint) VALUES (?1,?2,0,?3)", params![checkpoint.run_id.to_string(), checkpoint.session_id, encoded]).map_err(database_error)?;
-            tx.execute("INSERT INTO agent_session_heads(session_id,run_id) VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET run_id=excluded.run_id", params![checkpoint.session_id, checkpoint.run_id.to_string()]).map_err(database_error)?;
+            tx.execute("INSERT INTO ef_checkpoints(run_id, session_id, revision, checkpoint) VALUES (?1,?2,0,?3)", params![checkpoint.run_id.to_string(), checkpoint.session_id, encoded]).map_err(database_error)?;
+            tx.execute("INSERT INTO ef_session_heads(session_id,scope,run_id) VALUES (?1,?2,?3) ON CONFLICT(session_id,scope) DO UPDATE SET run_id=excluded.run_id", params![checkpoint.session_id, checkpoint.execution_scope, checkpoint.run_id.to_string()]).map_err(database_error)?;
+            for event in &checkpoint.events { crate::lifecycle::append_journal(&tx, event)?; }
             tx.commit().map_err(database_error)?;
             Ok(checkpoint)
         }).await
@@ -238,13 +256,21 @@ impl StateStore for SqliteStateStore {
             .await
     }
     async fn latest(&self, session_id: &str) -> Result<Option<Checkpoint>, StateError> {
+        self.latest_scope(session_id, "main").await
+    }
+    async fn latest_scope(
+        &self,
+        session_id: &str,
+        scope: &str,
+    ) -> Result<Option<Checkpoint>, StateError> {
         let session_id = session_id.to_owned();
+        let scope = scope.to_owned();
         let max_bytes = self.max_checkpoint_bytes;
         self.execute(move |connection| {
             let id: Option<String> = connection
                 .query_row(
-                    "SELECT run_id FROM agent_session_heads WHERE session_id=?1",
-                    [session_id],
+                    "SELECT run_id FROM ef_session_heads WHERE session_id=?1 AND scope=?2",
+                    params![session_id, scope],
                     |row| row.get(0),
                 )
                 .optional()
@@ -272,9 +298,7 @@ impl StateStore for SqliteStateStore {
         }
         let max_bytes = self.max_checkpoint_bytes;
         self.execute(move |connection| {
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(database_error)?;
+            let tx = crate::database::begin(connection).map_err(database_error)?;
             if load(&tx, run_id, max_bytes)?.status.is_terminal() {
                 return Err(StateError::Conflict);
             }
@@ -282,7 +306,7 @@ impl StateStore for SqliteStateStore {
             let expires_at_unix_ms = expiry(now, ttl)?;
             let (current_owner, generation, expires): (Option<String>, u64, u64) = tx
                 .query_row(
-                    "SELECT owner,generation,expires FROM agent_checkpoints WHERE run_id=?1",
+                    "SELECT owner,generation,expires FROM ef_checkpoints WHERE run_id=?1",
                     [run_id.to_string()],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
@@ -295,7 +319,7 @@ impl StateStore for SqliteStateStore {
                 .filter(|g| *g <= i64::MAX as u64)
                 .ok_or(StateError::Conflict)?;
             tx.execute(
-                "UPDATE agent_checkpoints SET owner=?2,generation=?3,expires=?4 WHERE run_id=?1",
+                "UPDATE ef_checkpoints SET owner=?2,generation=?3,expires=?4 WHERE run_id=?1",
                 params![
                     run_id.to_string(),
                     owner.to_string(),
@@ -321,13 +345,11 @@ impl StateStore for SqliteStateStore {
     ) -> Result<ExecutionLease, StateError> {
         let lease = lease.clone();
         self.execute(move |connection| {
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(database_error)?;
+            let tx = crate::database::begin(connection).map_err(database_error)?;
             verify_lease(&tx, &lease)?;
             let expires_at_unix_ms = expiry(db_now(&tx)?, ttl)?;
             tx.execute(
-                "UPDATE agent_checkpoints SET expires=?2 WHERE run_id=?1",
+                "UPDATE ef_checkpoints SET expires=?2 WHERE run_id=?1",
                 params![lease.run_id.to_string(), expires_at_unix_ms],
             )
             .map_err(database_error)?;
@@ -348,9 +370,7 @@ impl StateStore for SqliteStateStore {
         let lease = lease.clone();
         let max_bytes = self.max_checkpoint_bytes;
         self.execute(move |connection| {
-            let tx = connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(database_error)?;
+            let tx = crate::database::begin(connection).map_err(database_error)?;
             verify_lease(&tx, &lease)?;
             let previous = load(&tx, lease.run_id, max_bytes)?;
             if previous.revision != expected_revision || next.revision != expected_revision {
@@ -364,10 +384,13 @@ impl StateStore for SqliteStateStore {
             let encoded = encode(&next, max_bytes)?;
             verify_lease(&tx, &lease)?;
             tx.execute(
-                "UPDATE agent_checkpoints SET revision=?2,checkpoint=?3 WHERE run_id=?1",
+                "UPDATE ef_checkpoints SET revision=?2,checkpoint=?3 WHERE run_id=?1",
                 params![lease.run_id.to_string(), next.revision, encoded],
             )
             .map_err(database_error)?;
+            for event in &next.events[previous.events.len()..] {
+                crate::lifecycle::append_journal(&tx, event)?;
+            }
             tx.commit().map_err(database_error)?;
             Ok(next)
         })
@@ -376,7 +399,7 @@ impl StateStore for SqliteStateStore {
     async fn release(&self, lease: &ExecutionLease) -> Result<(), StateError> {
         let lease = lease.clone();
         self.execute(move |connection| {
-            let count = connection.execute("UPDATE agent_checkpoints SET owner=NULL,expires=0 WHERE run_id=?1 AND owner=?2 AND generation=?3",params![lease.run_id.to_string(),lease.owner.to_string(),lease.generation]).map_err(database_error)?;
+            let count = connection.execute("UPDATE ef_checkpoints SET owner=NULL,expires=0 WHERE run_id=?1 AND owner=?2 AND generation=?3",params![lease.run_id.to_string(),lease.owner.to_string(),lease.generation]).map_err(database_error)?;
             if count == 0 { return Err(StateError::LeaseLost); } Ok(())
         }).await
     }

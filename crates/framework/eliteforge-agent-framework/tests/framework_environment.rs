@@ -142,7 +142,7 @@ async fn agents_share_storage_and_agent_close_does_not_close_environment() {
             .await
             .unwrap()
     );
-    assert!(b.conversation(&key).await.unwrap().messages.is_empty());
+    assert!(b.conversation(&key).await.is_err());
     assert!(framework.close().await.is_success());
     assert!(b.is_closed());
     assert!(matches!(

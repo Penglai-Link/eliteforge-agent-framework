@@ -392,7 +392,7 @@ pub struct Agent {
     assembly: Arc<AgentAssembly>,
     options: Option<ModelInvocationOptions>,
 }
-struct AdmissionLease {
+pub(crate) struct AdmissionLease {
     assembly: Weak<AgentAssembly>,
     id: u64,
     released: AtomicBool,
@@ -654,6 +654,21 @@ impl Agent {
             .blueprint
             .framework
             .clone()
+    }
+    pub(crate) fn goal_binding(
+        &self,
+        session: &str,
+    ) -> Result<(AgentSelection, Arc<AdmissionLease>), AgentError> {
+        let (_, lease) = self.admit("goal", session)?;
+        let selection = self
+            .assembly
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .blueprint
+            .selection
+            .clone();
+        Ok((selection, lease))
     }
     /// Rebind an idle Agent to capabilities in the same Framework.
     /// Caller cancellation does not interrupt the owned update task.
@@ -1208,6 +1223,16 @@ impl AgentGeneration {
         }
         request.limits.validate()?;
         request.generation.validate()?;
+        if request.scope().trim().is_empty()
+            || request
+                .conversation_branch
+                .as_ref()
+                .is_some_and(|b| b.trim().is_empty())
+        {
+            return Err(AgentError::InvalidConfiguration(
+                "execution scope and conversation branch must not be empty".into(),
+            ));
+        }
         if request.session_id.trim().is_empty() {
             return Err(AgentError::InvalidConfiguration(
                 "session ID must not be empty".into(),
@@ -1306,18 +1331,6 @@ impl AgentGeneration {
                 .extensions
                 .insert(AgentCollaborationService(self.collaboration.clone()));
         }
-        let cancellation = parent.map_or_else(CancellationToken::new, |p| p.children.child_token());
-        {
-            let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
-            if runs.closed || self.inner.framework.is_closed() {
-                return Err(AgentError::Closed);
-            }
-            if runs.active.contains_key(&request.session_id) {
-                return Err(AgentError::SessionBusy(request.session_id));
-            }
-            runs.active
-                .insert(request.session_id.clone(), cancellation.clone());
-        }
         let run_id = request.resume.as_ref().map_or_else(
             || {
                 request
@@ -1327,6 +1340,31 @@ impl AgentGeneration {
             },
             |resume| resume.run_id,
         );
+        if request.execution_scope.is_none()
+            && (parent.is_some_and(|p| p.session_id == request.session_id)
+                || request
+                    .extensions
+                    .get::<crate::goals::GoalRunParent>()
+                    .is_some())
+        {
+            request.execution_scope = Some(format!("execution/{run_id}"));
+        }
+        if parent.is_some() && request.conversation_branch.is_none() {
+            request.conversation_branch = Some(request.scope().to_owned());
+        }
+        let occupancy_key = request.occupancy_key();
+        let cancellation = parent.map_or_else(CancellationToken::new, |p| p.children.child_token());
+        {
+            let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
+            if runs.closed || self.inner.framework.is_closed() {
+                return Err(AgentError::Closed);
+            }
+            if runs.active.contains_key(&occupancy_key) {
+                return Err(AgentError::SessionBusy(request.session_id));
+            }
+            runs.active
+                .insert(occupancy_key.clone(), cancellation.clone());
+        }
         let (events, initial_events) = broadcast::channel(256);
         let steering = Arc::new(Mutex::new(crate::types::SteeringState {
             closed: !self.inner.agent_loop.supports_steering(),
@@ -1349,8 +1387,14 @@ impl AgentGeneration {
             execution_id,
             lineage: parent.map_or(
                 RunLineage {
-                    root_run_id: run_id,
-                    parent_run_id: None,
+                    root_run_id: request
+                        .extensions
+                        .get::<crate::goals::GoalRunParent>()
+                        .map_or(run_id, |p| p.root),
+                    parent_run_id: request
+                        .extensions
+                        .get::<crate::goals::GoalRunParent>()
+                        .map(|p| p.parent),
                     depth: 0,
                 },
                 |p| RunLineage {
@@ -1415,23 +1459,84 @@ impl AgentGeneration {
         let registration = RunRegistration {
             completion: completion.clone(),
             inner: inner.clone(),
-            session_id: request.session_id.clone(),
+            session_id: occupancy_key,
         };
         let started = AgentEvent::RunStarted {
             run_id,
             session_id: request.session_id.clone(),
         };
-        // Broadcast admission synchronously, even if cancellation arrives before
-        // Tokio first polls the spawned task.
+        let lifecycle = self
+            .inner
+            .framework
+            .services()?
+            .get::<SessionLifecycleStoreService>();
+        // Output reservations and the owning handle exist synchronously. SQL
+        // admission still completes before any loop or lifecycle hook executes.
         context.publish(started);
+        let kind = inner.agent_loop.execution_kind();
+        let mut managed = ManagedRun {
+            id: run_id,
+            session_id: request.session_id.clone(),
+            execution_scope: request.scope().to_owned(),
+            conversation_branch: request
+                .conversation_branch
+                .clone()
+                .unwrap_or_else(|| "main".into()),
+            parent_run_id: context.lineage.parent_run_id,
+            root_run_id: context.lineage.root_run_id,
+            goal_id: request.goal_id.clone(),
+            kind: kind.into(),
+            status: ManagedRunStatus::Running,
+            result: None,
+            error: None,
+            started_at_ms: unix_time_ms(),
+            finished_at_ms: None,
+            lease_until_ms: deadline_unix_ms
+                .saturating_add(request.limits.cleanup_timeout.as_millis() as u64),
+        };
         runtime.spawn(async move {
+            let mut request = request;
+            if let Some(lifecycle) = &lifecycle {
+                if request.resume.is_some()
+                    && request.execution_scope.is_none()
+                    && let Ok(prior) = lifecycle.0.get_run(run_id).await
+                {
+                    request.execution_scope = Some(prior.execution_scope.clone());
+                    request.conversation_branch = Some(prior.conversation_branch.clone());
+                    managed.conversation_branch = prior.conversation_branch;
+                    request.goal_id = prior.goal_id.clone();
+                    managed.execution_scope = prior.execution_scope;
+                    managed.parent_run_id = prior.parent_run_id;
+                    managed.root_run_id = prior.root_run_id;
+                    managed.goal_id = prior.goal_id;
+                    context.lineage.root_run_id = managed.root_run_id;
+                    context.lineage.parent_run_id = managed.parent_run_id;
+                }
+                if let Err(error) = lifecycle
+                    .0
+                    .register_run(managed.clone(), request.resume.is_some())
+                    .await
+                {
+                    context.publish(AgentEvent::RunFailed(error.to_string()));
+                    if let Some(observers) = &context.observers {
+                        observers.finish(request.limits.cleanup_timeout).await;
+                    }
+                    drop(registration);
+                    let _ = result_sender.send(Err(error.into()));
+                    return;
+                }
+                context.extensions.insert(lifecycle.0.clone());
+                context
+                    .extensions
+                    .insert(SessionPersistenceFailure::default());
+            }
             crate::hooks::notify_started(
                 &inner.services.lifecycle_hooks,
                 &context,
                 request.limits.cleanup_timeout,
             )
             .await;
-            let result = RunNext {
+            let mut result = RunNext {
                 middleware: &inner.services.run_middleware,
                 agent_loop: inner.agent_loop.as_ref(),
                 services: &inner.services,
@@ -1447,6 +1552,32 @@ impl AgentGeneration {
                 request.limits.cleanup_timeout,
             )
             .await;
+            if let Some(failure) = context.extensions.get::<SessionPersistenceFailure>()
+                && let Some(error) = failure.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+            {
+                result = Err(error.into());
+            }
+            if let Some(lifecycle) = &lifecycle {
+                managed.finished_at_ms = Some(unix_time_ms());
+                managed.status = match &result {
+                    Ok(value) => match value.status {
+                        RunStatus::Completed => ManagedRunStatus::Completed,
+                        RunStatus::AwaitingInput => ManagedRunStatus::AwaitingInput,
+                        RunStatus::StepLimit | RunStatus::ToolCallLimit => {
+                            ManagedRunStatus::Exhausted
+                        }
+                    },
+                    Err(error) if matches!(error.primary(), AgentError::Cancelled) => {
+                        ManagedRunStatus::Cancelled
+                    }
+                    Err(_) => ManagedRunStatus::Failed,
+                };
+                managed.result = result.as_ref().ok().cloned();
+                managed.error = result.as_ref().err().map(ToString::to_string);
+                if let Err(error) = lifecycle.0.finish_run(managed).await {
+                    result = Err(error.into());
+                }
+            }
             context.seal_steering();
             if let Ok(result) = &result {
                 context.emit_output(OutputEvent::RunResult(Box::new(result.clone())));
@@ -1460,7 +1591,7 @@ impl AgentGeneration {
                 }
                 Err(error) => AgentEvent::RunFailed(error.to_string()),
             };
-            context.emit(terminal).await;
+            context.publish(terminal);
             if let Some(observers) = &context.observers {
                 observers.finish(request.limits.cleanup_timeout).await;
             }

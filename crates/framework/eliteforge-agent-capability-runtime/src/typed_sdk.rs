@@ -341,7 +341,14 @@ impl TypedBackend {
             Ok(())
         });
         for operation in [
-            "create", "load", "latest", "claim", "renew", "commit", "release",
+            "create",
+            "load",
+            "latest",
+            "latest_scope",
+            "claim",
+            "renew",
+            "commit",
+            "release",
         ] {
             let store = store.clone();
             let leases = leases.clone();
@@ -368,6 +375,15 @@ impl TypedBackend {
                         "latest" => encode(
                             store
                                 .latest(string(&params, "session_id")?)
+                                .await
+                                .map_err(state_fault)?,
+                        ),
+                        "latest_scope" => encode(
+                            store
+                                .latest_scope(
+                                    string(&params, "session_id")?,
+                                    string(&params, "scope")?,
+                                )
                                 .await
                                 .map_err(state_fault)?,
                         ),

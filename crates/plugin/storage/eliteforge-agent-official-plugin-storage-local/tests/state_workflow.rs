@@ -1236,6 +1236,13 @@ impl StateStore for CleanupFaultStore {
     async fn latest(&self, session: &str) -> Result<Option<Checkpoint>, StateError> {
         self.inner.latest(session).await
     }
+    async fn latest_scope(
+        &self,
+        session: &str,
+        scope: &str,
+    ) -> Result<Option<Checkpoint>, StateError> {
+        self.inner.latest_scope(session, scope).await
+    }
     async fn claim(
         &self,
         id: RunId,

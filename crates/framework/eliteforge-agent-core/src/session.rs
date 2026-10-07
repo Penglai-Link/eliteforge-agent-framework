@@ -24,14 +24,16 @@ pub struct SessionDeletionReport {
 #[async_trait]
 pub trait SessionStore: Send + Sync {
     /// Delete all persisted data owned by this session. Missing sessions return
-    /// false. Shared memory, catalogs and artifacts are outside this boundary.
+    /// false. Shared memory and catalogs retain their own lifecycle; owned artifacts
+    /// are cleaned when their final session reference is removed.
     /// Cleanup for this identity is atomic. Blank IDs are invalid and active
     /// leases return Busy. IDs match exactly, without trimming.
     async fn delete_session(&self, session_id: &str) -> Result<bool, StateError>;
 
     /// Attempt each distinct ID independently, continuing after every failure.
-    /// Successful deletions remain committed. Duplicates are attempted once;
-    /// empty input returns an empty report. No transaction spans the batch.
+    /// Outside an ambient transaction, successful deletions remain committed.
+    /// Inside one, writes join it and storage failures make it rollback-only.
+    /// Duplicates are attempted once; empty input returns an empty report.
     async fn delete_sessions(&self, session_ids: &[String]) -> SessionDeletionReport {
         let mut report = SessionDeletionReport::default();
         let mut seen = HashSet::new();

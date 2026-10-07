@@ -351,6 +351,13 @@ impl StateStore for FaultStore {
     async fn latest(&self, s: &str) -> Result<Option<Checkpoint>, StateError> {
         self.inner.latest(s).await
     }
+    async fn latest_scope(
+        &self,
+        session: &str,
+        scope: &str,
+    ) -> Result<Option<Checkpoint>, StateError> {
+        self.inner.latest_scope(session, scope).await
+    }
     async fn claim(
         &self,
         id: RunId,

@@ -13,6 +13,8 @@ bundled-native = []
 eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
 eliteforge-agent-context-contracts = { path = "../../../framework/eliteforge-agent-context-contracts" }
 async-trait.workspace = true
+futures.workspace = true
+tracing = "0.1"
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

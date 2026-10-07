@@ -455,6 +455,17 @@ impl StateStore for RemoteImplementation {
     async fn latest(&self, session_id: &str) -> Result<Option<Checkpoint>, StateError> {
         self.state("latest", json!({"session_id":session_id})).await
     }
+    async fn latest_scope(
+        &self,
+        session_id: &str,
+        scope: &str,
+    ) -> Result<Option<Checkpoint>, StateError> {
+        self.state(
+            "latest_scope",
+            json!({"session_id":session_id,"scope":scope}),
+        )
+        .await
+    }
     async fn claim(
         &self,
         run_id: RunId,

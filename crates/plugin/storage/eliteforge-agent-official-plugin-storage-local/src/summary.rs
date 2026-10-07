@@ -1,12 +1,10 @@
 //! Versioned, derived conversation summaries. Source transcripts remain authoritative.
+use crate::SqliteDatabase as Connection;
 use async_trait::async_trait;
 use eliteforge_agent_core::ContextError;
 use std::{path::Path, sync::Arc};
 use tokio::sync::Semaphore;
-use tokio_rusqlite::{
-    Connection,
-    rusqlite::{OptionalExtension, params},
-};
+use tokio_rusqlite::rusqlite::{OptionalExtension, params};
 
 pub use eliteforge_agent_context_contracts::{
     ConversationSummary, SummaryKey, SummaryStore, VersionedSummary,
@@ -55,14 +53,23 @@ impl SqliteSummaryStore {
     ) -> Result<Self, ContextError> {
         options.validate()?;
         let connection = Connection::open(path).await.map_err(sql_error)?;
+        Self::with_database(connection, options).await
+    }
+    pub async fn with_database(
+        connection: Connection,
+        options: SummaryStoreOptions,
+    ) -> Result<Self, ContextError> {
+        options.validate()?;
+
         connection.call(|connection| -> Result<(), ContextError> {
             connection.busy_timeout(std::time::Duration::from_secs(5)).map_err(sql_error)?;
             connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;").map_err(sql_error)?;
-            let transaction = connection.transaction_with_behavior(tokio_rusqlite::rusqlite::TransactionBehavior::Immediate).map_err(sql_error)?;
-            transaction.execute_batch("CREATE TABLE IF NOT EXISTS context_summary_meta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
-                INSERT OR IGNORE INTO context_summary_meta VALUES (1, 1);
-                CREATE TABLE IF NOT EXISTS context_summaries (key TEXT PRIMARY KEY, version TEXT NOT NULL, source_revision INTEGER NOT NULL, value TEXT NOT NULL);").map_err(sql_error)?;
-            let version: u32 = transaction.query_row("SELECT version FROM context_summary_meta WHERE id=1", [], |row| row.get(0)).map_err(sql_error)?;
+            let transaction = crate::database::begin(connection).map_err(sql_error)?;
+            transaction.execute_batch("CREATE TABLE IF NOT EXISTS ef_context_summary_meta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
+                INSERT OR IGNORE INTO ef_context_summary_meta VALUES (1, 1);
+                CREATE TABLE IF NOT EXISTS ef_context_summaries (key TEXT PRIMARY KEY, version TEXT NOT NULL, source_revision INTEGER NOT NULL, value TEXT NOT NULL);").map_err(sql_error)?;
+            crate::lifecycle::initialize(&transaction).map_err(|e|error(&e.to_string()))?;
+            let version: u32 = transaction.query_row("SELECT version FROM ef_context_summary_meta WHERE id=1", [], |row| row.get(0)).map_err(sql_error)?;
             if version != 1 { return Err(error("unsupported summary database version")); }
             transaction.commit().map_err(sql_error)
         }).await.map_err(worker_error)?;
@@ -74,11 +81,7 @@ impl SqliteSummaryStore {
     }
     pub async fn close(&self) -> Result<(), ContextError> {
         self.admission.close();
-        self.connection
-            .clone()
-            .close()
-            .await
-            .map_err(|_| error("summary database close failed"))
+        Ok(())
     }
     async fn execute<T: Send + 'static>(
         &self,
@@ -107,7 +110,7 @@ impl SummaryStore for SqliteSummaryStore {
         let key = encode_key(key)?;
         let max = self.options.max_record_bytes;
         let loaded = self.execute(move |connection| {
-            connection.query_row("SELECT version, length(CAST(value AS BLOB)), value FROM context_summaries WHERE key=?1", [key], |row| {
+            connection.query_row("SELECT version, length(CAST(value AS BLOB)), value FROM ef_context_summaries WHERE key=?1", [key], |row| {
                 let length: usize = row.get(1)?;
                 if length > max { return Err(tokio_rusqlite::rusqlite::Error::InvalidQuery); }
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(2)?))
@@ -128,6 +131,7 @@ impl SummaryStore for SqliteSummaryStore {
         expected: Option<&str>,
         value: &ConversationSummary,
     ) -> Result<bool, ContextError> {
+        let session_id = key.conversation.session_id.clone();
         let key = encode_key(key)?;
         let data = encode_value(value, self.options.max_record_bytes)?;
         let source_revision = i64::try_from(value.source_revision)
@@ -135,14 +139,15 @@ impl SummaryStore for SqliteSummaryStore {
         let expected = expected.map(str::to_owned);
         let max_records = self.options.max_records;
         self.execute(move |connection| {
-            let tx = connection.transaction_with_behavior(tokio_rusqlite::rusqlite::TransactionBehavior::Immediate).map_err(sql_error)?;
-            let current: Option<(String, i64)> = tx.query_row("SELECT version, source_revision FROM context_summaries WHERE key=?1", [&key], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(sql_error)?;
+            let tx = crate::database::begin(connection).map_err(sql_error)?;
+            crate::lifecycle::ensure_session(&tx,&session_id).map_err(|e|error(&e.to_string()))?;
+            let current: Option<(String, i64)> = tx.query_row("SELECT version, source_revision FROM ef_context_summaries WHERE key=?1", [&key], |row| Ok((row.get(0)?, row.get(1)?))).optional().map_err(sql_error)?;
             if current.as_ref().map(|v| &v.0) != expected.as_ref() || current.as_ref().is_some_and(|v| v.1 > source_revision) { return Ok(false); }
             if current.is_none() {
-                let count: usize = tx.query_row("SELECT count(*) FROM context_summaries", [], |row| row.get(0)).map_err(sql_error)?;
+                let count: usize = tx.query_row("SELECT count(*) FROM ef_context_summaries", [], |row| row.get(0)).map_err(sql_error)?;
                 if count >= max_records { return Err(error("summary store record limit reached")); }
             }
-            tx.execute("INSERT INTO context_summaries (key,version,source_revision,value) VALUES (?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET version=excluded.version, source_revision=excluded.source_revision, value=excluded.value", params![key, uuid::Uuid::new_v4().to_string(), source_revision, data]).map_err(sql_error)?;
+            tx.execute("INSERT INTO ef_context_summaries (key,version,source_revision,value) VALUES (?1,?2,?3,?4) ON CONFLICT(key) DO UPDATE SET version=excluded.version, source_revision=excluded.source_revision, value=excluded.value", params![key, uuid::Uuid::new_v4().to_string(), source_revision, data]).map_err(sql_error)?;
             tx.commit().map_err(sql_error)?;
             Ok(true)
         }).await
@@ -153,7 +158,7 @@ impl SummaryStore for SqliteSummaryStore {
         self.execute(move |connection| {
             Ok(connection
                 .execute(
-                    "DELETE FROM context_summaries WHERE key=?1 AND version=?2",
+                    "DELETE FROM ef_context_summaries WHERE key=?1 AND version=?2",
                     params![key, expected],
                 )
                 .map_err(sql_error)?

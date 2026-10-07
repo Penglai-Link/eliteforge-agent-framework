@@ -153,6 +153,9 @@ pub struct ContinuationJournalState {
 pub struct ContinuationLoop;
 #[async_trait]
 impl AgentLoop for ContinuationLoop {
+    fn execution_kind(&self) -> &str {
+        "CONTINUATION"
+    }
     fn requires_conversations(&self) -> bool {
         false
     }
@@ -188,7 +191,9 @@ impl AgentLoop for ContinuationLoop {
             .state
             .clone()
             .ok_or(AgentError::MissingService("StateStore"))?;
-        let previous = store.latest(&request.session_id).await?;
+        let previous = store
+            .latest_scope(&request.session_id, request.scope())
+            .await?;
         if previous.is_some() {
             return Err(AgentError::Run("this continuation identity was already admitted; inspect its journal rather than replay callbacks".into()));
         }
@@ -224,7 +229,8 @@ impl AgentLoop for ContinuationLoop {
             "framework.continuation",
             1,
             encode(&initial)?,
-        );
+        )
+        .with_execution_scope(request.scope());
         if let Some(previous) = &previous {
             checkpoint.transcript = previous.transcript.clone();
         }

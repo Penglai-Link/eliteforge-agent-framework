@@ -1,3 +1,4 @@
+use crate::SqliteDatabase as Connection;
 use async_trait::async_trait;
 use eliteforge_agent_core::*;
 use std::{
@@ -6,10 +7,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Semaphore;
-use tokio_rusqlite::{
-    Connection,
-    rusqlite::{self, OptionalExtension, params},
-};
+use tokio_rusqlite::rusqlite::{self, OptionalExtension, params};
 
 #[derive(Debug, Clone)]
 pub struct MemoryStoreOptions {
@@ -73,15 +71,23 @@ impl SqliteLongTermMemory {
     ) -> Result<Self, MemoryError> {
         options.validate()?;
         let connection = Connection::open(path).await.map_err(database_error)?;
+        Self::with_database(connection, options).await
+    }
+    pub async fn with_database(
+        connection: Connection,
+        options: MemoryStoreOptions,
+    ) -> Result<Self, MemoryError> {
+        options.validate()?;
+
         connection.call(|connection| -> Result<(), MemoryError> {
             connection.busy_timeout(std::time::Duration::from_secs(5)).map_err(database_error)?;
             connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;").map_err(database_error)?;
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(database_error)?;
-            tx.execute_batch("CREATE TABLE IF NOT EXISTS long_term_memory_meta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
-                INSERT OR IGNORE INTO long_term_memory_meta VALUES (1,1);
-                CREATE TABLE IF NOT EXISTS long_term_memories (namespace TEXT NOT NULL, id TEXT NOT NULL, version TEXT NOT NULL, content TEXT NOT NULL, updated INTEGER NOT NULL, expires INTEGER, value TEXT NOT NULL, PRIMARY KEY(namespace,id));
-                CREATE INDEX IF NOT EXISTS long_term_memory_lookup ON long_term_memories(namespace,updated DESC,id);").map_err(database_error)?;
-            let version: u32 = tx.query_row("SELECT version FROM long_term_memory_meta WHERE id=1", [], |r| r.get(0)).map_err(database_error)?;
+            let tx = crate::database::begin(connection).map_err(database_error)?;
+            tx.execute_batch("CREATE TABLE IF NOT EXISTS ef_long_term_memory_meta (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL);
+                INSERT OR IGNORE INTO ef_long_term_memory_meta VALUES (1,1);
+                CREATE TABLE IF NOT EXISTS ef_long_term_memories (namespace TEXT NOT NULL, id TEXT NOT NULL, version TEXT NOT NULL, content TEXT NOT NULL, updated INTEGER NOT NULL, expires INTEGER, value TEXT NOT NULL, PRIMARY KEY(namespace,id));
+                CREATE INDEX IF NOT EXISTS ef_long_term_memory_lookup ON ef_long_term_memories(namespace,updated DESC,id);").map_err(database_error)?;
+            let version: u32 = tx.query_row("SELECT version FROM ef_long_term_memory_meta WHERE id=1", [], |r| r.get(0)).map_err(database_error)?;
             if version != 1 { return Err(invalid("unsupported long-term memory format version")); }
             tx.commit().map_err(database_error)
         }).await.map_err(worker_error)?;
@@ -93,11 +99,7 @@ impl SqliteLongTermMemory {
     }
     pub async fn close(&self) -> Result<(), MemoryError> {
         self.admission.close();
-        self.connection
-            .clone()
-            .close()
-            .await
-            .map_err(|_| backend("memory database close failed"))
+        Ok(())
     }
     async fn execute<T: Send + 'static>(
         &self,
@@ -140,7 +142,7 @@ impl LongTermMemory for SqliteLongTermMemory {
         let query = query.clone();
         let max = self.options.max_entry_bytes;
         self.execute(move |connection| {
-            let mut sql = "SELECT length(CAST(value AS BLOB)), value FROM long_term_memories WHERE namespace=? AND (expires IS NULL OR expires>?)".to_owned();
+            let mut sql = "SELECT length(CAST(value AS BLOB)), value FROM ef_long_term_memories WHERE namespace=? AND (expires IS NULL OR expires>?)".to_owned();
             let mut values = vec![rusqlite::types::Value::Text(namespace), rusqlite::types::Value::Integer(now_ms()? as i64)];
             for term in query.text.split_whitespace() {
                 sql.push_str(" AND lower(content) LIKE ? ESCAPE '\\'");
@@ -178,16 +180,16 @@ impl LongTermMemory for SqliteLongTermMemory {
         self.execute(move |connection| {
             let now = now_ms()?;
             if !active(&entry, now) { return Err(invalid("cannot save already expired memory")); }
-            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(database_error)?;
-            tx.execute("DELETE FROM long_term_memories WHERE expires IS NOT NULL AND expires<=?", [now]).map_err(database_error)?;
+            let tx = crate::database::begin(connection).map_err(database_error)?;
+            tx.execute("DELETE FROM ef_long_term_memories WHERE expires IS NOT NULL AND expires<=?", [now]).map_err(database_error)?;
             let previous = load_entry(&tx, &entry.namespace, &entry.value.id, now, max)?;
             if previous.as_ref().map(|e| &e.version) != expected.as_ref() { return Err(MemoryError::Conflict); }
             if previous.is_none() {
-                let count: usize = tx.query_row("SELECT count(*) FROM long_term_memories", [], |r| r.get(0)).map_err(database_error)?;
+                let count: usize = tx.query_row("SELECT count(*) FROM ef_long_term_memories", [], |r| r.get(0)).map_err(database_error)?;
                 if count >= max_entries { return Err(MemoryError::Capacity); }
             }
             let value = encode_entry(&entry, max)?;
-            tx.execute("INSERT INTO long_term_memories(namespace,id,version,content,updated,expires,value) VALUES (?1,?2,?3,?4,?5,?6,?7)
+            tx.execute("INSERT INTO ef_long_term_memories(namespace,id,version,content,updated,expires,value) VALUES (?1,?2,?3,?4,?5,?6,?7)
                 ON CONFLICT(namespace,id) DO UPDATE SET version=excluded.version,content=excluded.content,updated=excluded.updated,expires=excluded.expires,value=excluded.value",
                 params![entry.namespace,entry.value.id,entry.version,entry.value.content,entry.updated_at_ms,entry.value.expires_at_ms,value]).map_err(database_error)?;
             tx.commit().map_err(database_error)?;
@@ -201,16 +203,14 @@ impl LongTermMemory for SqliteLongTermMemory {
         let expected = expected.to_owned();
         let max = self.options.max_entry_bytes;
         self.execute(move |connection| {
-            let tx = connection
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(database_error)?;
+            let tx = crate::database::begin(connection).map_err(database_error)?;
             let previous =
                 load_entry(&tx, &namespace, &id, now_ms()?, max)?.ok_or(MemoryError::NotFound)?;
             if previous.version != expected {
                 return Err(MemoryError::Conflict);
             }
             tx.execute(
-                "DELETE FROM long_term_memories WHERE namespace=?1 AND id=?2",
+                "DELETE FROM ef_long_term_memories WHERE namespace=?1 AND id=?2",
                 params![namespace, id],
             )
             .map_err(database_error)?;
@@ -226,7 +226,7 @@ fn load_entry(
     now: u64,
     max: usize,
 ) -> Result<Option<MemoryEntry>, MemoryError> {
-    connection.query_row("SELECT length(CAST(value AS BLOB)), value FROM long_term_memories WHERE namespace=?1 AND id=?2 AND (expires IS NULL OR expires>?3)", params![namespace,id,now], |row| {
+    connection.query_row("SELECT length(CAST(value AS BLOB)), value FROM ef_long_term_memories WHERE namespace=?1 AND id=?2 AND (expires IS NULL OR expires>?3)", params![namespace,id,now], |row| {
         let bytes: usize = row.get(0)?;
         if bytes > max { return Err(rusqlite::Error::InvalidQuery); }
         row.get::<_, String>(1)

@@ -212,7 +212,7 @@ fn exchange() -> Vec<Message> {
 #[tokio::test]
 async fn sqlite_conversation_roundtrips_identity_and_atomic_structured_batches() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("conversations.db");
+    let path = dir.path().join("ef_conversations.db");
     let options = SqliteConversationOptions {
         max_messages: 8,
         max_bytes: 4096,
@@ -272,7 +272,7 @@ async fn sqlite_conversation_roundtrips_identity_and_atomic_structured_batches()
 #[tokio::test]
 async fn conversation_renewal_keeps_fencing_identity_and_takeover_rejects_old_session() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("conversations.db");
+    let path = dir.path().join("ef_conversations.db");
     let options = SqliteConversationOptions {
         lease_duration: Duration::from_millis(300),
         ..Default::default()
@@ -287,7 +287,7 @@ async fn conversation_renewal_keeps_fencing_identity_and_takeover_rejects_old_se
     let owner: String = inspector
         .call(|connection| {
             connection.query_row(
-                "SELECT owner FROM conversations WHERE session='s'",
+                "SELECT owner FROM ef_conversations WHERE session='s'",
                 [],
                 |r| r.get(0),
             )
@@ -298,7 +298,7 @@ async fn conversation_renewal_keeps_fencing_identity_and_takeover_rejects_old_se
     let renewed: String = inspector
         .call(|connection| {
             connection.query_row(
-                "SELECT owner FROM conversations WHERE session='s'",
+                "SELECT owner FROM ef_conversations WHERE session='s'",
                 [],
                 |r| r.get(0),
             )
@@ -313,7 +313,7 @@ async fn conversation_renewal_keeps_fencing_identity_and_takeover_rejects_old_se
     inspector
         .call(|connection| {
             connection.execute(
-                "UPDATE conversations SET lease_until=0 WHERE session='s'",
+                "UPDATE ef_conversations SET lease_until=0 WHERE session='s'",
                 [],
             )
         })

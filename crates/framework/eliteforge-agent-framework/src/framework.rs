@@ -348,11 +348,26 @@ struct FrameworkInner {
     drained: Notify,
     done: Notify,
     cancellation: CancellationToken,
+    active_goals: Mutex<std::collections::HashSet<String>>,
 }
 /// Owns installed plugins and shared storage. Closing an Agent leaves these
 /// resources alive; closing the Framework drains every Agent before plugins.
 #[derive(Clone)]
 pub struct Framework(Arc<FrameworkInner>);
+pub(crate) struct GoalAdmission {
+    framework: Framework,
+    id: String,
+}
+impl Drop for GoalAdmission {
+    fn drop(&mut self) {
+        self.framework
+            .0
+            .active_goals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.id);
+    }
+}
 pub(crate) struct EnvironmentOperation {
     inner: Arc<FrameworkInner>,
     cancellation: CancellationToken,
@@ -387,6 +402,7 @@ impl Framework {
             drained: Notify::new(),
             done: Notify::new(),
             cancellation: CancellationToken::new(),
+            active_goals: Mutex::default(),
         }))
     }
     pub(crate) fn capability_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
@@ -468,6 +484,72 @@ impl Framework {
         )
         .catch_unwind();
         tokio::select! { biased; _ = admission.cancellation.cancelled() => Err(AgentError::Closed), result = execution => result.unwrap_or_else(|_| Err(AgentError::Run("plugin operation panicked".into()))) }
+    }
+    pub fn sessions(&self) -> Result<SessionService, AgentError> {
+        let registry = self.registry()?;
+        Ok(SessionService {
+            store: registry
+                .get::<SessionLifecycleStoreService>()
+                .ok_or(AgentError::MissingService("SessionLifecycleStore"))?
+                .0
+                .clone(),
+            deletion: registry
+                .get::<SessionStoreService>()
+                .ok_or(AgentError::MissingService("SessionStore"))?
+                .0
+                .clone(),
+        })
+    }
+    pub fn goals(&self) -> Result<GoalService, AgentError> {
+        Ok(GoalService(self.sessions()?.store))
+    }
+    pub(crate) fn admit_goal(&self, id: &str) -> Result<GoalAdmission, AgentError> {
+        if self.is_closed() {
+            return Err(AgentError::Closed);
+        }
+        if !self
+            .0
+            .active_goals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_owned())
+        {
+            return Err(AgentError::Run(
+                "goal already has an active coordinator".into(),
+            ));
+        }
+        Ok(GoalAdmission {
+            framework: self.clone(),
+            id: id.into(),
+        })
+    }
+    pub fn runs(&self) -> Result<RunQueryService, AgentError> {
+        Ok(RunQueryService(self.sessions()?.store))
+    }
+    pub fn events(&self) -> Result<EventQueryService, AgentError> {
+        Ok(EventQueryService(self.sessions()?.store))
+    }
+    /// Framework and host repository writes automatically join this transaction.
+    pub async fn transaction<T: Send>(
+        &self,
+        operation: impl std::future::Future<Output = Result<T, StateError>> + Send,
+    ) -> Result<T, AgentError> {
+        let admission = self.admission()?;
+        let manager = self
+            .registry()?
+            .get::<TransactionManagerService>()
+            .ok_or(AgentError::MissingService("TransactionManager"))?;
+        let mut output = None;
+        let work = Box::pin(async {
+            output = Some(operation.await?);
+            Ok(())
+        });
+        tokio::select! {
+            biased;
+            _ = admission.cancellation.cancelled() => return Err(AgentError::Closed),
+            result = manager.0.transaction(work) => result?,
+        }
+        output.ok_or_else(|| AgentError::Run("transaction returned without a value".into()))
     }
     pub fn is_closed(&self) -> bool {
         self.0.closed.load(Ordering::Acquire)

@@ -34,6 +34,9 @@ impl ModelExecutionLoop {
 
 #[async_trait]
 impl AgentLoop for ModelExecutionLoop {
+    fn execution_kind(&self) -> &str {
+        "WORKFLOW"
+    }
     fn supports_resume(&self) -> bool {
         true
     }
@@ -63,7 +66,18 @@ impl AgentLoop for ModelExecutionLoop {
             .clone()
             .ok_or(AgentError::MissingService("StateStore"))?;
         let mut conversation = if self.conversation {
-            Some(services.conversations.open(&request.session_id).await?)
+            Some(
+                services
+                    .conversations
+                    .open_branch(&ConversationKey {
+                        session_id: request.session_id.clone(),
+                        branch: request
+                            .conversation_branch
+                            .clone()
+                            .unwrap_or_else(|| "main".into()),
+                    })
+                    .await?,
+            )
         } else {
             None
         };
@@ -75,6 +89,7 @@ impl AgentLoop for ModelExecutionLoop {
         let mut checkpoint = if let Some(resume) = &request.resume {
             let checkpoint = store.load(resume.run_id).await?;
             if checkpoint.session_id != request.session_id
+                || checkpoint.execution_scope != request.scope()
                 || checkpoint.loop_id != self.definition.id
                 || checkpoint.loop_version != self.definition.version
             {
@@ -84,7 +99,9 @@ impl AgentLoop for ModelExecutionLoop {
             }
             checkpoint
         } else {
-            let previous = store.latest(&request.session_id).await?;
+            let previous = store
+                .latest_scope(&request.session_id, request.scope())
+                .await?;
             let mut saved_request = request.clone();
             saved_request.resume = None;
             saved_request.extensions = Extensions::default();
@@ -141,7 +158,8 @@ impl AgentLoop for ModelExecutionLoop {
                 &self.definition.id,
                 self.definition.version,
                 serde_json::to_value(state).map_err(state_encoding)?,
-            );
+            )
+            .with_execution_scope(request.scope());
             if let Some(snapshot) = initial_snapshot {
                 checkpoint.transcript = snapshot.messages;
             } else if let Some(previous) = &previous {
@@ -257,7 +275,7 @@ impl AgentLoop for ModelExecutionLoop {
             // lease. Never execute its successor without validating it again.
             checkpoint.validate()?;
             if checkpoint.run_id != context.run_id
-                || checkpoint.session_id != request.session_id
+                || checkpoint.session_id != request.session_id || checkpoint.execution_scope != request.scope()
                 || checkpoint.loop_id != self.definition.id
                 || checkpoint.loop_version != self.definition.version
                 || state.definition != self.definition

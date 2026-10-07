@@ -50,6 +50,7 @@ impl DagWorkflowLoop {
         }
         if cp.run_id != context.run_id
             || cp.session_id != request.session_id
+            || cp.execution_scope != request.scope()
             || cp.loop_id != self.definition.id
             || cp.loop_version != self.definition.version
             || state.definition != self.definition
@@ -95,6 +96,9 @@ impl DagWorkflowLoop {
 
 #[async_trait]
 impl AgentLoop for DagWorkflowLoop {
+    fn execution_kind(&self) -> &str {
+        "WORKFLOW"
+    }
     fn requires_model(&self) -> bool {
         self.definition
             .nodes
@@ -172,7 +176,9 @@ impl AgentLoop for DagWorkflowLoop {
         let cp = if let Some(resume) = &request.resume {
             store.load(resume.run_id).await?
         } else {
-            let previous = store.latest(&request.session_id).await?;
+            let previous = store
+                .latest_scope(&request.session_id, request.scope())
+                .await?;
             let mut saved = request.clone();
             saved.resume = None;
             saved.extensions = Extensions::default();
@@ -198,7 +204,8 @@ impl AgentLoop for DagWorkflowLoop {
                 &self.definition.id,
                 self.definition.version,
                 encode(&state)?,
-            );
+            )
+            .with_execution_scope(request.scope());
             if let Some(previous) = &previous {
                 cp.transcript = previous.transcript.clone();
             }
@@ -771,7 +778,9 @@ impl StateStore for EmbeddedWorkflowStore {
                 if n.checkpoint.is_some() {
                     return Err(StateError::Conflict.into());
                 }
-                if checkpoint.run_id != parent.run_id || checkpoint.session_id != parent.session_id
+                if checkpoint.run_id != parent.run_id
+                    || checkpoint.session_id != parent.session_id
+                    || checkpoint.execution_scope != parent.execution_scope
                 {
                     return Err(invalid("embedded checkpoint identity mismatch"));
                 }
@@ -806,6 +815,9 @@ impl StateStore for EmbeddedWorkflowStore {
         .map_err(Self::state_error)
     }
     async fn latest(&self, _: &str) -> Result<Option<Checkpoint>, StateError> {
+        Ok(None)
+    }
+    async fn latest_scope(&self, _: &str, _: &str) -> Result<Option<Checkpoint>, StateError> {
         Ok(None)
     }
     async fn claim(

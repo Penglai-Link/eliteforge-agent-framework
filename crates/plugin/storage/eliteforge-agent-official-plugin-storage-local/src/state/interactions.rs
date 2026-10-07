@@ -26,7 +26,7 @@ fn read_record(
     max: usize,
 ) -> Result<InteractionRecord, StateError> {
     let encoded: String = connection.query_row(
-        "SELECT record FROM agent_interactions WHERE id=?1 AND session_id=?2 AND length(CAST(record AS BLOB))<=?3",
+        "SELECT record FROM ef_interactions WHERE id=?1 AND session_id=?2 AND length(CAST(record AS BLOB))<=?3",
         params![id.to_string(), session, max], |row| row.get(0),
     ).optional().map_err(database_error)?.ok_or(StateError::NotFound)?;
     serde_json::from_str(&encoded)
@@ -69,8 +69,8 @@ impl InteractionStore for SqliteStateStore {
         let encoded = encode_record(&record, self.max_checkpoint_bytes)?;
         let max = self.max_checkpoint_bytes;
         self.execute(move |connection| {
-            let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(database_error)?;
-            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM agent_interactions WHERE id=?1)", [record.request.id.to_string()], |r| r.get(0)).map_err(database_error)?;
+            let tx = crate::database::begin(connection).map_err(database_error)?;
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ef_interactions WHERE id=?1)", [record.request.id.to_string()], |r| r.get(0)).map_err(database_error)?;
             if exists {
                 let previous = read_record(&tx, &record.session_id, record.request.id, max)?;
                 if previous.run_id != record.run_id || previous.node_invocation_id != record.node_invocation_id
@@ -78,7 +78,7 @@ impl InteractionStore for SqliteStateStore {
                     return Err(StateError::Conflict);
                 }
             } else {
-                tx.execute("INSERT INTO agent_interactions(id,session_id,run_id,answered,record) VALUES (?1,?2,?3,0,?4)",
+                tx.execute("INSERT INTO ef_interactions(id,session_id,run_id,answered,record) VALUES (?1,?2,?3,0,?4)",
                     params![record.request.id.to_string(), record.session_id, record.run_id.to_string(), encoded]).map_err(database_error)?;
             }
             tx.commit().map_err(database_error)
@@ -94,7 +94,7 @@ impl InteractionStore for SqliteStateStore {
         let session = session.to_owned();
         let max = self.max_checkpoint_bytes;
         self.execute(move |c| {
-            let mut query = c.prepare("SELECT record FROM agent_interactions WHERE session_id=?1 AND answered=0 ORDER BY rowid LIMIT 1025").map_err(database_error)?;
+            let mut query = c.prepare("SELECT record FROM ef_interactions WHERE session_id=?1 AND answered=0 ORDER BY rowid LIMIT 1025").map_err(database_error)?;
             let rows = query.query_map([session], |r| r.get::<_, String>(0)).map_err(database_error)?;
             let mut result = Vec::new(); let mut bytes = 0usize;
             for row in rows {
@@ -114,20 +114,37 @@ impl InteractionStore for SqliteStateStore {
         let response = response.clone();
         let max = self.max_checkpoint_bytes;
         // Validation and the pending -> answered transition share one write transaction.
-        Ok(self.execute(move |c| {
-            let tx = c.transaction_with_behavior(TransactionBehavior::Immediate).map_err(database_error)?;
-            let mut record = read_record(&tx, &session, response.interaction_id, max)?;
-            if let Some(previous) = &record.response {
-                return if previous == &response { Ok(record) } else { Err(StateError::Conflict) };
-            }
-            let now = db_now(&tx)?;
-            record.request.validate_response(&response, now).map_err(|_| StateError::Invalid("answer does not match the pending request or it has expired".into()))?;
-            record.response = Some(response);
-            record.answered_at_unix_ms = Some(now);
-            let encoded = encode_record(&record, max)?;
-            tx.execute("UPDATE agent_interactions SET answered=1, record=?1 WHERE id=?2 AND answered=0", params![encoded, record.request.id.to_string()]).map_err(database_error)?;
-            tx.commit().map_err(database_error)?;
-            Ok(record)
-        }).await?)
+        Ok(self
+            .execute(move |c| {
+                let tx = crate::database::begin(c).map_err(database_error)?;
+                let mut record = read_record(&tx, &session, response.interaction_id, max)?;
+                if let Some(previous) = &record.response {
+                    return if previous == &response {
+                        Ok(record)
+                    } else {
+                        Err(StateError::Conflict)
+                    };
+                }
+                let now = db_now(&tx)?;
+                record
+                    .request
+                    .validate_response(&response, now)
+                    .map_err(|_| {
+                        StateError::Invalid(
+                            "answer does not match the pending request or it has expired".into(),
+                        )
+                    })?;
+                record.response = Some(response);
+                record.answered_at_unix_ms = Some(now);
+                let encoded = encode_record(&record, max)?;
+                tx.execute(
+                    "UPDATE ef_interactions SET answered=1, record=?1 WHERE id=?2 AND answered=0",
+                    params![encoded, record.request.id.to_string()],
+                )
+                .map_err(database_error)?;
+                tx.commit().map_err(database_error)?;
+                Ok(record)
+            })
+            .await?)
     }
 }

@@ -5,6 +5,9 @@ use std::{collections::HashMap, sync::Arc};
 pub struct ReactAgentLoop;
 #[async_trait]
 impl AgentLoop for ReactAgentLoop {
+    fn execution_kind(&self) -> &str {
+        "REACT"
+    }
     fn requires_model(&self) -> bool {
         true
     }
