@@ -117,16 +117,22 @@ impl ModelCompressor {
         let context = input.run;
         validate_messages(messages).map_err(ContextError::from)?;
         context.check_cancelled()?;
-        if (messages.len() <= budget.max_messages
-            && context_tokens(messages, input.model, input.estimator).await? <= budget.max_tokens)
+        let fits = messages.len() <= budget.max_messages
+            && context_tokens(messages, input.model, input.estimator).await? <= budget.max_tokens;
+        let newest = messages.iter().rposition(|m| m.role == Role::User);
+        let has_completed_turn =
+            newest.is_some_and(|index| messages[..index].iter().any(|m| m.role == Role::User));
+        // Proactive pressure cannot shrink the protected current turn. Keep a
+        // fitting request when there is no completed turn to summarize; actual
+        // overflow and configured hard limits still require reduction or fail.
+        if fits
             && input.overflow_recoveries == 0
+            && (input.compression.is_none() || !has_completed_turn)
         {
             return Ok(messages.clone());
         }
-        let newest = messages
-            .iter()
-            .rposition(|m| m.role == Role::User)
-            .ok_or_else(|| budget_error("history has no removable completed user turn"))?;
+        let newest =
+            newest.ok_or_else(|| budget_error("history has no removable completed user turn"))?;
         let mut preserved: Vec<Message> = messages[..newest]
             .iter()
             .filter(|m| matches!(m.role, Role::System | Role::Developer))
@@ -148,11 +154,15 @@ impl ModelCompressor {
                 "trusted instructions and newest complete turn leave no summary capacity",
             ));
         }
-        let summary_bytes = self
-            .options
-            .max_summary_bytes
-            .min(budget.max_tokens - reserved)
-            / input.overflow_recoveries.saturating_add(1);
+        let summary_bytes = self.options.max_summary_bytes.min(
+            input
+                .compression
+                .map_or(budget.max_tokens, |d| {
+                    d.target_tokens.min(budget.max_tokens)
+                })
+                .saturating_sub(reserved)
+                .max(1),
+        ) / input.overflow_recoveries.saturating_add(1);
         if summary_bytes == 0 {
             return Err(budget_error("no summary capacity remains"));
         }
@@ -170,7 +180,7 @@ impl ModelCompressor {
                 block_id: input.block.id.clone(),
                 policy_version: self.policy_version.clone(),
                 configuration_digest: fingerprint(
-                    &json!({"algorithm": "model-compressor-v2", "policy": self.policy_version, "summary_model": self.model, "target_model": input.model, "options": self.options, "tokens": budget.max_tokens, "messages": budget.max_messages, "overflow_recoveries": input.overflow_recoveries}),
+                    &json!({"algorithm": "model-compressor-v2", "policy": self.policy_version, "summary_model": self.model, "target_model": input.model, "options": self.options, "tokens": budget.max_tokens, "messages": budget.max_messages, "overflow_recoveries": input.overflow_recoveries, "compression": input.compression}),
                 )?,
             })
         } else {
@@ -202,12 +212,11 @@ impl ModelCompressor {
                 "no historical conversation data can be summarized",
             ));
         }
-        let descriptor = input.models.catalog().get(&self.model).ok_or_else(|| {
+        let catalog = input.models.catalog_for_run(input.run);
+        let descriptor = catalog.get(&self.model).ok_or_else(|| {
             ContextError::Other("summary model is absent from the model catalog".into())
         })?;
-        let estimator = input
-            .models
-            .catalog()
+        let estimator = catalog
             .token_estimator(&self.model)
             .expect("validated summary model");
         let mut summary_limits = input.limits.clone();

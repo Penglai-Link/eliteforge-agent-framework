@@ -131,6 +131,28 @@ impl SqliteConversationStore {
 }
 #[async_trait]
 impl ConversationStore for SqliteConversationStore {
+    async fn history(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ConversationSnapshot>, ConversationError> {
+        let session = session_id.to_owned();
+        let options = self.options.clone();
+        self.execute(move |connection| {
+            let mut query = connection.prepare("SELECT branch,generation,revision,length(CAST(messages AS BLOB)),messages FROM ef_conversations WHERE session=?1 ORDER BY branch").map_err(db_error)?;
+            let rows = query.query_map([&session], |row| {
+                let revision:u64=row.get(2)?; let size:usize=row.get(3)?;
+                if revision>options.max_messages as u64 || size>options.max_bytes { return Err(rusqlite::Error::InvalidQuery); }
+                Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?,revision,row.get::<_,String>(4)?))
+            }).map_err(db_error)?.collect::<rusqlite::Result<Vec<_>>>().map_err(db_error)?;
+            rows.into_iter().map(|(branch,generation,revision,data)| {
+                let messages:Vec<Message>=serde_json::from_str(&data).map_err(|_|invalid("persisted conversation is corrupt"))?;
+                if generation.is_empty() || messages.len() as u64!=revision {return Err(invalid("persisted conversation version mismatch"));}
+                validate_messages(&messages)?;
+                Ok(ConversationSnapshot::new(ConversationKey::new(&session).branch(branch),generation,messages))
+            }).collect()
+        }).await
+    }
+
     async fn open(
         &self,
         session_id: &str,

@@ -1336,7 +1336,7 @@ impl AgentGeneration {
                 request
                     .extensions
                     .get::<ChildRunIdentity>()
-                    .map_or_else(RunId::new_v4, |id| id.0)
+                    .map_or_else(|| request.run_id.unwrap_or_else(RunId::new_v4), |id| id.0)
             },
             |resume| resume.run_id,
         );
@@ -1689,7 +1689,7 @@ impl AgentGeneration {
             ChildAdmission::reserve(parent, request.limits.max_total_tokens)?;
         request.limits.max_total_tokens = allowance;
         parent.persist_budget().await?;
-        let child_run_id = RunId::new_v4();
+        let child_run_id = request.run_id.unwrap_or_else(RunId::new_v4);
         request.extensions.insert(ChildRunIdentity(child_run_id));
         if let Some(journal) = parent
             .extensions

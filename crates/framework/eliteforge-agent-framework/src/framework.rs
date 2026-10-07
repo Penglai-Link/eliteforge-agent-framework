@@ -24,6 +24,8 @@ pub struct AgentSelection {
     pub context_budget: Option<String>,
     pub context_reducer: Option<String>,
     pub tool_providers: Option<Vec<String>>,
+    /// Selected tool authority policies; empty for loops that never invoke tools.
+    pub tool_policies: Option<Vec<String>>,
     /// Optional tool-ID restriction within the selected providers.
     pub tools: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
@@ -88,6 +90,9 @@ impl AgentSelection {
         }
         if let Some(ids) = &self.tool_providers {
             registry.bind_many::<ToolProviderService>(ids)?;
+        }
+        if let Some(ids) = &self.tool_policies {
+            registry.bind_many::<ToolPolicyService>(ids)?;
         }
         if let Some(ids) = &self.outputs {
             registry.bind_many::<RunOutputService>(ids)?;

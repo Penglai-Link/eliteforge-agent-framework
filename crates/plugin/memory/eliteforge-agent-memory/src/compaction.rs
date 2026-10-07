@@ -122,6 +122,9 @@ impl ChatExecutor for UsageObserver<'_> {
     fn catalog_snapshot(&self) -> Arc<ModelCatalog> {
         self.inner.catalog_snapshot()
     }
+    fn catalog_for_run(&self, run: &RunContext) -> Arc<ModelCatalog> {
+        self.inner.catalog_for_run(run)
+    }
     async fn invoke(
         &self,
         call: ModelCall<'_>,
@@ -153,11 +156,16 @@ pub struct MemoryCompactor {
     model: ModelRef,
     compressor: ModelCompressor,
     max_summary_bytes: usize,
+    configuration_digest: String,
 }
 impl MemoryCompactor {
     pub fn new(model: ModelRef, options: CompressionOptions) -> Result<Self, ContextError> {
+        use sha2::{Digest, Sha256};
+        let configuration = serde_json::to_vec(&(&model, &options))
+            .map_err(|e| ContextError::Other(e.to_string()))?;
         Ok(Self {
             model: model.clone(),
+            configuration_digest: format!("{:x}", Sha256::digest(configuration)),
             max_summary_bytes: options.max_summary_bytes,
             compressor: ModelCompressor::new(model, options)?,
         })
@@ -228,6 +236,50 @@ impl MemoryCompactor {
         })
     }
 
+    /// Build a summary of a complete immutable native snapshot. The caller commits
+    /// this draft only while the source generation and revision still match.
+    pub async fn summarize_snapshot(
+        &self,
+        snapshot: &ConversationSnapshot,
+        policy_version: &str,
+        run: &RunContext,
+        models: &dyn ChatExecutor,
+        limits: &RunLimits,
+    ) -> Result<(SummaryKey, ConversationSummary, MemoryCompactionResult), AgentError> {
+        use sha2::{Digest, Sha256};
+        let source = serde_json::to_vec(&snapshot.messages)
+            .map_err(|e| ContextError::Other(e.to_string()))?;
+        let records = snapshot
+            .messages
+            .iter()
+            .map(|message| {
+                let mut semantic = message.clone();
+                semantic.model_context = None;
+                serde_json::to_string(&semantic).map_err(|e| ContextError::Other(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = self
+            .compact_history_with_usage(&records, None, run, models, limits)
+            .await?;
+        let configuration = serde_json::to_vec(&(&self.configuration_digest, policy_version))
+            .map_err(|e| ContextError::Other(e.to_string()))?;
+        let key = SummaryKey {
+            conversation: snapshot.key.clone(),
+            generation: snapshot.generation.clone(),
+            block_id: "session-summary".into(),
+            policy_version: policy_version.into(),
+            configuration_digest: format!("{:x}", Sha256::digest(configuration)),
+        };
+        let value = ConversationSummary {
+            format_version: 1,
+            source_revision: snapshot.revision,
+            covered_messages: snapshot.messages.len() as u64,
+            source_digest: format!("{:x}", Sha256::digest(source)),
+            summary: result.summary.clone(),
+        };
+        Ok((key, value, result))
+    }
+
     /// Compact a data provider without treating its last record as a protected
     /// live user turn. Existing SummaryStore identity/CAS and the shared model
     /// invoker remain authoritative; no provider or compressor is duplicated.
@@ -267,14 +319,9 @@ impl MemoryCompactor {
         records.push(Message::user(
             "Continue after the historical memory boundary.",
         ));
-        let key = serde_json::json!([
-            revision.scope.namespace(),
-            revision.scope.session(),
-            input.block.id
-        ])
-        .to_string();
         let mut snapshot = ConversationSnapshot::new(
-            ConversationKey::new(key),
+            ConversationKey::new(revision.scope.session())
+                .branch(format!("memory/{}", input.block.id)),
             &revision.generation,
             records.clone(),
         );
@@ -403,12 +450,10 @@ impl MemoryCompactor {
             trust: ContextTrust::Data,
             source_version: Some(snapshot.revision.to_string()),
         };
-        let estimator = models
-            .catalog()
-            .token_estimator(&self.model)
-            .ok_or_else(|| {
-                ContextError::Other("memory summary model is absent from catalog".into())
-            })?;
+        let catalog = models.catalog_for_run(run);
+        let estimator = catalog.token_estimator(&self.model).ok_or_else(|| {
+            ContextError::Other("memory summary model is absent from catalog".into())
+        })?;
         let sentinel_tokens = estimator
             .message(&self.model, block.messages.last().expect("sentinel"))
             .await?;

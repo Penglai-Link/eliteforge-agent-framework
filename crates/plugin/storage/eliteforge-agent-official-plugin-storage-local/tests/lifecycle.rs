@@ -684,6 +684,36 @@ async fn cancellation_rolls_back_and_unrelated_tasks_cannot_join() {
 }
 
 #[tokio::test]
+async fn cancelled_transaction_releases_connection_without_runtime_cleanup() {
+    let f = Fixture::new().await;
+    let database = f.database.clone();
+    let operation = database.transaction(async {
+        database
+            .call(|c| c.execute("INSERT INTO tron_links VALUES ('cancel')", []))
+            .await
+            .map_err(|_| StateError::Conflict)?;
+        std::future::pending::<Result<(), StateError>>().await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), operation)
+            .await
+            .is_err()
+    );
+    // A synchronous caller on a current-thread runtime cannot drive tokio::spawn.
+    // Rollback must have already been submitted directly to the SQLite worker.
+    let count = f
+        .database
+        .call_blocking(|c| {
+            c.query_row("SELECT count(*) FROM tron_links", [], |r| {
+                r.get::<_, i64>(0)
+            })
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+    f.framework.close().await;
+}
+
+#[tokio::test]
 async fn dropped_sql_awaiter_cannot_hide_a_late_failure_from_commit() {
     let f = Fixture::new().await;
     let finished = Arc::new(Notify::new());
@@ -988,5 +1018,178 @@ async fn expired_child_recovery_pauses_owner_goal_without_replaying() {
         Err(StateError::NotFound)
     ));
     assert_eq!(f.count("ef_runs").await, 0);
+    f.framework.close().await;
+}
+
+#[tokio::test]
+async fn archived_history_read_does_not_create_or_touch_conversations() {
+    let f = Fixture::new().await;
+    let session = f.session().await;
+    let agent = f
+        .framework
+        .agent(AgentSelection {
+            agent_loop: Some("react".into()),
+            ..Default::default()
+        })
+        .build()
+        .await
+        .unwrap();
+    agent
+        .run(RunRequest::new(&session.id, "preserve this history"))
+        .await
+        .unwrap();
+    f.framework
+        .sessions()
+        .unwrap()
+        .archive(&session.id)
+        .await
+        .unwrap();
+    let conversations = f
+        .framework
+        .services()
+        .unwrap()
+        .get::<ConversationStoreService>()
+        .unwrap()
+        .0
+        .clone();
+    let before = conversations.history(&session.id).await.unwrap();
+    let record = f
+        .framework
+        .sessions()
+        .unwrap()
+        .get(&session.id)
+        .await
+        .unwrap();
+    let again = conversations.history(&session.id).await.unwrap();
+    assert_eq!(
+        serde_json::to_value(&before).unwrap(),
+        serde_json::to_value(&again).unwrap()
+    );
+    assert_eq!(before[0].messages.len(), 2);
+    assert_eq!(
+        f.framework
+            .sessions()
+            .unwrap()
+            .get(&session.id)
+            .await
+            .unwrap()
+            .revision,
+        record.revision
+    );
+    let count = f.count("ef_conversations").await;
+    assert!(
+        conversations
+            .history("missing-session")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(f.count("ef_conversations").await, count);
+    f.framework.close().await;
+}
+#[tokio::test]
+async fn stable_event_identity_is_idempotent_and_rejects_different_payload() {
+    let f = Fixture::new().await;
+    let session = f.session().await;
+    let store = f.framework.sessions().unwrap().store;
+    let event = SessionEvent::new(&session.id, "tron.presentation", json!({"text":"same"}));
+    let first = store.append_event(event.clone()).await.unwrap();
+    let repeated = store.append_event(event.clone()).await.unwrap();
+    assert_eq!(first.sequence, repeated.sequence);
+    let mut collision = event;
+    collision.payload = json!({"text":"different"});
+    assert!(matches!(
+        store.append_event(collision).await,
+        Err(StateError::Conflict)
+    ));
+    f.framework.close().await;
+}
+#[tokio::test]
+async fn terminal_goal_can_be_cleared_without_resuming_execution() {
+    let f = Fixture::new().await;
+    let session = f.session().await;
+    let goals = f.framework.goals().unwrap();
+    let goal = goals
+        .set(GoalRecord::new(&session.id, "cancelled objective"))
+        .await
+        .unwrap();
+    let cancelled = goals
+        .transition(&goal.id, goal.revision, GoalStatus::Cancelled, None)
+        .await
+        .unwrap();
+    assert!(
+        goals
+            .transition(&goal.id, cancelled.revision, GoalStatus::Active, None)
+            .await
+            .is_err()
+    );
+    let cleared = goals
+        .transition(&goal.id, cancelled.revision, GoalStatus::Cleared, None)
+        .await
+        .unwrap();
+    assert_eq!(cleared.status, GoalStatus::Cleared);
+    assert!(goals.active(&session.id).await.unwrap().is_none());
+    f.framework.close().await;
+}
+
+#[tokio::test]
+async fn repeated_synchronous_sql_does_not_exhaust_tokio_task_budget() {
+    let f = Fixture::new().await;
+    for i in 0..512 {
+        f.database
+            .call_blocking(move |c| {
+                c.execute("INSERT INTO tron_links VALUES (?1)", [i.to_string()])
+            })
+            .unwrap();
+    }
+    assert_eq!(f.count("tron_links").await, 512);
+    f.framework.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn synchronous_waiters_do_not_starve_the_native_transaction_runtime() {
+    let f = Fixture::new().await;
+    let database = f.database.clone();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let (release, resume) = tokio::sync::oneshot::channel();
+    let transaction = tokio::spawn(async move {
+        database
+            .transaction(async {
+                ready.send(()).unwrap();
+                resume.await.unwrap();
+                database
+                    .call(|c| c.execute("INSERT INTO tron_links VALUES ('native')", []))
+                    .await
+                    .map_err(|e| StateError::Backend(e.to_string()))?;
+                Ok(())
+            })
+            .await
+    });
+    waiting.await.unwrap();
+    let waiters = (0..2)
+        .map(|index| {
+            let database = f.database.clone();
+            tokio::spawn(async move {
+                database
+                    .call_blocking(move |c| {
+                        c.execute("INSERT INTO tron_links VALUES (?1)", [index.to_string()])
+                    })
+                    .unwrap();
+            })
+        })
+        .collect::<Vec<_>>();
+    tokio::spawn(async move {
+        tokio::task::yield_now().await;
+        release.send(()).unwrap();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        transaction.await.unwrap().unwrap();
+        for waiter in waiters {
+            waiter.await.unwrap();
+        }
+    })
+    .await
+    .expect("synchronous SQL must allow the native transaction task to resume");
+    assert_eq!(f.count("tron_links").await, 3);
     f.framework.close().await;
 }

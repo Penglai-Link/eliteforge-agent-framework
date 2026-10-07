@@ -127,6 +127,26 @@ fn insert_session(c: &rusqlite::Connection, record: &SessionRecord) -> Result<()
 }
 fn append(c: &rusqlite::Connection, mut event: SessionEvent) -> Result<SessionEvent, StateError> {
     require_session(c, &event.session_id, false)?;
+    let existing: Option<String> = c
+        .query_row(
+            "SELECT record FROM ef_events WHERE id=?1",
+            [&event.id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(sql)?;
+    if let Some(existing) = existing {
+        let prior: SessionEvent = decode(existing)?;
+        if prior.session_id != event.session_id
+            || prior.run_id != event.run_id
+            || prior.goal_id != event.goal_id
+            || prior.kind != event.kind
+            || prior.payload != event.payload
+        {
+            return Err(StateError::Conflict);
+        }
+        return Ok(prior);
+    }
     event.sequence = c
         .query_row(
             "SELECT COALESCE(max(sequence),0)+1 FROM ef_events WHERE session_id=?1",
@@ -375,7 +395,9 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
             if prior.revision != expected
                 || record.revision != expected
                 || prior.session_id != record.session_id
-                || !prior.status.is_open()
+                || (!prior.status.is_open()
+                    && !(record.status == GoalStatus::Cleared
+                        && event.kind == "GOAL_STATE_CHANGED"))
                 || event.session_id != record.session_id
                 || event.goal_id.as_deref() != Some(&record.id)
             {

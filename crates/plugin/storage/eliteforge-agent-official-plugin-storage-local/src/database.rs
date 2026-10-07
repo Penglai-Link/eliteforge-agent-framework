@@ -82,6 +82,31 @@ impl SqliteDatabase {
             .await
     }
 
+    /// Synchronous host repositories execute on the same SQLite worker. The
+    /// calling task's REQUIRED transaction binding is captured before blocking.
+    /// Use from a blocking executor, or for short repository calls; never wait
+    /// on unrelated application work while retaining a repository lock.
+    pub fn call_blocking<F, T, E>(&self, operation: F) -> Result<T, tokio_rusqlite::Error<E>>
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        // Synchronous callers cannot yield back to Tokio to replenish its task
+        // budget. Keep the current task-local transaction while polling without
+        // cooperative scheduling; the SQL still executes on the SQLite worker.
+        let call = || futures::executor::block_on(tokio::task::unconstrained(self.call(operation)));
+        if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
+            handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        }) {
+            // Free the runtime worker while waiting for a native transaction.
+            // The closure stays on this thread and retains its task-local binding.
+            tokio::task::block_in_place(call)
+        } else {
+            call()
+        }
+    }
+
     pub async fn transaction<T: Send>(
         &self,
         operation: impl Future<Output = Result<T, StateError>> + Send,
@@ -186,22 +211,21 @@ struct TransactionGuard {
 impl Drop for TransactionGuard {
     fn drop(&mut self) {
         if let Some(gate) = self.gate.take() {
-            let database = self.database.clone();
-            // Rollback is queued behind any in-flight SQL, retaining exclusivity.
-            tokio::spawn(async move {
-                let _ = database
-                    .0
-                    .connection
-                    .call(|c| -> rusqlite::Result<()> {
-                        if c.is_autocommit() {
-                            Ok(())
-                        } else {
-                            c.execute_batch("ROLLBACK")
-                        }
-                    })
-                    .await;
-                drop(gate);
-            });
+            use futures::FutureExt;
+            // Poll once to enqueue rollback immediately. The SQLite worker owns
+            // the gate until rollback finishes, even when this task or runtime
+            // has already stopped and cannot schedule a cleanup future.
+            let _ = tokio::task::unconstrained(self.database.0.connection.call(
+                move |c| -> rusqlite::Result<()> {
+                    let _gate = gate;
+                    if c.is_autocommit() {
+                        Ok(())
+                    } else {
+                        c.execute_batch("ROLLBACK")
+                    }
+                },
+            ))
+            .now_or_never();
         }
     }
 }

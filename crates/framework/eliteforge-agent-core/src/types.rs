@@ -537,6 +537,9 @@ impl RunLimits {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRequest {
+    /// Host admission identity, shared by control, events and durable run records.
+    #[serde(default)]
+    pub run_id: Option<RunId>,
     pub session_id: String,
     #[serde(default)]
     pub execution_scope: Option<String>,
@@ -572,6 +575,7 @@ impl RunRequest {
     pub fn new(session_id: impl Into<String>, input: impl Into<crate::Content>) -> Self {
         Self {
             session_id: session_id.into(),
+            run_id: None,
             execution_scope: None,
             conversation_branch: None,
             goal_id: None,

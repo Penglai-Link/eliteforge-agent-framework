@@ -84,6 +84,17 @@ pub enum ConversationOutcome {
 #[crate::extension_point(single, adapter = crate::ConversationStorePlugin)]
 #[async_trait]
 pub trait ConversationStore: Send + Sync {
+    /// Read all committed branches without claiming a lease, creating history,
+    /// refreshing retention or changing archived-session lifecycle.
+    async fn history(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<ConversationSnapshot>, ConversationError> {
+        Err(ConversationError::Other(
+            "conversation history query is unavailable".into(),
+        ))
+    }
+
     async fn open(
         &self,
         session_id: &str,

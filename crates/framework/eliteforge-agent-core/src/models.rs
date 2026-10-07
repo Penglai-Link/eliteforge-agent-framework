@@ -632,6 +632,10 @@ pub trait ChatExecutor: Send + Sync {
     fn catalog_snapshot(&self) -> Arc<ModelCatalog> {
         Arc::new(self.catalog().clone())
     }
+    /// Catalog authorized for this run; per-call wrappers retain their captured snapshot.
+    fn catalog_for_run(&self, _: &RunContext) -> Arc<ModelCatalog> {
+        self.catalog_snapshot()
+    }
     async fn invoke(
         &self,
         call: ModelCall<'_>,

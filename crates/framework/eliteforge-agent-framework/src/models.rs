@@ -825,6 +825,9 @@ impl ChatExecutor for ModelInvoker {
     fn catalog_snapshot(&self) -> Arc<ModelCatalog> {
         self.catalog_snapshot()
     }
+    fn catalog_for_run(&self, context: &RunContext) -> Arc<ModelCatalog> {
+        self.scoped(context).catalog_snapshot()
+    }
     async fn invoke(
         &self,
         call: ModelCall<'_>,

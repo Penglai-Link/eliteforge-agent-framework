@@ -402,7 +402,10 @@ impl GoalService {
         reason: Option<String>,
     ) -> Result<GoalRecord, StateError> {
         let mut goal = self.get(id).await?;
-        if !goal.status.is_open() || goal.revision != expected || status == GoalStatus::Completed {
+        if (!goal.status.is_open() && status != GoalStatus::Cleared)
+            || goal.revision != expected
+            || status == GoalStatus::Completed
+        {
             return Err(StateError::Conflict);
         }
         if status == GoalStatus::Active && goal.runs_used >= goal.max_runs {

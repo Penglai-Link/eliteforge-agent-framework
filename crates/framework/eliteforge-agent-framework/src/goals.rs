@@ -206,6 +206,7 @@ impl ContinuationPolicy for ManagedGoalPolicy {
         let mut request = self.request.clone();
         request.input = input.into();
         request.resume = None;
+        request.run_id = None;
         request.execution_scope = None;
         request.conversation_branch = Some("main".into());
         request.goal_id = Some(self.goal_id.clone());

@@ -695,3 +695,94 @@ async fn summary_provider_can_return_only_the_structured_response_field() {
     assert_eq!(agent.run(request()).await.unwrap().output, "answer");
     agent.framework().close().await;
 }
+
+struct ProactiveCurrentTurn;
+#[async_trait]
+impl AgentLoop for ProactiveCurrentTurn {
+    async fn run(
+        &self,
+        request: &RunRequest,
+        context: &RunContext,
+        services: &AgentServices,
+    ) -> Result<RunResult, AgentError> {
+        let messages = vec![
+            Message::system("trusted instructions"),
+            Message::user("current question"),
+            Message::assistant("current response"),
+        ];
+        let block = ContextBlock {
+            id: HISTORY_BLOCK.into(),
+            messages: messages.clone(),
+            trust: ContextTrust::Data,
+            source_version: None,
+        };
+        let history = ConversationSnapshot::new(
+            ConversationKey::new(&request.session_id),
+            "fixture",
+            messages.clone(),
+        );
+        let model = ModelRef::new("shared", "summary");
+        let reducer = ModelCompressor::new(model.clone(), CompressionOptions::default())?;
+        let mut input = ContextReductionInput {
+            block: &block,
+            budget: ContextBudget {
+                max_messages: 10,
+                max_tokens: 1000,
+            },
+            model: &model,
+            estimator: &ConservativeTokenEstimator,
+            history: &history,
+            run: context,
+            models: services.models.as_deref().unwrap(),
+            limits: &request.limits,
+            overflow_recoveries: 0,
+            compression: Some(ContextCompressionDirective {
+                trigger: ContextCompressionTrigger::Global,
+                target_tokens: 1,
+            }),
+        };
+        assert_eq!(reducer.reduce(&input).await?, messages);
+        input.overflow_recoveries = 1;
+        assert!(
+            reducer.reduce(&input).await.is_err(),
+            "provider overflow must not keep the rejected request"
+        );
+        input.overflow_recoveries = 0;
+        input.budget.max_tokens = 1;
+        assert!(
+            reducer.reduce(&input).await.is_err(),
+            "hard budget must still be enforced"
+        );
+        Ok(RunResult {
+            output: "preserved".into(),
+            content: Content::default(),
+            structured: None,
+            interactions: vec![],
+            status: RunStatus::Completed,
+            usage: context.usage(),
+            steps: 0,
+            tool_calls: 0,
+            external_session: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn proactive_compression_preserves_fitting_current_turn_without_historical_model_calls() {
+    let provider = fixture("failure");
+    let agent = builder(provider.clone())
+        .plugin(AgentLoopPlugin::new(ProactiveCurrentTurn))
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        agent
+            .run(RunRequest::new("current", "unused"))
+            .await
+            .unwrap()
+            .output,
+        "preserved"
+    );
+    assert!(provider.requests.lock().unwrap().is_empty());
+    agent.framework().close().await;
+}
