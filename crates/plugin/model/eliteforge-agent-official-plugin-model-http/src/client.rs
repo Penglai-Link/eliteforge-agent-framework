@@ -61,17 +61,8 @@ impl HttpProtocolClient {
                             "model stream exceeds total byte limit".into(),
                         ));
                     }
-                    if event.get("error").is_some()
-                        || event
-                            .get("type")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|kind| {
-                                matches!(kind, "response.failed" | "response.incomplete")
-                            })
-                    {
-                        return Err(fw::ModelError::Indeterminate(
-                            "model stream failed before completion".into(),
-                        ));
+                    if let Some(error) = stream_failure(&event) {
+                        return Err(error);
                     }
                     if let Some(usage) = adapter.parse_usage(&event) {
                         state.0.token_usage = Some(usage);
@@ -125,6 +116,35 @@ impl HttpProtocolClient {
         }
         Ok(response)
     }
+}
+
+fn stream_failure(event: &serde_json::Value) -> Option<fw::ModelError> {
+    let has_error = event.get("error").is_some_and(|error| !error.is_null());
+    let is_failure = event
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|kind| matches!(kind, "error" | "response.failed" | "response.incomplete"));
+    if !has_error && !is_failure {
+        return None;
+    }
+
+    // Keep provider diagnostics verbatim, including unknown error fields, but
+    // do not copy the full generated output or request settings into the error.
+    let mut details = event.clone();
+    if let Some(response) = details
+        .get_mut("response")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        response.retain(|key, _| {
+            matches!(
+                key.as_str(),
+                "id" | "status" | "error" | "incomplete_details"
+            )
+        });
+    }
+    Some(fw::ModelError::Indeterminate(format!(
+        "model stream failed before completion: {details}"
+    )))
 }
 
 /// Stable typed error carrier for legacy host ports. The invoker decodes the
