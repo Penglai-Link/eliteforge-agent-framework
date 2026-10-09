@@ -179,6 +179,16 @@ async fn effect_survives_process_death_without_automatic_reexecution() {
         std::fs::read(dir.path().join("external-effect")).unwrap(),
         b"exactly one effect"
     );
+    let history = store
+        .read_session("s", HistoryQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(history.records.tool_invocations.len(), 1);
+    assert_eq!(
+        history.records.tool_invocations[0].status,
+        HistoryStatus::Unknown
+    );
+    assert_eq!(history.records.messages[1].status, HistoryStatus::Completed);
     executor.framework().close().await;
     store.close().await.unwrap();
     let store = open(dir.path()).await;

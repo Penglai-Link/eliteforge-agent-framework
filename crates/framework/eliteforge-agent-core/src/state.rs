@@ -184,6 +184,9 @@ pub struct Checkpoint {
     pub state: Value,
     pub transcript: Vec<Message>,
     pub events: Vec<EventEnvelope>,
+    /// Public records for this run only; private transcript is never a history API.
+    #[serde(default)]
+    pub history: crate::HistoryRecords,
 }
 
 fn default_execution_scope() -> String {
@@ -215,9 +218,11 @@ impl Checkpoint {
             state,
             transcript: Vec::new(),
             events: Vec::new(),
+            history: Default::default(),
         }
     }
     pub fn validate(&self) -> Result<(), StateError> {
+        self.history.validate(self.run_id)?;
         if self.schema_version != 1 || self.loop_version == 0 {
             return Err(StateError::UnsupportedVersion);
         }
@@ -251,6 +256,7 @@ impl Checkpoint {
     }
     pub fn validate_successor(&self, next: &Self) -> Result<(), StateError> {
         next.validate()?;
+        self.history.validate_successor(&next.history)?;
         if self.run_id != next.run_id
             || self.session_id != next.session_id
             || self.execution_scope != next.execution_scope

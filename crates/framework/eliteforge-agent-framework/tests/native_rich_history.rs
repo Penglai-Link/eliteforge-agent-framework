@@ -51,6 +51,8 @@ impl ChatModel for Model {
         };
         if first {
             Ok(ChatResponse {
+                public_content: None,
+                reasoning: None,
                 content: rich(),
                 structured: Some(json!({"structured":"assistant"})),
                 tool_calls: vec![ToolCall::new("call", "lookup", json!({}))],

@@ -298,7 +298,16 @@ async fn native_react_goal_keeps_shared_history_and_separate_checkpoint_heads() 
         .list(&session.id, 0, 1000)
         .await
         .unwrap();
-    assert!(events.iter().any(|e| e.kind == "EXECUTION_EVENT"));
+    assert!(!events.iter().any(|e| e.kind == "EXECUTION_EVENT"));
+    let history = f
+        .framework
+        .history()
+        .unwrap()
+        .read_session(&session.id, HistoryQuery::default())
+        .await
+        .unwrap();
+    assert!(!history.records.messages.is_empty());
+    assert!(!history.records.steps.is_empty());
     f.framework
         .sessions()
         .unwrap()
@@ -784,7 +793,15 @@ async fn goal_continuation_has_one_session_separate_scopes_and_durable_lineage()
         .await
         .unwrap();
     assert_eq!(events.iter().filter(|e| e.kind == "GOAL_JUDGED").count(), 2);
-    assert!(events.iter().any(|e| e.kind == "EXECUTION_EVENT"));
+    assert!(!events.iter().any(|e| e.kind == "EXECUTION_EVENT"));
+    let history = f
+        .framework
+        .history()
+        .unwrap()
+        .read_session(&session.id, HistoryQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(history.runs.len(), 3);
     assert!(events.windows(2).all(|w| w[0].sequence < w[1].sequence));
     // Completed goal history remains while the session can receive a new goal.
     goals

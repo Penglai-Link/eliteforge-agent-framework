@@ -337,6 +337,8 @@ impl ChatModel for Capture {
     ) -> Result<ChatResponse, ModelError> {
         self.requests.lock().unwrap().push(request);
         Ok(ChatResponse {
+            public_content: None,
+            reasoning: None,
             content: "ok".into(),
             structured: None,
             tool_calls: vec![],

@@ -82,6 +82,10 @@ pub struct WorkflowState {
     #[serde(default)]
     pub tool_batch_limit_reached: bool,
     pub cursor: WorkflowCursor,
+    /// Complete provider response committed with public history before the loop
+    /// advances. Recovery consumes it without dispatching the model again.
+    #[serde(default)]
+    pub pending_model_response: Option<ChatResponse>,
     pub visible_tools: BTreeSet<String>,
     #[serde(default)]
     pub revoked_tools: BTreeSet<String>,

@@ -53,7 +53,8 @@ pub(crate) fn initialize(c: &rusqlite::Connection) -> Result<(), StateError> {
         CREATE TABLE IF NOT EXISTS ef_session_artifact_refs(session_id TEXT NOT NULL REFERENCES ef_sessions(id), artifact_id TEXT NOT NULL, PRIMARY KEY(session_id,artifact_id));
         CREATE TABLE IF NOT EXISTS ef_artifact_ownership(artifact_id TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS ef_artifact_cleanup(artifact_id TEXT PRIMARY KEY);
-        CREATE TABLE IF NOT EXISTS ef_session_context(session_id TEXT NOT NULL REFERENCES ef_sessions(id), key TEXT NOT NULL, revision INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(session_id,key));") .map_err(sql)
+        CREATE TABLE IF NOT EXISTS ef_session_context(session_id TEXT NOT NULL REFERENCES ef_sessions(id), key TEXT NOT NULL, revision INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(session_id,key));") .map_err(sql)?;
+    crate::history::initialize(c)
 }
 
 fn session(c: &rusqlite::Connection, id: &str) -> Result<SessionRecord, StateError> {
@@ -464,6 +465,7 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
                 tx.execute("INSERT INTO ef_runs(id,session_id,owner_session_id,scope,status,lease_until,record) VALUES (?1,?2,?3,?4,'RUNNING',?5,?6)",params![run.id.to_string(),run.session_id,owner,run.execution_scope,run.lease_until_ms,encode(&run)?]).map_err(sql)?;
             }
             let mut event=SessionEvent::new(&run.session_id,if resume {"RUN_RESUMED"} else {"RUN_STARTED"},json!({"scope":run.execution_scope,"kind":run.kind,"parent":run.parent_run_id})); event.run_id=Some(run.id); event.goal_id=run.goal_id.clone(); append(&tx,event)?;
+            crate::history::managed_run(&tx,&run,&owner)?;
             tx.commit().map_err(sql)
         }).await.map_err(worker)
     }
@@ -480,6 +482,8 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
                     }
             }
             let mut event=SessionEvent::new(&run.session_id,"RUN_FINISHED",json!({"status":run.status,"error":run.error})); event.run_id=Some(run.id); event.goal_id=run.goal_id.clone(); append(&tx,event)?;
+            let owner:String=tx.query_row("SELECT owner_session_id FROM ef_runs WHERE id=?1",[run.id.to_string()],|r|r.get(0)).map_err(sql)?;
+            crate::history::managed_run(&tx,&run,&owner)?;
             tx.commit().map_err(sql)
         }).await.map_err(worker)
     }
@@ -533,6 +537,8 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
             for row in &rows {
                 let mut run: ManagedRun=decode(row.clone())?; run.status=ManagedRunStatus::RecoveryRequired;
                 tx.execute("UPDATE ef_runs SET status='RECOVERY_REQUIRED',record=?2 WHERE id=?1",params![run.id.to_string(),encode(&run)?]).map_err(sql)?;
+                let owner:String=tx.query_row("SELECT owner_session_id FROM ef_runs WHERE id=?1",[run.id.to_string()],|r|r.get(0)).map_err(sql)?;
+                crate::history::managed_run(&tx,&run,&owner)?;
                 let mut event=SessionEvent::new(&run.session_id,"RECOVERY_REQUIRED",Value::Null); event.run_id=Some(run.id); append(&tx,event)?;
                 let active: Option<String>=tx.query_row("SELECT id FROM ef_goals WHERE session_id=(SELECT owner_session_id FROM ef_runs WHERE id=?1) AND status='ACTIVE'",[run.id.to_string()],|r|r.get(0)).optional().map_err(sql)?;
                 if let Some(id)=active { let mut g=goal(&tx,&id)?; g.status=GoalStatus::Paused; g.reason=Some("recovery_required".into()); g.revision+=1; g.updated_at_ms=lifecycle_time_ms();

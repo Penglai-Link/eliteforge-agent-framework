@@ -68,7 +68,7 @@ impl SessionStore for SqliteStateStore {
                     [&session_id],
                 ).map_err(database_error)?;
             }
-            for table in ["ef_events", "ef_session_artifact_refs", "ef_session_context", "ef_runs"] {
+            for table in ["ef_history_steps", "ef_history_messages", "ef_history_tools", "ef_history_interactions", "ef_history_runs", "ef_history_versions", "ef_events", "ef_session_artifact_refs", "ef_session_context", "ef_runs"] {
                 rows += tx.execute(&format!("DELETE FROM {table} WHERE session_id=?1"), [&session_id]).map_err(database_error)?;
             }
             tx.execute("INSERT OR IGNORE INTO ef_artifact_cleanup(artifact_id) SELECT artifact_id FROM ef_artifact_ownership WHERE NOT EXISTS(SELECT 1 FROM ef_session_artifact_refs r WHERE r.artifact_id=ef_artifact_ownership.artifact_id)",[]).map_err(database_error)?;

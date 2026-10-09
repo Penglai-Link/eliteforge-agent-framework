@@ -446,8 +446,12 @@ async fn partial_batch_admission_records_unexecuted_siblings_and_stops_at_budget
         assert_eq!(calls.load(Ordering::SeqCst), expected);
         assert_eq!(result.tool_calls, expected);
         if expected > 0 {
+            // Results are processed at each durable completion boundary;
+            // budget-rejected siblings may finish before executing calls.
+            let mut projected = results.lock().unwrap().clone();
+            projected.sort_by(|a, b| a.0.cmp(&b.0));
             assert_eq!(
-                *results.lock().unwrap(),
+                projected,
                 vec![
                     ("call-0".into(), false),
                     ("call-1".into(), false),

@@ -99,7 +99,7 @@ impl SqliteStateStore {
         Ok(())
     }
 
-    async fn execute<T: Send + 'static>(
+    pub(crate) async fn execute<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, StateError> + Send + 'static,
     ) -> Result<T, StateError> {
@@ -246,6 +246,7 @@ impl StateStore for SqliteStateStore {
             tx.execute("INSERT INTO ef_checkpoints(run_id, session_id, revision, checkpoint) VALUES (?1,?2,0,?3)", params![checkpoint.run_id.to_string(), checkpoint.session_id, encoded]).map_err(database_error)?;
             tx.execute("INSERT INTO ef_session_heads(session_id,scope,run_id) VALUES (?1,?2,?3) ON CONFLICT(session_id,scope) DO UPDATE SET run_id=excluded.run_id", params![checkpoint.session_id, checkpoint.execution_scope, checkpoint.run_id.to_string()]).map_err(database_error)?;
             for event in &checkpoint.events { crate::lifecycle::append_journal(&tx, event)?; }
+            crate::history::checkpoint(&tx, &checkpoint, None)?;
             tx.commit().map_err(database_error)?;
             Ok(checkpoint)
         }).await
@@ -391,6 +392,7 @@ impl StateStore for SqliteStateStore {
             for event in &next.events[previous.events.len()..] {
                 crate::lifecycle::append_journal(&tx, event)?;
             }
+            crate::history::checkpoint(&tx, &next, Some(&previous))?;
             tx.commit().map_err(database_error)?;
             Ok(next)
         })

@@ -86,8 +86,8 @@ impl HttpProtocolClient {
                         state.1 = true;
                     }
                     state.0.observe_raw_event(protocol, &event);
-                    if let Some(delta) = adapter
-                        .parse_stream_event(&event)
+                    for delta in adapter
+                        .parse_stream_events(&event)
                         .map_err(fw::ModelError::Fatal)?
                     {
                         state.0.observe_delta(&delta);

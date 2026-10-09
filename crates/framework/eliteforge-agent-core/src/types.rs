@@ -5,7 +5,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{SessionEvent, SessionLifecycleStore, SessionPersistenceFailure};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -182,6 +181,14 @@ pub struct ChatRequest {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub content: crate::Content,
+    /// Explicit public projection when a host's lossless content contains
+    /// internal protocol wrappers. History never reads model_context.
+    #[serde(default)]
+    pub public_content: Option<crate::Content>,
+    /// Only reasoning text actually returned by the provider. Signatures and
+    /// opaque continuation data belong exclusively to model_context.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     pub structured: Option<Value>,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
@@ -1139,21 +1146,8 @@ impl RunContext {
             .closed = true;
     }
     pub async fn emit(&self, event: AgentEvent) {
-        if let Some(store) = self.extensions.get::<Arc<dyn SessionLifecycleStore>>() {
-            let mut persisted = SessionEvent::new(
-                &self.session_id,
-                "EXECUTION_EVENT",
-                serde_json::to_value(&event).unwrap_or_default(),
-            );
-            persisted.run_id = Some(self.run_id);
-            if let Err(error) = store.append_event(persisted).await {
-                if let Some(failure) = self.extensions.get::<SessionPersistenceFailure>() {
-                    *failure.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
-                }
-                self.cancellation.cancel();
-                return;
-            }
-        }
+        // Publication is live-only. Durable state/history is committed by the
+        // execution strategy at semantic boundaries, never one row per delta.
         self.publish(event);
     }
     pub fn emit_output(&self, event: crate::OutputEvent) {

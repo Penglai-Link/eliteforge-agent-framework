@@ -135,6 +135,7 @@ impl AgentLoop for ModelExecutionLoop {
                 tool_calls: 0,
                 tool_batch_limit_reached: false,
                 cursor: WorkflowCursor::Model,
+                pending_model_response: None,
                 visible_tools: initial_tools
                     .as_ref()
                     .expect("new run catalog")
@@ -166,6 +167,12 @@ impl AgentLoop for ModelExecutionLoop {
                 checkpoint.transcript = previous.transcript.clone();
             }
             checkpoint.transcript.push(Message::user(&request.input));
+            if context.node_execution().is_none() {
+                checkpoint
+                    .history
+                    .messages
+                    .push(HistoryMessage::user(context.run_id, &request.input));
+            }
             store.create(checkpoint, previous.map(|p| p.run_id)).await?
         };
         let state: WorkflowState =
@@ -362,6 +369,14 @@ impl AgentLoop for ModelExecutionLoop {
                 Err(error) => Err(error),
                 Ok(()) => {
                     checkpoint.status = ExecutionStatus::Running;
+                    if request.resume.is_some() {
+                        for message in &mut checkpoint.history.messages {
+                            if message.status==HistoryStatus::Running {message.status=HistoryStatus::Interrupted;}
+                        }
+                        for step in &mut checkpoint.history.steps {
+                            if step.status==HistoryStatus::Running {step.status=HistoryStatus::Interrupted;step.finished_at_ms=Some(unix_time_ms());}
+                        }
+                    }
                     let mut runtime = ModelExecutionRuntime {
                         store: store.as_ref(),
                         lease: &lease,
@@ -586,7 +601,144 @@ impl ModelExecutionRuntime<'_> {
             external_session: None,
         }
     }
+    fn update_history(&mut self) {
+        let now = unix_time_ms();
+        if let WorkflowCursor::Tools { executions, .. } = &self.state.cursor {
+            for execution in executions {
+                let Some(record) = self
+                    .checkpoint
+                    .history
+                    .tool_invocations
+                    .iter_mut()
+                    .find(|t| t.id == execution.invocation_id)
+                else {
+                    continue;
+                };
+                record.tool_id = execution.tool_id.clone();
+                record.status = match &execution.state {
+                    ToolExecutionState::Planned => HistoryStatus::Planned,
+                    ToolExecutionState::Approved => HistoryStatus::Approved,
+                    ToolExecutionState::WaitingApproval { .. } => HistoryStatus::Waiting,
+                    ToolExecutionState::Started => {
+                        if self.checkpoint.status.is_terminal() {
+                            HistoryStatus::Unknown
+                        } else {
+                            HistoryStatus::Running
+                        }
+                    }
+                    ToolExecutionState::Finished(output) => {
+                        record.content = history_content(&output.content);
+                        record.structured = output.structured.clone();
+                        record.is_error = Some(output.is_error);
+                        record.result_reference = output.result_reference.as_ref().map(|r| {
+                            HistoryContentBlock::Resource {
+                                uri: r.uri.clone(),
+                                mime_type: r.mime_type.clone(),
+                                name: r.name.clone(),
+                                size_bytes: r.size_bytes,
+                            }
+                        });
+                        record.finished_at_ms.get_or_insert(now);
+                        if output.is_error {
+                            HistoryStatus::Failed
+                        } else {
+                            HistoryStatus::Completed
+                        }
+                    }
+                };
+                if matches!(execution.state, ToolExecutionState::Started) {
+                    record.started_at_ms.get_or_insert(now);
+                }
+            }
+        }
+        for request in &self.state.interactions {
+            if !self
+                .checkpoint
+                .history
+                .interactions
+                .iter()
+                .any(|i| i.id == request.id)
+            {
+                self.checkpoint
+                    .history
+                    .interactions
+                    .push(HistoryInteraction {
+                        id: request.id,
+                        run_id: self.context.run_id,
+                        invocation_id: match request.kind {
+                            InteractionKind::Approval { invocation_id } => Some(invocation_id),
+                            InteractionKind::Input => None,
+                        },
+                        prompt: history_content(&request.prompt),
+                        response_schema: request.response_schema.clone(),
+                        presentation: request.presentation.clone(),
+                        response: None,
+                        expires_at_ms: request.expires_at_unix_ms,
+                    });
+            }
+        }
+        for response in &self.state.answers {
+            if let Some(record) = self
+                .checkpoint
+                .history
+                .interactions
+                .iter_mut()
+                .find(|i| i.id == response.interaction_id)
+            {
+                record.response = Some(response.value.clone());
+            }
+        }
+    }
+    async fn process_finished_history_tools(&mut self) -> Result<(), AgentError> {
+        let WorkflowCursor::Tools { executions, .. } = &self.state.cursor else {
+            return Ok(());
+        };
+        let pending: Vec<_> = executions
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| {
+                matches!(e.state, ToolExecutionState::Finished(_))
+                    && self
+                        .checkpoint
+                        .history
+                        .tool_invocations
+                        .iter()
+                        .find(|t| t.id == e.invocation_id)
+                        .is_none_or(|t| t.is_error.is_none())
+            })
+            .map(|(i, e)| (i, e.clone()))
+            .collect();
+        for (index, execution) in pending {
+            let ToolExecutionState::Finished(mut output) = execution.state.clone() else {
+                continue;
+            };
+            if let Some(processor) = self.context.extensions.get::<ToolResultProcessorService>() {
+                let was_error = output.is_error;
+                output = processor
+                    .0
+                    .process(
+                        &ToolInvocationContext {
+                            invocation_id: &execution.invocation_id.to_string(),
+                            call: &execution.call,
+                            descriptor: &execution.descriptor,
+                            run: self.context,
+                        },
+                        output,
+                    )
+                    .await?;
+                if was_error && !output.is_error {
+                    return Err(AgentError::Run(
+                        "tool result processor converted a failure to success".into(),
+                    ));
+                }
+            }
+            self.execution_mut(index).state = ToolExecutionState::Finished(output);
+        }
+        Ok(())
+    }
     async fn save(&mut self, event: Option<AgentEvent>) -> Result<(), AgentError> {
+        self.process_finished_history_tools().await?;
+        self.update_history();
         self.state.revoked_tools = self
             .context
             .revoked_tools
@@ -660,6 +812,10 @@ impl ModelExecutionRuntime<'_> {
     async fn record_steering(&mut self, pending: Vec<Content>) -> Result<(), AgentError> {
         for input in pending {
             self.checkpoint
+                .history
+                .messages
+                .push(HistoryMessage::user(self.context.run_id, &input));
+            self.checkpoint
                 .transcript
                 .push(Message::user(input.clone()));
             // Persist the message and its journal event together before
@@ -713,8 +869,12 @@ impl ModelExecutionRuntime<'_> {
             }
             match &self.state.cursor {
                 WorkflowCursor::Model => {
-                    if self.state.steps >= self.state.request.limits.max_steps
-                        || !admit_native_step(self.context, self.state.request.limits.max_steps)
+                    if self.state.pending_model_response.is_none()
+                        && (self.state.steps >= self.state.request.limits.max_steps
+                            || !admit_native_step(
+                                self.context,
+                                self.state.request.limits.max_steps,
+                            ))
                     {
                         return self
                             .stop(RunStatus::StepLimit, ExecutionStatus::Completed)
@@ -770,27 +930,34 @@ impl ModelExecutionRuntime<'_> {
                     });
                     let mut model_context = self.context.clone();
                     model_context.budget_journal = Some(journal.clone());
-                    let response = self
-                        .services
-                        .models
-                        .as_ref()
-                        .ok_or(AgentError::MissingService("ChatModel"))?
-                        .invoke(
-                            ModelCall {
-                                stage: &stage.name,
-                                step: self.state.steps + 1,
-                                instructions: &instructions,
-                                tools: &descriptors,
-                                limits: &self.state.request.limits,
-                                options: stage
-                                    .generation
-                                    .as_ref()
-                                    .unwrap_or(&self.state.request.generation),
-                            },
-                            &mut memory,
-                            &model_context,
-                        )
-                        .await;
+                    model_context
+                        .extensions
+                        .insert(HistoryCommitterService(journal.clone()));
+                    let response = if let Some(response) = self.state.pending_model_response.take()
+                    {
+                        Ok(response)
+                    } else {
+                        self.services
+                            .models
+                            .as_ref()
+                            .ok_or(AgentError::MissingService("ChatModel"))?
+                            .invoke(
+                                ModelCall {
+                                    stage: &stage.name,
+                                    step: self.state.steps + 1,
+                                    instructions: &instructions,
+                                    tools: &descriptors,
+                                    limits: &self.state.request.limits,
+                                    options: stage
+                                        .generation
+                                        .as_ref()
+                                        .unwrap_or(&self.state.request.generation),
+                                },
+                                &mut memory,
+                                &model_context,
+                            )
+                            .await
+                    };
                     self.checkpoint = journal.checkpoint.lock().await.clone();
                     let response = response?;
                     self.state.steps += 1;
@@ -1219,26 +1386,6 @@ impl ModelExecutionRuntime<'_> {
             let ToolExecutionState::Finished(mut output) = execution.state else {
                 return Err(AgentError::Run("unfinished tool in completed batch".into()));
             };
-            if let Some(processor) = self.context.extensions.get::<ToolResultProcessorService>() {
-                let was_error = output.is_error;
-                output = processor
-                    .0
-                    .process(
-                        &ToolInvocationContext {
-                            invocation_id: &execution.invocation_id.to_string(),
-                            call: &execution.call,
-                            descriptor: &execution.descriptor,
-                            run: self.context,
-                        },
-                        output,
-                    )
-                    .await?;
-                if was_error && !output.is_error {
-                    return Err(AgentError::Run(
-                        "tool result processor converted a failure to success".into(),
-                    ));
-                }
-            }
             match &output.effect {
                 ToolEffect::ExposeTools(ids) => {
                     if let Err(error) = self.tools.apply_exposure(ids) {
@@ -1430,6 +1577,75 @@ struct WorkflowBudgetJournal {
     store: Arc<dyn StateStore>,
     lease: ExecutionLease,
     checkpoint: tokio::sync::Mutex<Checkpoint>,
+}
+#[async_trait]
+impl HistoryCommitter for WorkflowBudgetJournal {
+    async fn model_attempt(
+        &self,
+        step: HistoryStep,
+        message: HistoryMessage,
+        response: Option<ChatResponse>,
+    ) -> Result<(), StateError> {
+        let mut current = self.checkpoint.lock().await;
+        let mut next = current.clone();
+        if let Some(old) = next.history.steps.iter_mut().find(|s| s.id == step.id) {
+            *old = step.clone();
+        } else {
+            next.history.steps.push(step.clone());
+        }
+        if let Some(old) = next
+            .history
+            .messages
+            .iter_mut()
+            .find(|m| m.id == message.id)
+        {
+            *old = message.clone();
+        } else {
+            next.history.messages.push(message.clone());
+        }
+        for call in response
+            .as_ref()
+            .map(|r| r.tool_calls.clone())
+            .unwrap_or_default()
+        {
+            if !next
+                .history
+                .tool_invocations
+                .iter()
+                .any(|t| t.id == call.invocation_id)
+            {
+                next.history.tool_invocations.push(HistoryToolInvocation {
+                    id: call.invocation_id,
+                    run_id: step.run_id,
+                    step_id: step.id.clone(),
+                    message_id: message.id.clone(),
+                    call_id: call.id,
+                    tool_id: call.call_name.clone(),
+                    tool_name: call.call_name,
+                    arguments: call.arguments,
+                    status: HistoryStatus::Planned,
+                    content: Vec::new(),
+                    structured: None,
+                    is_error: None,
+                    result_reference: None,
+                    started_at_ms: None,
+                    finished_at_ms: None,
+                });
+            }
+        }
+        if let Some(response) = response {
+            let mut state: WorkflowState = serde_json::from_value(next.state.clone())
+                .map_err(|_| StateError::Invalid("invalid history workflow state".into()))?;
+            state.pending_model_response = Some(response);
+            next.state = serde_json::to_value(state)
+                .map_err(|_| StateError::Invalid("invalid history workflow state".into()))?;
+        }
+        *current = self
+            .store
+            .commit(&self.lease, current.revision, next)
+            .await?;
+        Ok(())
+    }
 }
 #[async_trait]
 impl crate::budget::BudgetJournal for WorkflowBudgetJournal {

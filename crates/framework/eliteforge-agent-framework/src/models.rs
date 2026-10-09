@@ -546,7 +546,37 @@ impl ModelInvoker {
                 emitted: AtomicBool::new(false),
                 message_id: RunId::new_v4().to_string(),
                 finished: AtomicBool::new(false),
+                content: std::sync::Mutex::new(Vec::new()),
             };
+            let mut history_step = HistoryStep {
+                id: stream.message_id.clone(),
+                run_id: context.run_id,
+                node_invocation_id: context.node_execution().map(|n| n.invocation_id),
+                sequence: call.step,
+                attempt,
+                name: call.stage.into(),
+                model: Some(selected.clone()),
+                status: HistoryStatus::Running,
+                usage: None,
+                started_at_ms: unix_time_ms(),
+                finished_at_ms: None,
+            };
+            let mut history_message = HistoryMessage {
+                id: stream.message_id.clone(),
+                run_id: context.run_id,
+                step_id: Some(stream.message_id.clone()),
+                role: Role::Assistant,
+                content: Vec::new(),
+                structured: None,
+                status: HistoryStatus::Running,
+                created_at_ms: history_step.started_at_ms,
+            };
+            if let Some(writer) = context.extensions.get::<HistoryCommitterService>() {
+                writer
+                    .0
+                    .model_attempt(history_step.clone(), history_message.clone(), None)
+                    .await?;
+            }
             context.emit_output(OutputEvent::StepStarted {
                 id: stream.message_id.clone(),
                 name: format!("{} / step {} / attempt {}", call.stage, call.step, attempt),
@@ -577,7 +607,7 @@ impl ModelInvoker {
             };
             let response = tokio::select! {
                 biased;
-                _ = context.cancelled() => return Err(AgentError::Cancelled),
+                _ = context.cancelled() => Err(ModelError::Indeterminate("model invocation cancelled".into())),
                 response = tokio::time::timeout(
                 call.limits.model_timeout,
                 next.run(
@@ -591,13 +621,39 @@ impl ModelInvoker {
                 ),
             ) => response.unwrap_or_else(|_| Err(ModelError::Indeterminate("model invocation timed out".into())))
             };
+            let response = response.and_then(|mut response| {
+                crate::middleware::validate_model_response(&mut response, call.options)?;
+                Ok(response)
+            });
             if response.as_ref().is_err_and(|error| error.is_unavailable()) {
                 self.notify_unavailable(&selected);
             }
             previous = Some(selected.clone());
+            if response.is_err() {
+                history_step.status = if context.cancellation.is_cancelled() {
+                    HistoryStatus::Interrupted
+                } else {
+                    HistoryStatus::Failed
+                };
+                history_step.finished_at_ms = Some(unix_time_ms());
+                history_message.status = HistoryStatus::Interrupted;
+                history_message.content = stream
+                    .content
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if let Some(writer) = context.extensions.get::<HistoryCommitterService>() {
+                    writer
+                        .0
+                        .model_attempt(history_step.clone(), history_message.clone(), None)
+                        .await?;
+                }
+                if context.cancellation.is_cancelled() {
+                    return Err(AgentError::Cancelled);
+                }
+            }
             match response {
                 Ok(mut response) => {
-                    crate::middleware::validate_model_response(&mut response, call.options)?;
                     if let Some(report) = context
                         .extensions
                         .get::<Arc<crate::model_observation::ModelReportState>>()
@@ -614,6 +670,36 @@ impl ModelInvoker {
                         data.model = selected.clone();
                         data.protocol =
                             catalog.protocol(&selected).expect("validated model").into();
+                    }
+                    history_step.status = HistoryStatus::Completed;
+                    history_step.finished_at_ms = Some(unix_time_ms());
+                    history_step.usage = Some((&response.usage).into());
+                    history_message.status = HistoryStatus::Completed;
+                    history_message.structured = response.structured.clone();
+                    history_message.content = stream
+                        .content
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .iter()
+                        .filter(|b| matches!(b, HistoryContentBlock::Reasoning { .. }))
+                        .cloned()
+                        .collect();
+                    if let Some(reasoning) = &response.reasoning {
+                        history_message.content = vec![HistoryContentBlock::Reasoning {
+                            text: reasoning.clone(),
+                        }];
+                    }
+                    history_message.content.extend(history_content(
+                        response
+                            .public_content
+                            .as_ref()
+                            .unwrap_or(&response.content),
+                    ));
+                    if let Some(writer) = context.extensions.get::<HistoryCommitterService>() {
+                        writer
+                            .0
+                            .model_attempt(history_step, history_message, Some(response.clone()))
+                            .await?;
                     }
                     context.emit_output(OutputEvent::MessageFinished {
                         message_id: stream.message_id.clone(),
@@ -770,6 +856,28 @@ struct AttemptStream<'a> {
     emitted: AtomicBool,
     message_id: String,
     finished: AtomicBool,
+    content: std::sync::Mutex<Vec<HistoryContentBlock>>,
+}
+impl AttemptStream<'_> {
+    fn append(&self, text: &str, reasoning: bool) {
+        let mut blocks = self.content.lock().unwrap_or_else(|e| e.into_inner());
+        match blocks
+            .iter_mut()
+            .find(|block| matches!(block, HistoryContentBlock::Reasoning { .. }) == reasoning)
+        {
+            Some(HistoryContentBlock::Text { text: current }) if !reasoning => {
+                current.push_str(text)
+            }
+            Some(HistoryContentBlock::Reasoning { text: current }) if reasoning => {
+                current.push_str(text)
+            }
+            _ => blocks.push(if reasoning {
+                HistoryContentBlock::Reasoning { text: text.into() }
+            } else {
+                HistoryContentBlock::Text { text: text.into() }
+            }),
+        }
+    }
 }
 impl Drop for AttemptStream<'_> {
     fn drop(&mut self) {
@@ -794,6 +902,7 @@ impl ChatStream for SilentStream {
 impl ChatStream for AttemptStream<'_> {
     async fn text_delta(&self, text: &str) {
         if !text.is_empty() {
+            self.append(text, false);
             self.emitted.store(true, Ordering::Release);
             self.context.emit_output(OutputEvent::TextDelta {
                 message_id: self.message_id.clone(),
@@ -804,6 +913,7 @@ impl ChatStream for AttemptStream<'_> {
     }
     async fn reasoning_delta(&self, text: &str) {
         if !text.is_empty() {
+            self.append(text, true);
             self.emitted.store(true, Ordering::Release);
             self.context.emit_output(OutputEvent::ReasoningDelta {
                 message_id: self.message_id.clone(),

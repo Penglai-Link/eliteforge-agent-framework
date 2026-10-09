@@ -7,6 +7,7 @@ mod artifact;
 mod conversation;
 mod database;
 mod extensions;
+mod history;
 mod lifecycle;
 mod local_artifact;
 mod long_term;
@@ -185,6 +186,7 @@ impl Plugin for LocalStoragePlugin {
         context.provide(InteractionStoreService(state.clone()))?;
         context.contribute_extension(state.clone() as Arc<dyn InteractionStore>)?;
         context.provide(SessionStoreService(state.clone()))?;
+        context.provide(HistoryStoreService(state.clone()))?;
         context.contribute_extension(state as Arc<dyn SessionStore>)?;
 
         let conversations = Arc::new(

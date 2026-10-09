@@ -505,6 +505,15 @@ impl Framework {
                 .clone(),
         })
     }
+    pub fn history(&self) -> Result<HistoryService, AgentError> {
+        Ok(HistoryService(
+            self.registry()?
+                .get::<HistoryStoreService>()
+                .ok_or(AgentError::MissingService("HistoryStore"))?
+                .0
+                .clone(),
+        ))
+    }
     pub fn goals(&self) -> Result<GoalService, AgentError> {
         Ok(GoalService(self.sessions()?.store))
     }

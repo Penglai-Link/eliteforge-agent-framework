@@ -210,6 +210,9 @@ impl AgentLoop for DagWorkflowLoop {
                 cp.transcript = previous.transcript.clone();
             }
             cp.transcript.push(Message::user(&request.input));
+            cp.history
+                .messages
+                .push(HistoryMessage::user(context.run_id, &request.input));
             store.create(cp, previous.map(|p| p.run_id)).await?
         };
         let state = self.validate_checkpoint(&cp, request, context)?;
@@ -790,6 +793,7 @@ impl StateStore for EmbeddedWorkflowStore {
                 checkpoint.transcript = history;
                 checkpoint.validate()?;
                 n.checkpoint = Some(encode(&checkpoint)?);
+                parent.history.merge(&checkpoint.history);
                 Ok(None)
             })
             .await
@@ -860,7 +864,7 @@ impl StateStore for EmbeddedWorkflowStore {
         }
         self.context
             .journal
-            .change(|state, _| {
+            .change(|state, parent| {
                 let n = state.nodes.get_mut(&self.context.node_id).unwrap();
                 let current: Checkpoint =
                     decode(n.checkpoint.clone().ok_or(StateError::NotFound)?)?;
@@ -873,6 +877,7 @@ impl StateStore for EmbeddedWorkflowStore {
                     .checked_add(1)
                     .ok_or_else(|| invalid("embedded revision overflow"))?;
                 n.checkpoint = Some(encode(&next)?);
+                parent.history.merge(&next.history);
                 Ok(None)
             })
             .await

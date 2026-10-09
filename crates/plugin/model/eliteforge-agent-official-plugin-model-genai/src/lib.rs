@@ -202,10 +202,13 @@ impl ChatModel for GenaiChatAdapter {
                     let contains_reasoning = content.contains_reasoning_content();
                     let mut native = ChatMessage::assistant(content);
                     if !contains_reasoning {
-                        native = native.with_reasoning_content(end.captured_reasoning_content);
+                        native =
+                            native.with_reasoning_content(end.captured_reasoning_content.clone());
                     }
                     return Ok(ChatResponse {
+                        public_content: None,
                         content: framework_content,
+                        reasoning: end.captured_reasoning_content.clone(),
                         structured: None,
                         tool_calls,
                         usage: Usage {

@@ -12,6 +12,7 @@ pub mod conversation;
 pub mod dag;
 pub mod errors;
 pub mod external;
+pub mod history;
 pub mod hooks;
 pub mod interaction;
 pub mod lifecycle;
@@ -43,6 +44,7 @@ pub use eliteforge_agent_plugin_core::{
 };
 pub use errors::*;
 pub use external::*;
+pub use history::*;
 pub use hooks::*;
 pub use interaction::*;
 pub use lifecycle::*;

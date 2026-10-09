@@ -26,6 +26,9 @@ pub trait ModelProtocolAdapter: Send + Sync {
     }
     fn parse_response(&self, body: &Value) -> Result<ModelResponse, String>;
     fn parse_stream_event(&self, body: &Value) -> Result<Option<ModelStreamEvent>, String>;
+    fn parse_stream_events(&self, body: &Value) -> Result<Vec<ModelStreamEvent>, String> {
+        Ok(self.parse_stream_event(body)?.into_iter().collect())
+    }
     fn parse_stream_terminal_response(
         &self,
         _body: &Value,

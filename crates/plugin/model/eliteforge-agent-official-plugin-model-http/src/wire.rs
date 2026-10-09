@@ -147,7 +147,21 @@ pub fn response_to_framework(response: ModelResponse) -> Result<fw::ChatResponse
         reasoning_tokens: usage.reasoning_tokens.map(u64::from),
     });
     let result = fw::ChatResponse {
+        public_content: None,
         content: response.output_text().into(),
+        reasoning: {
+            let text: String = response
+                .assistant
+                .parts
+                .iter()
+                .filter_map(|part| match part {
+                    crate::AgentMessagePart::Reasoning { text }
+                    | crate::AgentMessagePart::ReasoningSummary { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            (!text.is_empty()).then_some(text)
+        },
         structured: serde_json::from_str(&response.output_text()).ok(),
         tool_calls: response
             .tool_calls()

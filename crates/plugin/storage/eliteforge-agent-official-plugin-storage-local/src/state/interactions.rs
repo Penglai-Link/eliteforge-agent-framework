@@ -15,6 +15,7 @@ impl Plugin for SqliteExecutionPlugin {
         context.provide(InteractionStoreService(interaction_store.clone()))?;
         context.contribute_extension(interaction_store)?;
         context.provide(SessionStoreService(self.0.clone()))?;
+        context.provide(HistoryStoreService(self.0.clone()))?;
         context.contribute_extension(self.0.clone() as Arc<dyn SessionStore>)
     }
 }
@@ -142,6 +143,7 @@ impl InteractionStore for SqliteStateStore {
                     params![encoded, record.request.id.to_string()],
                 )
                 .map_err(database_error)?;
+                crate::history::answer(&tx, &record)?;
                 tx.commit().map_err(database_error)?;
                 Ok(record)
             })

@@ -45,6 +45,25 @@ impl ModelProtocolAdapter for ChatCompletionsAdapter {
     fn parse_stream_event(&self, body: &Value) -> Result<Option<ModelStreamEvent>, String> {
         Ok(parse_chat_stream_event(body))
     }
+    fn parse_stream_events(&self, body: &Value) -> Result<Vec<ModelStreamEvent>, String> {
+        let Some(delta) = body.pointer("/choices/0/delta") else {
+            return Ok(Vec::new());
+        };
+        // Compatible providers can return text and reasoning in one packet.
+        // They are independent channels, not mutually exclusive alternatives.
+        Ok([
+            chat_reasoning_delta(delta).map(ModelStreamEvent::reasoning_delta),
+            chat_compatible_reasoning_summary(delta).map(ModelStreamEvent::reasoning_summary_delta),
+            delta
+                .get("content")
+                .and_then(text_from_content)
+                .map(ModelStreamEvent::text_delta),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|event| !event.delta.is_empty())
+        .collect())
+    }
 
     fn parse_usage(&self, body: &Value) -> Option<ModelTokenUsage> {
         parse_openai_compatible_usage(body)
@@ -241,4 +260,21 @@ fn chat_reasoning_delta(delta: &Value) -> Option<String> {
     ]
     .iter()
     .find_map(|key| delta.get(key).and_then(text_from_content))
+}
+
+#[cfg(test)]
+mod history_stream_tests {
+    use super::*;
+    #[test]
+    fn retains_every_channel_in_one_compatible_provider_packet() {
+        let events=ChatCompletionsAdapter.parse_stream_events(&serde_json::json!({"choices":[{"delta":{"content":"answer","reasoning_content":"actual reasoning","reasoning_summary":"summary"}}]})).unwrap();
+        assert_eq!(
+            events,
+            vec![
+                ModelStreamEvent::reasoning_delta("actual reasoning"),
+                ModelStreamEvent::reasoning_summary_delta("summary"),
+                ModelStreamEvent::text_delta("answer")
+            ]
+        );
+    }
 }
