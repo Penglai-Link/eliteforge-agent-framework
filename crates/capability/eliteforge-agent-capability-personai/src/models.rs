@@ -762,6 +762,7 @@ impl ImageGenerationModel for BoundPersonAiModels {
             size: request.size,
             n: Some(count),
             quality: request.quality,
+            ..Default::default()
         };
         let response = if request.provider_options.is_empty() {
             self.services
