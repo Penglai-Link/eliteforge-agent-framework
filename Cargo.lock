@@ -1002,6 +1002,7 @@ dependencies = [
  "crab-serverapi",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
+ "eliteforge-agent-official-plugin-tools-discovery",
  "eliteforge-agent-plugin-core",
  "eliteforge-agent-test-support",
  "futures",

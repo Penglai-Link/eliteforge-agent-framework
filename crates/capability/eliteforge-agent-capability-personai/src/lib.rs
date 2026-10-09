@@ -8,6 +8,7 @@ mod models;
 mod realtime;
 mod services;
 mod sync;
+mod tools;
 
 pub use connection::PersonAiConnection;
 pub use context::{AccountContext, PersonAiContextHandle, PersonAiContextProvider};
@@ -15,6 +16,7 @@ pub use crab_serverapi as sdk;
 pub use models::PersonAiModels;
 pub use services::{PersonAiServices, detect_device_id, validate_device_id};
 pub use sync::{PersonAiModelSync, PersonAiSyncStatus, SyncDomainStatus};
+pub use tools::{PersonAiToolProvider, personai_tool_catalog};
 
 use async_trait::async_trait;
 use eliteforge_agent_core::{
@@ -52,11 +54,28 @@ impl PersonAiConfig {
 /// Attaches an initialized host connection without starting another synchronizer.
 pub struct PersonAiCapabilityPack {
     connection: Arc<PersonAiConnection>,
+    register_tools: bool,
 }
 
 impl PersonAiCapabilityPack {
     pub fn new(connection: Arc<PersonAiConnection>) -> Self {
-        Self { connection }
+        Self {
+            connection,
+            register_tools: true,
+        }
+    }
+
+    /// Raw provider for composition with ToolDiscoveryPlugin. Install this provider
+    /// through discovery and call `without_tools` to avoid duplicate registration.
+    pub fn tools(&self) -> PersonAiToolProvider {
+        PersonAiToolProvider::new(self.connection.clone())
+    }
+
+    /// Keep SDK services and model adapters, while the host registers `tools()`
+    /// through its own shared discovery catalog or other ToolProvider composition.
+    pub fn without_tools(mut self) -> Self {
+        self.register_tools = false;
+        self
     }
 
     /// Host access before this pack is moved into `FrameworkBuilder::capability_pack`.
@@ -76,11 +95,18 @@ impl CapabilityPack for PersonAiCapabilityPack {
         &self.connection.config
     }
     fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
-        vec![Arc::new(PersonAiPlugin {
+        let mut plugins: Vec<Arc<dyn Plugin>> = vec![Arc::new(PersonAiPlugin {
             connection: self.connection.clone(),
             runtime: ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![]))
                 .expect("empty model runtime is valid"),
-        })]
+        })];
+        if self.register_tools {
+            plugins.push(Arc::new(
+                eliteforge_agent_official_plugin_tools_discovery::ToolDiscoveryPlugin::new()
+                    .provider(self.tools()),
+            ));
+        }
+        plugins
     }
 }
 
@@ -289,7 +315,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pack_exposes_sdk_services_without_agent_business_tools() {
+    async fn pack_exposes_sdk_services_and_agent_tools() {
         let context = Arc::new(PersonAiContextHandle::default());
         context.publish(AccountContext {
             account_scope: "test".into(),
@@ -365,12 +391,24 @@ mod tests {
         let _ = &host_services.versions;
         let _ = &host_services.relay;
         assert!(container.services().get::<ModelRuntimeService>().is_some());
+        assert_eq!(
+            container.services().extensions::<dyn ToolProvider>().len(),
+            1
+        );
+        let mut services_only = PluginContainer::build(
+            PersonAiCapabilityPack::new(connection.clone())
+                .without_tools()
+                .plugins(),
+        )
+        .await
+        .unwrap();
         assert!(
-            container
+            services_only
                 .services()
                 .extensions::<dyn ToolProvider>()
                 .is_empty()
         );
+        services_only.close_async(Duration::from_secs(1)).await;
         container.close_async(Duration::from_secs(1)).await;
         assert!(!connection.is_closed());
         assert_eq!(second_runtime.snapshot().chat.models().len(), 1);

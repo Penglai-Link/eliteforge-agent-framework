@@ -1,6 +1,6 @@
 # PersonAI 能力包
 
-`eliteforge-agent-capability-personai` 是可选包，不在官方默认能力包中。它把 PersonAI SDK 的模型调用接入 Framework，同时把 SDK 的业务客户端以类型化 `PersonAiServices` 交给宿主应用。业务接口不会注册成 Agent 工具。
+`eliteforge-agent-capability-personai` 是可选包，不在官方默认能力包中。它把 PersonAI SDK 的模型调用接入 Framework，同时把 SDK 的业务客户端以类型化 `PersonAiServices` 交给宿主应用。搜索、图片生成、图片任务查询和 AIGC 文本／图片检测通过 `ToolProvider` 提供给 Agent；登录、账户、签到等业务接口继续由宿主直接调用。
 
 | SDK 能力 | Framework 接入方式 |
 | --- | --- |
@@ -9,6 +9,7 @@
 | 图片、视频 | 独立生成模型接口及任务查询；SDK 无远端取消接口时明确返回不支持 |
 | 文件语音转写、实时转写 | 语音识别与实时会话接口；服务端选模型，对外只公布 `speech-auto`，不伪造指定模型路由 |
 | AIGC 文本、图片检测 | `ContentDetectionModel` |
+| Web 搜索、图片生成／查询、AIGC 检测 | `PersonAiToolProvider`，默认通过 Discovery 按需暴露 |
 | 签到、用户信息、积分及其他业务服务 | `PersonAiServices` 中的 SDK 客户端，供宿主直接调用；不提供 `ToolProvider` |
 
 ## 连接的所有权
@@ -55,3 +56,33 @@ ModelRecoveryPlugin(ModelRecoveryPolicy {
 恢复不会重新执行整个 `run` 或已经完成的工具。图片、视频提交不使用聊天恢复策略，结果不确定时不自动再次提交。已取得任务 ID 的查询使用提交时绑定，因此模型下架后仍可查询；宿主关闭整个连接后停止查询。
 
 `PersonAiServices` 暴露登录、账户、签到、Chat、Responses、Embedding、搜索、多媒体、语音、Skills、角色、仓库、站点、皮肤、文件、版权、通知、广告、反馈、版本和转发等 SDK 客户端。能取得客户端不等于 Agent 获得了调用权限；宿主自行决定哪些业务调用可以对用户或 Agent 开放，并继续执行鉴权、限流和审计。
+
+
+## Agent 工具与 Discovery
+
+`PersonAiCapabilityPack::new(connection)` 默认安装 `ToolDiscoveryPlugin`。Agent 初始只看到 `tool_search`，搜索 `personai` 后取得并激活下列工具；执行仍经过 Framework 的参数校验、宿主 `ToolPolicy` 和审计。
+
+| 工具 | 输入 | 结果 |
+| --- | --- | --- |
+| `personai_search` | `query`，可选 `count`（1–20） | 标题、URL、摘要、来源 |
+| `personai_generate_image` | `prompt`，可选 `model`、`size`、`quality`、`count`（1–10） | `task_id` 与 `job` |
+| `personai_query_image` | `task_id` | `job` 中的状态、进度、图片 URL、错误 |
+| `personai_detect_text` | `text`，可选 `model` | 模型引用与检测结果 |
+| `personai_detect_image` | HTTP(S) `image_url`，可选 `model` | 模型引用与检测结果 |
+
+生成和检测省略 `model` 时选择该操作目录中的首个模型；显式选择只能引用该操作已发现的模型。图片生成提交后立即返回任务，Agent 按需查询完成状态，工具不在内部循环等待。所有工具同时提供文本与 `structured` JSON 结果，供宿主展示。
+
+宿主已有统一 Discovery 时，把原始 Provider 放进去，并关闭包内的工具注册，避免重复安装 `tool_search`：
+
+```rust,ignore
+let pack = PersonAiCapabilityPack::new(connection.clone());
+let discovery = ToolDiscoveryPlugin::new()
+    .provider(pack.tools()); // 可继续加入 Web、Media 等 Provider
+let builder = Framework::builder()
+    .capability_pack(pack.without_tools())
+    .plugin(discovery);
+```
+
+每次 run 捕获当前账号凭据和对应目录。账号切换、退出或关闭连接后，旧 run 的后续工具调用明确失败；新 run 不会继承旧账号目录。任务 ID 由远端按当前账号授权，工具查询不会恢复其他账号的凭据。关闭 Agent 不关闭共享 PersonAI 连接。
+
+Framework 提供远端通用工具；宿主负责登录、能力选择、权限、审计配置和结果展示。官方 Media 的本地图片／PDF 读取及 Web Fetch 的网页读取可与这些工具一起组合进统一 Discovery。

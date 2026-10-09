@@ -93,6 +93,10 @@ impl ConfinedFileReader {
         )))
     }
 
+    pub fn from_config(config: FileSystemToolsConfig) -> Self {
+        Self(filesystem::FileSystemRoot::new(config))
+    }
+
     pub fn read(
         &self,
         path: &str,

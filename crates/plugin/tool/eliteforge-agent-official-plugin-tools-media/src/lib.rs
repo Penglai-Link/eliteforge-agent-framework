@@ -3,7 +3,9 @@
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use eliteforge_agent_core::*;
-use eliteforge_agent_official_plugin_tools_local::ConfinedFileReader;
+use eliteforge_agent_official_plugin_tools_local::{
+    ConfinedFile, ConfinedFileReader, FileReferenceReaderService, FileSystemToolsConfig,
+};
 #[cfg(test)]
 use eliteforge_agent_test_support::TestBuilder;
 use serde::Deserialize;
@@ -34,6 +36,10 @@ impl MediaToolsConfig {
             max_text_bytes: 64 * 1024,
             image_tokens: None,
         }
+    }
+    pub fn with_filesystem_scope(mut self, scope: FileSystemToolsConfig) -> Self {
+        self.reader = ConfinedFileReader::from_config(scope);
+        self
     }
     pub fn with_max_bytes(mut self, bytes: usize) -> Self {
         self.max_bytes = bytes.clamp(1, 32 * 1024 * 1024);
@@ -82,6 +88,32 @@ impl Plugin for MediaToolsPlugin {
         .await
     }
 }
+/// Reusable provider for run-scoped host installation and unified discovery.
+#[async_trait]
+impl ToolProvider for MediaToolsPlugin {
+    fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
+        Some(media_tool_catalog())
+    }
+    async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError> {
+        MediaProvider {
+            config: self.config.clone(),
+            slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        }
+        .lease(context)
+        .await
+    }
+}
+
+pub fn media_tool_catalog() -> Vec<ToolDescriptor> {
+    [true, false].into_iter().map(|image| {
+        let (id, name, description) = if image { ("media.read_image", "media_read_image", "Read a scoped local image or attachment as native media; validates size and dimensions.") }
+            else { ("media.read_pdf", "media_read_pdf", "Read selected PDF pages from a scoped local file or attachment. Returns text and page numbers; no OCR.") };
+        let mut schema = json!({"type":"object","additionalProperties":false,"oneOf":[{"required":["path"]},{"required":["fileRef"]}],"properties":{"path":{"type":"string","minLength":1},"fileRef":{"type":"object"}}});
+        if !image { schema["properties"]["startPage"]=json!({"type":"integer","minimum":1}); schema["properties"]["endPage"]=json!({"type":"integer","minimum":1}); }
+        ToolDescriptor::new(id, name, description, schema)
+    }).collect()
+}
+
 struct MediaProvider {
     config: MediaToolsConfig,
     slots: Arc<tokio::sync::Semaphore>,
@@ -89,12 +121,23 @@ struct MediaProvider {
 #[async_trait]
 impl ToolProvider for MediaProvider {
     async fn lease(&self, _: &RunContext) -> Result<ToolLease, AgentError> {
-        Ok(ToolLease::new([true,false].into_iter().map(|image|{
-            let (id,name,description)=if image {("media.read_image","media_read_image","Read a confined local PNG/JPEG/WebP/GIF into a native image content block. Validates image dimensions and file size. Model/provider must support this media type.")} else {("media.read_pdf","media_read_pdf","Read text from selected pages of a confined local PDF. Returns page numbers and truncation state. No rendering or OCR; scanned pages can have no text.")};
-            let mut schema=json!({"type":"object","additionalProperties":false,"required":["path"],"properties":{"path":{"type":"string","minLength":1}}});
-            if !image {schema["properties"]["startPage"]=json!({"type":"integer","minimum":1});schema["properties"]["endPage"]=json!({"type":"integer","minimum":1});}
-            ToolBinding::new(ToolDescriptor::new(id,name,description,schema),MediaTool {config:self.config.clone(),slots:self.slots.clone(),image}).parallel_safe()
-        }).collect()))
+        Ok(ToolLease::new(
+            media_tool_catalog()
+                .into_iter()
+                .enumerate()
+                .map(|(index, descriptor)| {
+                    ToolBinding::new(
+                        descriptor,
+                        MediaTool {
+                            config: self.config.clone(),
+                            slots: self.slots.clone(),
+                            image: index == 0,
+                        },
+                    )
+                    .parallel_safe()
+                })
+                .collect(),
+        ))
     }
 }
 struct MediaTool {
@@ -105,7 +148,8 @@ struct MediaTool {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Input {
-    path: String,
+    path: Option<String>,
+    file_ref: Option<Value>,
     start_page: Option<u32>,
     end_page: Option<u32>,
 }
@@ -118,6 +162,27 @@ impl Tool for MediaTool {
             _=context.cancellation.cancelled()=>return Err(failed("media read cancelled")),
             permit=tokio::time::timeout_at(deadline,self.slots.clone().acquire_owned())=>permit.map_err(|_|failed("media read timed out"))?.map_err(|_|failed("media reader closed"))?
         };
+        let referenced = match (&input.path, &input.file_ref) {
+            (Some(_), None) => None,
+            (None, Some(reference)) => {
+                let service = context
+                    .extensions
+                    .get::<FileReferenceReaderService>()
+                    .ok_or_else(|| failed("file reference reader is not installed"))?;
+                let file = tokio::select! {biased;
+                    _ = context.cancellation.cancelled() => return Err(failed("media read cancelled")),
+                    result = tokio::time::timeout_at(deadline, service.0.read(reference.clone(), self.config.max_bytes, context)) => result.map_err(|_| failed("media read timed out"))??,
+                };
+                if file.bytes.len() > self.config.max_bytes {
+                    return Err(failed("media exceeds byte limit"));
+                }
+                Some(ConfinedFile {
+                    path: file.name,
+                    bytes: file.bytes,
+                })
+            }
+            _ => return Err(failed("provide exactly one of path or fileRef")),
+        };
         let config = self.config.clone();
         let mut worker_context = context.clone();
         worker_context.cancellation = context.cancellation.child_token();
@@ -128,7 +193,13 @@ impl Tool for MediaTool {
         let worker = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             active(&worker_context)?;
-            let file = config.reader.read(&input.path, config.max_bytes)?;
+            let file = match referenced {
+                Some(file) => file,
+                None => config.reader.read(
+                    input.path.as_deref().expect("validated path"),
+                    config.max_bytes,
+                )?,
+            };
             active(&worker_context)?;
             if image {
                 read_image(&config, file.path, &file.bytes, &worker_context)
@@ -321,6 +392,104 @@ mod tests {
     use super::*;
 
     use eliteforge_agent_test_support::TestConversationStore;
+
+    struct AttachmentReader;
+    #[async_trait]
+    impl eliteforge_agent_official_plugin_tools_local::FileReferenceReader for AttachmentReader {
+        async fn read(
+            &self,
+            reference: Value,
+            _: usize,
+            _: &RunContext,
+        ) -> Result<eliteforge_agent_official_plugin_tools_local::ReferencedFile, ToolError>
+        {
+            if reference != json!({"id":"allowed"}) {
+                return Err(failed("attachment access denied"));
+            }
+            let mut bytes = Cursor::new(Vec::new());
+            image::DynamicImage::new_rgb8(1, 1)
+                .write_to(&mut bytes, image::ImageFormat::Png)
+                .unwrap();
+            Ok(
+                eliteforge_agent_official_plugin_tools_local::ReferencedFile {
+                    name: "attachment.png".into(),
+                    bytes: bytes.into_inner(),
+                    reference,
+                },
+            )
+        }
+    }
+    struct AttachmentRead;
+    #[async_trait]
+    impl AgentLoop for AttachmentRead {
+        async fn run(
+            &self,
+            _: &RunRequest,
+            context: &RunContext,
+            services: &AgentServices,
+        ) -> Result<RunResult, AgentError> {
+            let lease = services.tools[0].lease(context).await?;
+            let tool = &lease.tools[0].executor;
+            let output = tool
+                .call(json!({"fileRef":{"id":"allowed"}}), context)
+                .await
+                .unwrap();
+            assert_eq!(output.structured.as_ref().unwrap()["width"], 1);
+            assert!(
+                output
+                    .content
+                    .0
+                    .iter()
+                    .any(|block| matches!(block, ContentBlock::Media { .. }))
+            );
+            let denied = tool
+                .call(json!({"fileRef":{"id":"other-session"}}), context)
+                .await
+                .unwrap_err();
+            assert!(denied.to_string().contains("access denied"));
+            assert!(
+                tool.call(json!({"path":"a.png","fileRef":{"id":"allowed"}}), context)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                tool.call(json!({"path":"../outside.png"}), context)
+                    .await
+                    .is_err()
+            );
+            Ok(RunResult {
+                output: String::new(),
+                content: Content::default(),
+                structured: None,
+                status: RunStatus::Completed,
+                interactions: vec![],
+                usage: Usage::default(),
+                steps: 0,
+                tool_calls: 0,
+                external_session: None,
+            })
+        }
+    }
+    #[tokio::test]
+    async fn media_attachments_use_host_authority_and_preserve_native_content() {
+        let agent = TestBuilder::new()
+            .default_models(false)
+            .plugin(ConversationStorePlugin::new(
+                TestConversationStore::default(),
+            ))
+            .plugin(AgentLoopPlugin::new(AttachmentRead))
+            .plugin(MediaToolsPlugin::new(MediaToolsConfig::new(".")))
+            .build()
+            .await
+            .unwrap();
+        let mut request = RunRequest::new("attachment", "read image");
+        request
+            .extensions
+            .insert(FileReferenceReaderService(Arc::new(AttachmentReader)));
+        let result = agent.run(request).await.unwrap();
+        assert_eq!(result.status, RunStatus::Completed);
+        assert!(agent.framework().close().await.is_success());
+    }
 
     struct QueueTimeout;
     #[async_trait]

@@ -379,6 +379,19 @@ impl BoundPersonAiModels {
         }
         error
     }
+    pub(crate) async fn search(
+        &self,
+        query: &str,
+        count: Option<i32>,
+    ) -> Result<crab_serverapi::gateway::SearchResponse, ModelError> {
+        self.ensure_current()?;
+        self.services
+            .search
+            .search(&self.account.authorization, query, count)
+            .await
+            .map_err(map_error)
+    }
+
     pub fn account_scope(&self) -> &str {
         &self.account.account_scope
     }

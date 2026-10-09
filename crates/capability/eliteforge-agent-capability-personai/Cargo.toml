@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-official-plugin-tools-discovery = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-discovery", version = "0.1.0" }
 eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", version = "0.1.0", default-features = false }
 crab-serverapi = { git = "https://gitee.com/person-ai/person-ai-index-rust-sdk.git", rev = "08ba3151f462c75bee4ce4ddb8f6147b2203e8ff" }
 async-trait.workspace = true

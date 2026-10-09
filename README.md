@@ -133,7 +133,7 @@ crates/
 | `eliteforge-agent-core` | 公共类型、能力接口、CapabilityPack API 和 Plugin 契约 |
 | `eliteforge-agent-capability-tools` | 按领域选择本地、Web、媒体、MCP、人机交互和 Agent 协作工具 |
 | `eliteforge-agent-capability-external` | 装配独立的外部 Agent 执行循环与 CLI/JSON 服务桥 |
-| `eliteforge-agent-capability-personai` | 接入 PersonAI 模型，并向上层应用提供 SDK 业务服务 |
+| `eliteforge-agent-capability-personai` | 接入 PersonAI 模型、搜索／图片生成／AIGC 工具及宿主 SDK 服务 |
 | `eliteforge-agent-official-plugin-tools-local` | 进程内文件、命令和 PTY 实现；命令超过 10 秒返回 ID，提供读取与停止工具 |
 | `eliteforge-agent-official-plugin-agent-external` | Codex/OpenCode CLI 与 JSON 服务桥的执行、事件转换和原生会话引用 |
 | `eliteforge-agent-official-plugin-skills` | Agent Skills 标准文件系统发现、渐进式加载和可替换 Provider |
