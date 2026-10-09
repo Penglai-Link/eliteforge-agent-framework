@@ -1,0 +1,180 @@
+{
+  "display": {
+    "mode": "Display",
+    "messages": [
+      {
+        "version": "v0.9.1",
+        "createSurface": {
+          "surfaceId": "report",
+          "catalogId": "https://eliteforge.dev/a2ui/v0.9.1/agent"
+        }
+      },
+      {
+        "version": "v0.9.1",
+        "updateComponents": {
+          "surfaceId": "report",
+          "components": [
+            {
+              "id": "root",
+              "component": "Text",
+              "text": "Report ready"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "form": {
+    "mode": "SubmitOnce",
+    "responseSchema": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "messages": [
+      {
+        "version": "v0.9.1",
+        "createSurface": {
+          "surfaceId": "profile",
+          "catalogId": "https://eliteforge.dev/a2ui/v0.9.1/agent"
+        }
+      },
+      {
+        "version": "v0.9.1",
+        "updateComponents": {
+          "surfaceId": "profile",
+          "components": [
+            {
+              "id": "root",
+              "component": "Column",
+              "children": [
+                "name",
+                "submit"
+              ]
+            },
+            {
+              "id": "name",
+              "component": "TextField",
+              "label": "Name",
+              "value": {
+                "path": "/name"
+              }
+            },
+            {
+              "id": "submit",
+              "component": "Button",
+              "child": "submit-label",
+              "action": {
+                "event": {
+                  "name": "submit",
+                  "context": {
+                    "response": {
+                      "path": "/"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "id": "submit-label",
+              "component": "Text",
+              "text": "Submit"
+            }
+          ]
+        }
+      },
+      {
+        "version": "v0.9.1",
+        "updateDataModel": {
+          "surfaceId": "profile",
+          "value": {
+            "name": ""
+          }
+        }
+      }
+    ]
+  },
+  "reusable": {
+    "mode": "Reusable",
+    "messages": [
+      {
+        "version": "v0.9.1",
+        "createSurface": {
+          "surfaceId": "query",
+          "catalogId": "https://eliteforge.dev/a2ui/v0.9.1/agent",
+          "sendDataModel": true
+        }
+      },
+      {
+        "version": "v0.9.1",
+        "updateComponents": {
+          "surfaceId": "query",
+          "components": [
+            {
+              "id": "root",
+              "component": "Column",
+              "children": [
+                "query",
+                "search",
+                "result"
+              ]
+            },
+            {
+              "id": "query",
+              "component": "TextField",
+              "label": "Query",
+              "value": {
+                "path": "/query"
+              }
+            },
+            {
+              "id": "search",
+              "component": "Button",
+              "child": "search-label",
+              "action": {
+                "event": {
+                  "name": "search",
+                  "context": {
+                    "query": {
+                      "path": "/query"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "id": "search-label",
+              "component": "Text",
+              "text": "Search"
+            },
+            {
+              "id": "result",
+              "component": "Text",
+              "text": {
+                "path": "/result"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "version": "v0.9.1",
+        "updateDataModel": {
+          "surfaceId": "query",
+          "value": {
+            "query": "",
+            "result": "Enter a query"
+          }
+        }
+      }
+    ]
+  }
+}

@@ -51,6 +51,7 @@ impl HttpProtocolClient {
                 &body,
                 Arc::new(move |event| {
                     let mut state = callback_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let first_event = state.2 == 0;
                     state.2 = state.2.saturating_add(
                         serde_json::to_vec(&event)
                             .map_err(|_| fw::ModelError::Fatal("invalid model event".into()))?
@@ -61,7 +62,7 @@ impl HttpProtocolClient {
                             "model stream exceeds total byte limit".into(),
                         ));
                     }
-                    if let Some(error) = stream_failure(&event) {
+                    if let Some(error) = stream_failure(&event, first_event) {
                         return Err(error);
                     }
                     if let Some(usage) = adapter.parse_usage(&event) {
@@ -118,7 +119,7 @@ impl HttpProtocolClient {
     }
 }
 
-fn stream_failure(event: &serde_json::Value) -> Option<fw::ModelError> {
+fn stream_failure(event: &serde_json::Value, first_event: bool) -> Option<fw::ModelError> {
     let has_error = event.get("error").is_some_and(|error| !error.is_null());
     let is_failure = event
         .get("type")
@@ -142,9 +143,26 @@ fn stream_failure(event: &serde_json::Value) -> Option<fw::ModelError> {
             )
         });
     }
-    Some(fw::ModelError::Indeterminate(format!(
-        "model stream failed before completion: {details}"
-    )))
+    // A first-frame model rejection is a definite pre-generation failure.
+    // Keep every other stream failure indeterminate, including partial output.
+    let error = event
+        .get("error")
+        .or_else(|| event.pointer("/response/error"));
+    let code = error
+        .and_then(|value| value.get("code"))
+        .and_then(serde_json::Value::as_str);
+    let message = error
+        .and_then(|value| value.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let model_rejected = matches!(code, Some("model_not_found" | "model_not_available"))
+        || message.contains("The model does not exist or you do not have access to it.");
+    let message = format!("model stream failed before completion: {details}");
+    Some(if first_event && model_rejected {
+        fw::ModelError::Unavailable(message)
+    } else {
+        fw::ModelError::Indeterminate(message)
+    })
 }
 
 /// Stable typed error carrier for legacy host ports. The invoker decodes the

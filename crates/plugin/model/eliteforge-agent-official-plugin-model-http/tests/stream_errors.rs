@@ -143,3 +143,17 @@ async fn null_error_does_not_reject_a_successful_response() {
     let response = generate(vec![completed()]).await.unwrap();
     assert_eq!(response.assistant.text_content(), "OK");
 }
+
+#[tokio::test]
+async fn explicit_model_rejection_allows_recovery_only_before_any_stream_event() {
+    let rejection = json!({"error":{"type":"gateway_error","message":"Stream chat completion failed: The model does not exist or you do not have access to it."}});
+    let error = generate(vec![rejection.clone()]).await.unwrap_err();
+    assert!(matches!(error, ModelError::Unavailable(message) if message.contains("gateway_error")));
+    let error = generate(vec![
+        json!({"type":"response.output_text.delta","delta":"partial"}),
+        rejection,
+    ])
+    .await
+    .unwrap_err();
+    assert!(matches!(error, ModelError::Indeterminate(_)));
+}

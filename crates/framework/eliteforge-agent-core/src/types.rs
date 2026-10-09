@@ -257,8 +257,7 @@ pub enum ProviderErrorCategory {
 
 /// Structured provider failure. Messages are raw and must pass through the
 /// host's redaction policy before export, just like other model errors.
-#[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
-#[error("{provider} model error: {message}")]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderModelError {
     /// Opaque transport attempt identity, never a credential. Used to bind recovery to the rejected request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -271,6 +270,36 @@ pub struct ProviderModelError {
     pub model: Option<crate::ModelRef>,
     pub message: String,
 }
+
+impl std::fmt::Display for ProviderModelError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let message = if self.message.trim().is_empty() {
+            "model request failed"
+        } else {
+            &self.message
+        };
+        write!(f, "{} model error: {}", self.provider, message)?;
+        let mut details = Vec::new();
+        if let Some(status) = self.http_status {
+            details.push(format!("HTTP {status}"));
+        }
+        if let Some(code) = self.business_code {
+            details.push(format!("code {code}"));
+        }
+        if let Some(kind) = self
+            .error_type
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            details.push(format!("type {kind}"));
+        }
+        if !details.is_empty() {
+            write!(f, " [{}]", details.join(", "))?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for ProviderModelError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum ModelError {

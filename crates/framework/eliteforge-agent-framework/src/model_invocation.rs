@@ -321,7 +321,7 @@ impl ModelClient {
                                         return Err(error.into());
                                     }
                                     Err(failure) => {
-                                        binding.implementation.on_failure(&error);
+                                        binding.implementation.on_failure(&failure);
                                         return Err(failure.into());
                                     }
                                 }
@@ -439,7 +439,7 @@ impl ModelClient {
                                         return Err(error.into());
                                     }
                                     Err(failure) => {
-                                        binding.implementation.on_failure(&error);
+                                        binding.implementation.on_failure(&failure);
                                         return Err(failure.into());
                                     }
                                 }

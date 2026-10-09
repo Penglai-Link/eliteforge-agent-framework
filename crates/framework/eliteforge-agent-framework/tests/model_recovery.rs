@@ -516,3 +516,57 @@ async fn recovery_skips_missing_and_already_failed_candidates() {
     );
     assert_eq!(*calls.lock().unwrap(), vec!["old", "bad", "good"]);
 }
+
+struct MixedRecovery(Arc<Mutex<Vec<String>>>);
+#[async_trait]
+impl ChatModel for MixedRecovery {
+    async fn generate(
+        &self,
+        model: &str,
+        _: ChatRequest,
+        _: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        self.0.lock().unwrap().push(model.into());
+        match model {
+            "old" => Err(ModelError::Unavailable("model rejected".into())),
+            "bad" => Err(ModelError::Transient("HTTP 500 before output".into())),
+            "good" => Ok(ChatResponse::text("recovered")),
+            _ => unreachable!(),
+        }
+    }
+}
+#[tokio::test]
+async fn transient_replacement_failure_advances_without_expanding_dispatch_budget() {
+    for limit in [2, 3] {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let agent = TestBuilder::default()
+            .plugin(ModelConnectionPlugin::new(ModelConnection::new(
+                "test",
+                Arc::new(MixedRecovery(calls.clone())),
+                ["old", "bad", "good"].map(ModelDescriptor::new).to_vec(),
+            )))
+            .plugin(ModelStrategyPlugin(Arc::new(FixedModelStrategy(
+                ModelRef::new("test", "old"),
+            ))))
+            .plugin(ModelRecoveryPlugin(ModelRecoveryPolicy {
+                candidates: ["old", "bad", "good"]
+                    .map(|id| ModelRef::new("test", id))
+                    .to_vec(),
+                allow_explicit_model_replacement: false,
+            }))
+            .build()
+            .await
+            .unwrap();
+        let mut request = RunRequest::new("mixed-recovery", "hello");
+        request.limits.max_model_retries = 2;
+        request.limits.max_model_calls_per_step = Some(limit);
+        let result = agent.run(request).await;
+        if limit == 3 {
+            assert_eq!(result.unwrap().output, "recovered");
+            assert_eq!(*calls.lock().unwrap(), vec!["old", "bad", "good"]);
+        } else {
+            assert!(result.unwrap_err().to_string().contains("budget"));
+            assert_eq!(*calls.lock().unwrap(), vec!["old", "bad"]);
+        }
+    }
+}

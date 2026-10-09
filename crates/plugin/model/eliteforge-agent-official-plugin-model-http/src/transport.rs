@@ -112,7 +112,8 @@ impl ModelTransport for HttpModelTransport {
     ) -> Result<(), ModelError> {
         read_events(
             self.request(path, body)?
-                .header("Accept", "text/event-stream")
+                // Before SSE starts, gateways can return a JSON routing/auth error.
+                .header("Accept", "text/event-stream, application/json")
                 .send()
                 .await
                 .map_err(transport_error)?,
@@ -222,7 +223,8 @@ impl ModelTransport for PersonAiModelTransport {
     ) -> Result<(), ModelError> {
         read_events(
             self.request(path, body)?
-                .header("Accept", "text/event-stream")
+                // Before SSE starts, gateways can return a JSON routing/auth error.
+                .header("Accept", "text/event-stream, application/json")
                 .send()
                 .await
                 .map_err(transport_error)?,
@@ -253,21 +255,26 @@ fn transport_error(error: reqwest::Error) -> ModelError {
     }
 }
 pub fn status_error(status: u16, body: &Value) -> ModelError {
-    let code = body
-        .pointer("/error/code")
-        .or_else(|| body.pointer("/error/type"))
-        .and_then(Value::as_str)
+    let code = [body.pointer("/error/code"), body.pointer("/error/type")]
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|value| !value.trim().is_empty())
         .unwrap_or("");
     if matches!(code, "context_length_exceeded" | "context_window_exceeded") {
         return ModelError::ContextOverflow("model context exceeded".into());
     }
-    let message = body
-        .pointer("/error/message")
-        .or_else(|| body.get("message"))
-        .or_else(|| body.get("msg"))
-        .and_then(Value::as_str)
-        .unwrap_or("model request failed")
-        .to_string();
+    let message = [
+        body.pointer("/error/message"),
+        body.get("message"),
+        body.get("msg"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(Value::as_str)
+    .find(|value| !value.trim().is_empty())
+    .unwrap_or("model request failed")
+    .to_string();
     let code = if message.contains("device_unbound") || message.contains("设备已解绑") {
         "device_unbound"
     } else {
@@ -305,7 +312,7 @@ pub fn status_error(status: u16, body: &Value) -> ModelError {
         category,
         http_status: Some(status),
         business_code: body.get("code").and_then(Value::as_i64).map(|n| n as i32),
-        error_type: Some(code.into()),
+        error_type: (!code.is_empty()).then(|| code.into()),
         model: None,
         message,
     }))

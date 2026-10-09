@@ -707,7 +707,20 @@ impl ChatModel for AuthModel {
             _ => std::future::pending().await,
         }
     }
-    fn on_failure(&self, _: &Extensions, _: &ModelError) {
+    fn on_failure(&self, _: &Extensions, error: &ModelError) {
+        if self.recoveries.load(Ordering::SeqCst) > 0 && self.mode >= 2 {
+            assert!(
+                matches!(error, ModelError::Fatal(_)),
+                "unexpected recovery failure: {error}"
+            );
+            if self.mode == 2 {
+                assert!(error.to_string().contains("refresh failed"));
+            }
+        } else {
+            assert!(
+                matches!(error, ModelError::Provider(detail) if detail.category == ProviderErrorCategory::Authentication)
+            );
+        }
         self.failures.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -795,7 +808,14 @@ impl EmbeddingModel for AuthOperation {
         self.recoveries.fetch_add(1, Ordering::SeqCst);
         Err(ModelError::Fatal("refresh failed".into()))
     }
-    fn on_failure(&self, _: &ModelError) {
+    fn on_failure(&self, error: &ModelError) {
+        if self.recoveries.load(Ordering::SeqCst) > 0 {
+            assert!(matches!(error, ModelError::Fatal(message) if message == "refresh failed"));
+        } else {
+            assert!(
+                matches!(error, ModelError::Provider(detail) if detail.category == ProviderErrorCategory::Authentication)
+            );
+        }
         self.failures.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -812,7 +832,14 @@ impl RerankModel for AuthOperation {
         self.recoveries.fetch_add(1, Ordering::SeqCst);
         Err(ModelError::Fatal("refresh failed".into()))
     }
-    fn on_failure(&self, _: &ModelError) {
+    fn on_failure(&self, error: &ModelError) {
+        if self.recoveries.load(Ordering::SeqCst) > 0 {
+            assert!(matches!(error, ModelError::Fatal(message) if message == "refresh failed"));
+        } else {
+            assert!(
+                matches!(error, ModelError::Provider(detail) if detail.category == ProviderErrorCategory::Authentication)
+            );
+        }
         self.failures.fetch_add(1, Ordering::SeqCst);
     }
 }

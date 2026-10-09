@@ -167,3 +167,71 @@ async fn model_and_probe_redirects_never_post_to_target_even_with_host_follow_po
         }
     }
 }
+
+#[test]
+fn blank_provider_messages_keep_fallbacks_and_display_status_without_attempt_identity() {
+    let error = status_error(
+        403,
+        &json!({"error":{"code":"", "type":"gateway_error", "message":""}, "message":" ", "msg":"模型不在套餐内", "code":17}),
+    );
+    let fw::ModelError::Provider(mut detail) = error else {
+        panic!()
+    };
+    detail.authorization_attempt = Some("private-attempt-identity".into());
+    let displayed = detail.to_string();
+    assert!(displayed.contains("模型不在套餐内"));
+    assert!(displayed.contains("HTTP 403"));
+    assert!(displayed.contains("code 17"));
+    assert!(displayed.contains("type gateway_error"));
+    assert!(!displayed.contains("private-attempt"));
+    let empty = status_error(404, &json!({"message":""})).to_string();
+    assert!(empty.contains("model request failed"));
+    assert!(empty.contains("HTTP 404"));
+}
+
+// A stream can fail before SSE starts; JSON error bodies must remain negotiable.
+#[tokio::test]
+async fn stream_negotiates_json_errors_before_first_event() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 4096];
+        loop {
+            let n = socket.read(&mut buffer).await.unwrap();
+            assert!(n > 0);
+            request.extend_from_slice(&buffer[..n]);
+            if request.windows(4).any(|v| v == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let headers = String::from_utf8_lossy(&request).to_lowercase();
+        let accept = headers
+            .lines()
+            .find(|line| line.starts_with("accept:"))
+            .unwrap();
+        assert!(accept.contains("text/event-stream"));
+        assert!(accept.contains("application/json"));
+        let body = r#"{"error":{"message":"No active provider key configured"}}"#;
+        socket.write_all(format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).as_bytes()).await.unwrap();
+    });
+    let transport =
+        HttpModelTransport::new(ModelHttpClient::new(), format!("http://{address}"), "test");
+    let error = transport
+        .events(
+            "/chat/completions",
+            &json!({"stream":true}),
+            Arc::new(|_| Ok(())),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("No active provider key configured")
+    );
+    assert!(error.to_string().contains("404"));
+    server.await.unwrap();
+}

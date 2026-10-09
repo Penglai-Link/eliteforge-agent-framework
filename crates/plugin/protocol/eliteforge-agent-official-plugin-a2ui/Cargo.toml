@@ -1,0 +1,18 @@
+[package]
+name = "eliteforge-agent-official-plugin-a2ui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jsonschema = { version = "0.52.1", default-features = false }
+
+[dev-dependencies]
+tokio.workspace = true
+eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
+eliteforge-agent-official-plugin-storage-local = { path = "../../storage/eliteforge-agent-official-plugin-storage-local" }
+tempfile = "3"
+eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }

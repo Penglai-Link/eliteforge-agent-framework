@@ -778,7 +778,7 @@ impl ModelInvoker {
                     let refreshed = match refreshed {
                         Ok(value) => value,
                         Err(error) => {
-                            provider.on_failure(&context.extensions, &authentication_error);
+                            provider.on_failure(&context.extensions, &error);
                             return Err(error.into());
                         }
                     };
@@ -823,6 +823,25 @@ impl ModelInvoker {
                         && !stream.emitted.load(Ordering::Acquire)
                         && retries < call.limits.max_model_retries =>
                 {
+                    // A forced recovery binding bypasses the selection strategy.
+                    // Do not pin subsequent retries to a failed replacement when
+                    // the host has authorized further recovery candidates.
+                    if replacement.is_some()
+                        && let Some((fresh, candidate)) = self
+                            .recover_unavailable(
+                                &selected,
+                                &selection_messages,
+                                &call,
+                                context,
+                                &mut recovery,
+                            )
+                            .await?
+                    {
+                        catalog_snapshot = fresh;
+                        models.catalog_snapshot = catalog_snapshot.clone();
+                        replacement = Some(candidate);
+                        overflow = None;
+                    }
                     retries += 1;
                     context
                         .emit(AgentEvent::ModelRetry {
