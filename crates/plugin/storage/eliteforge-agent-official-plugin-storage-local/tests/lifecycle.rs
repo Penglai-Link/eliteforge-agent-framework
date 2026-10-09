@@ -962,6 +962,219 @@ fn running(session: &str, scope: &str, goal: Option<String>) -> ManagedRun {
         lease_until_ms: lifecycle_time_ms() + 60_000,
     }
 }
+
+#[derive(Clone, Copy)]
+enum RecoveryCheckpointLease {
+    Expired,
+    Live,
+    Released,
+    PreviousAttempt,
+}
+
+async fn checkpoint_recovery_fixture(
+    lease: RecoveryCheckpointLease,
+) -> (Fixture, SessionRecord, ManagedRun) {
+    let f = Fixture::new().await;
+    let session = f.session().await;
+    let now = lifecycle_time_ms();
+    let mut run = running(&session.id, "main", None);
+    run.kind = "WORKFLOW".into();
+    run.started_at_ms = if matches!(lease, RecoveryCheckpointLease::PreviousAttempt) {
+        now
+    } else {
+        now - 60_000
+    };
+    run.lease_until_ms = now + 8 * 60 * 60 * 1000;
+    let services = f.framework.services().unwrap();
+    services
+        .get::<SessionLifecycleStoreService>()
+        .unwrap()
+        .0
+        .register_run(run.clone(), false)
+        .await
+        .unwrap();
+    let state = services.get::<StateStoreService>().unwrap().0.clone();
+    let mut cp = Checkpoint::new(run.id, &session.id, "fixture", 1, json!({}));
+    let mut message = HistoryMessage::user(run.id, &"partial output".into());
+    message.role = Role::Assistant;
+    message.status = HistoryStatus::Running;
+    cp.history.messages.push(message);
+    state.create(cp, None).await.unwrap();
+    let owner = state
+        .claim(run.id, RunId::new_v4(), Duration::from_secs(60))
+        .await
+        .unwrap();
+    if matches!(lease, RecoveryCheckpointLease::Released) {
+        state.release(&owner).await.unwrap();
+    }
+    if !matches!(lease, RecoveryCheckpointLease::Live) {
+        let id = run.id.to_string();
+        f.database
+            .call(move |c| {
+                c.execute(
+                    "UPDATE ef_checkpoints SET expires=?2 WHERE run_id=?1",
+                    rusqlite::params![id, now - 1_000],
+                )
+            })
+            .await
+            .unwrap();
+    }
+    (f, session, run)
+}
+
+#[tokio::test]
+async fn expired_checkpoint_recovers_long_deadline_and_allows_archive() {
+    let (f, session, run) = checkpoint_recovery_fixture(RecoveryCheckpointLease::Expired).await;
+    let lifecycle = f
+        .framework
+        .services()
+        .unwrap()
+        .get::<SessionLifecycleStoreService>()
+        .unwrap()
+        .0
+        .clone();
+    assert_eq!(lifecycle.recover_expired_runs().await.unwrap(), 1);
+    assert_eq!(lifecycle.recover_expired_runs().await.unwrap(), 0);
+    assert_eq!(
+        lifecycle.get_run(run.id).await.unwrap().status,
+        ManagedRunStatus::RecoveryRequired
+    );
+    let history = f
+        .framework
+        .history()
+        .unwrap()
+        .read_session(&session.id, Default::default())
+        .await
+        .unwrap();
+    assert!(history.active_runs.is_empty());
+    assert_eq!(
+        history.records.messages[0].status,
+        HistoryStatus::Interrupted
+    );
+    assert_eq!(
+        history.records.messages[0].content[0],
+        HistoryContentBlock::Text {
+            text: "partial output".into(),
+        }
+    );
+    f.framework
+        .sessions()
+        .unwrap()
+        .archive(&session.id)
+        .await
+        .unwrap();
+    f.framework.close().await;
+}
+
+#[tokio::test]
+async fn recovery_preserves_live_finishing_and_newly_admitted_attempts() {
+    for lease in [
+        RecoveryCheckpointLease::Live,
+        RecoveryCheckpointLease::Released,
+        RecoveryCheckpointLease::PreviousAttempt,
+    ] {
+        let (f, session, run) = checkpoint_recovery_fixture(lease).await;
+        let lifecycle = f
+            .framework
+            .services()
+            .unwrap()
+            .get::<SessionLifecycleStoreService>()
+            .unwrap()
+            .0
+            .clone();
+        assert_eq!(lifecycle.recover_expired_runs().await.unwrap(), 0);
+        assert_eq!(
+            lifecycle.get_run(run.id).await.unwrap().status,
+            ManagedRunStatus::Running
+        );
+        assert!(matches!(
+            f.framework.sessions().unwrap().archive(&session.id).await,
+            Err(StateError::Busy)
+        ));
+        f.framework.close().await;
+    }
+}
+
+#[tokio::test]
+async fn plugin_startup_recovers_expired_checkpoint_before_session_archive() {
+    let (f, session, run) = checkpoint_recovery_fixture(RecoveryCheckpointLease::Expired).await;
+    let path = f._dir.path().join("shared.db");
+    let artifacts = f._dir.path().join("artifacts");
+    f.framework.close().await;
+    let reopened = Framework::builder()
+        .default_models(false)
+        .plugin(LocalStoragePlugin::new(path, artifacts))
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        reopened
+            .services()
+            .unwrap()
+            .get::<SessionLifecycleStoreService>()
+            .unwrap()
+            .0
+            .get_run(run.id)
+            .await
+            .unwrap()
+            .status,
+        ManagedRunStatus::RecoveryRequired
+    );
+    reopened
+        .sessions()
+        .unwrap()
+        .archive(&session.id)
+        .await
+        .unwrap();
+    reopened.close().await;
+}
+
+#[tokio::test]
+async fn archive_recovers_checkpoint_that_expired_after_plugin_startup() {
+    let (f, session, run) = checkpoint_recovery_fixture(RecoveryCheckpointLease::Expired).await;
+    f.framework
+        .sessions()
+        .unwrap()
+        .archive(&session.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.framework
+            .services()
+            .unwrap()
+            .get::<SessionLifecycleStoreService>()
+            .unwrap()
+            .0
+            .get_run(run.id)
+            .await
+            .unwrap()
+            .status,
+        ManagedRunStatus::RecoveryRequired
+    );
+    f.framework.close().await;
+}
+
+#[tokio::test]
+async fn deadline_recovery_also_supports_lifecycle_only_storage() {
+    let dir = tempfile::tempdir().unwrap();
+    let database = SqliteDatabase::open(dir.path().join("lifecycle.db"))
+        .await
+        .unwrap();
+    let store = SqliteLifecycleStore::with_database(database).await.unwrap();
+    let session = store
+        .create_session(SessionRecord::new("lifecycle-only"))
+        .await
+        .unwrap();
+    let mut run = running(&session.id, "main", None);
+    run.lease_until_ms = 0;
+    store.register_run(run.clone(), false).await.unwrap();
+    assert_eq!(store.recover_expired_runs().await.unwrap(), 1);
+    assert_eq!(
+        store.get_run(run.id).await.unwrap().status,
+        ManagedRunStatus::RecoveryRequired
+    );
+}
+
 #[tokio::test]
 async fn expired_child_recovery_pauses_owner_goal_without_replaying() {
     let f = Fixture::new().await;

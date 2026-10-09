@@ -230,6 +230,102 @@ pub(crate) fn busy(c: &rusqlite::Connection, id: &str) -> Result<bool, StateErro
     c.query_row("SELECT EXISTS(SELECT 1 FROM ef_runs WHERE (session_id=?1 OR owner_session_id=?1) AND status='RUNNING' AND lease_until>?2)", params![id,lifecycle_time_ms()], |r|r.get(0)).map_err(sql)
 }
 
+fn expired_runs(
+    c: &rusqlite::Connection,
+    now: u64,
+    session_id: Option<&str>,
+) -> Result<Vec<ManagedRun>, StateError> {
+    let has_checkpoints: bool = c
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='ef_checkpoints')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(sql)?;
+    let query = if has_checkpoints {
+        // A run's deadline is not proof that its executor is still alive. An
+        // expired, unreleased checkpoint lease fences the former executor.
+        "SELECT r.record, c.expires FROM ef_runs r
+         LEFT JOIN ef_checkpoints c ON c.run_id=r.id
+         WHERE r.status='RUNNING' AND (r.lease_until<=?1 OR
+             (c.owner IS NOT NULL AND c.expires<=?1))
+         AND (?2 IS NULL OR r.session_id=?2 OR r.owner_session_id=?2)"
+    } else {
+        "SELECT record, NULL FROM ef_runs WHERE status='RUNNING' AND lease_until<=?1
+         AND (?2 IS NULL OR session_id=?2 OR owner_session_id=?2)"
+    };
+    let mut statement = c.prepare(query).map_err(sql)?;
+    let rows = statement
+        .query_map(params![now, session_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<u64>>(1)?))
+        })
+        .map_err(sql)?;
+    let mut expired = Vec::new();
+    for row in rows {
+        let (record, checkpoint_expiry) = row.map_err(sql)?;
+        let run: ManagedRun = decode(record)?;
+        // Resume admission precedes claiming the checkpoint. Do not mistake
+        // the previous attempt's lease for the newly admitted executor's lease.
+        if run.lease_until_ms <= now
+            || checkpoint_expiry.is_some_and(|expiry| run.started_at_ms < expiry)
+        {
+            expired.push(run);
+        }
+    }
+    Ok(expired)
+}
+
+fn recover_expired(
+    c: &rusqlite::Connection,
+    session_id: Option<&str>,
+) -> Result<usize, StateError> {
+    let runs = expired_runs(c, lifecycle_time_ms(), session_id)?;
+    let count = runs.len();
+    for mut run in runs {
+        run.status = ManagedRunStatus::RecoveryRequired;
+        c.execute(
+            "UPDATE ef_runs SET status='RECOVERY_REQUIRED',record=?2 WHERE id=?1",
+            params![run.id.to_string(), encode(&run)?],
+        )
+        .map_err(sql)?;
+        let owner: String = c
+            .query_row(
+                "SELECT owner_session_id FROM ef_runs WHERE id=?1",
+                [run.id.to_string()],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        crate::history::managed_run(c, &run, &owner)?;
+        let mut event = SessionEvent::new(&run.session_id, "RECOVERY_REQUIRED", Value::Null);
+        event.run_id = Some(run.id);
+        append(c, event)?;
+        let active: Option<String> = c
+            .query_row(
+                "SELECT id FROM ef_goals WHERE session_id=?1 AND status='ACTIVE'",
+                [&owner],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql)?;
+        if let Some(id) = active {
+            let mut g = goal(c, &id)?;
+            g.status = GoalStatus::Paused;
+            g.reason = Some("recovery_required".into());
+            g.revision += 1;
+            g.updated_at_ms = lifecycle_time_ms();
+            c.execute(
+                "UPDATE ef_goals SET status='PAUSED',revision=?2,record=?3 WHERE id=?1",
+                params![id, g.revision, encode(&g)?],
+            )
+            .map_err(sql)?;
+            let mut event = SessionEvent::new(&g.session_id, "GOAL_RECOVERY_REQUIRED", Value::Null);
+            event.goal_id = Some(id);
+            append(c, event)?;
+        }
+    }
+    Ok(count)
+}
+
 impl SqliteLifecycleStore {
     pub async fn with_database(database: SqliteDatabase) -> Result<Self, StateError> {
         database.call(|c| initialize(c)).await.map_err(worker)?;
@@ -316,8 +412,11 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
             {
                 return Err(StateError::Conflict);
             }
-            if record.status == SessionStatus::Archived && busy(&tx, &record.id)? {
-                return Err(StateError::Busy);
+            if record.status == SessionStatus::Archived {
+                recover_expired(&tx, Some(&record.id))?;
+                if busy(&tx, &record.id)? {
+                    return Err(StateError::Busy);
+                }
             }
             record.revision = expected.checked_add(1).ok_or(StateError::Conflict)?;
             record.updated_at_ms = lifecycle_time_ms();
@@ -531,23 +630,14 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
         }).await.map_err(worker)
     }
     async fn recover_expired_runs(&self) -> Result<usize, StateError> {
-        self.execute(|c| { let tx=begin(c).map_err(sql)?;
-            let rows: Vec<String>={ let mut q=tx.prepare("SELECT record FROM ef_runs WHERE status='RUNNING' AND lease_until<=?1").map_err(sql)?;
-                q.query_map([lifecycle_time_ms()],|r|r.get(0)).map_err(sql)?.collect::<Result<_,_>>().map_err(sql)? };
-            for row in &rows {
-                let mut run: ManagedRun=decode(row.clone())?; run.status=ManagedRunStatus::RecoveryRequired;
-                tx.execute("UPDATE ef_runs SET status='RECOVERY_REQUIRED',record=?2 WHERE id=?1",params![run.id.to_string(),encode(&run)?]).map_err(sql)?;
-                let owner:String=tx.query_row("SELECT owner_session_id FROM ef_runs WHERE id=?1",[run.id.to_string()],|r|r.get(0)).map_err(sql)?;
-                crate::history::managed_run(&tx,&run,&owner)?;
-                let mut event=SessionEvent::new(&run.session_id,"RECOVERY_REQUIRED",Value::Null); event.run_id=Some(run.id); append(&tx,event)?;
-                let active: Option<String>=tx.query_row("SELECT id FROM ef_goals WHERE session_id=(SELECT owner_session_id FROM ef_runs WHERE id=?1) AND status='ACTIVE'",[run.id.to_string()],|r|r.get(0)).optional().map_err(sql)?;
-                if let Some(id)=active { let mut g=goal(&tx,&id)?; g.status=GoalStatus::Paused; g.reason=Some("recovery_required".into()); g.revision+=1; g.updated_at_ms=lifecycle_time_ms();
-                    tx.execute("UPDATE ef_goals SET status='PAUSED',revision=?2,record=?3 WHERE id=?1",params![id,g.revision,encode(&g)?]).map_err(sql)?;
-                    let mut e=SessionEvent::new(&g.session_id,"GOAL_RECOVERY_REQUIRED",Value::Null); e.goal_id=Some(id); append(&tx,e)?;
-                }
-            }
-            tx.commit().map_err(sql)?; Ok(rows.len())
-        }).await.map_err(worker)
+        self.execute(|c| {
+            let tx = begin(c).map_err(sql)?;
+            let recovered = recover_expired(&tx, None)?;
+            tx.commit().map_err(sql)?;
+            Ok(recovered)
+        })
+        .await
+        .map_err(worker)
     }
     async fn read_context(
         &self,

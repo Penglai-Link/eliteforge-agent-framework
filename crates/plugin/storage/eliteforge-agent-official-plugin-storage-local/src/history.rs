@@ -42,10 +42,7 @@ fn owner(c: &rusqlite::Connection, run_id: RunId) -> Result<String, StateError> 
     .map_err(sql)
 }
 fn put_run(c: &rusqlite::Connection, run: &HistoryRun, owner: &str) -> Result<(), StateError> {
-    let active = matches!(
-        run.status,
-        HistoryStatus::Running | HistoryStatus::Waiting | HistoryStatus::Unknown
-    );
+    let active = matches!(run.status, HistoryStatus::Running | HistoryStatus::Waiting);
     c.execute("INSERT INTO ef_history_runs(id,session_id,owner_session_id,root_run_id,active,record) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET owner_session_id=excluded.owner_session_id,root_run_id=excluded.root_run_id,active=excluded.active,record=excluded.record",
         params![run.id.to_string(),run.session_id,owner,run.root_run_id.to_string(),active,encode(run)?]).map_err(sql)?;
     touch(c, owner)
