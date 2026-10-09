@@ -76,6 +76,30 @@ impl ChatModel for CollaborationModel {
                 _ => "thread followup result",
             }));
         }
+        if input == "named child" || input == "named thread" {
+            return Ok(if !has_tool {
+                ChatResponse::tool_calls(vec![ToolCall::new(
+                    "named-call",
+                    if input == "named child" {
+                        "agent_spawn"
+                    } else {
+                        "thread_create"
+                    },
+                    json!({"task":"child task","agentCode":"reviewer"}),
+                )])
+            } else {
+                let error = request
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == Role::Tool)
+                    .unwrap()
+                    .content
+                    .text();
+                assert!(error.contains("resolve and authorize agentCode"), "{error}");
+                ChatResponse::text("named selection rejected")
+            });
+        }
         if input == "use child" {
             return Ok(if !has_tool {
                 ChatResponse::tool_calls(vec![ToolCall::new(
@@ -415,5 +439,18 @@ async fn collaboration_runtime_publishes_child_and_thread_lifecycle_events() {
             .count(),
         1
     );
+    assert!(agent.framework().close().await.is_success());
+}
+
+#[tokio::test]
+async fn unresolved_named_agents_never_fall_back_to_the_current_agent() {
+    let agent = agent().await;
+    for input in ["named child", "named thread"] {
+        let result = agent.run(RunRequest::new(input, input)).await.unwrap();
+        assert_eq!(result.output, "named selection rejected");
+    }
+    let mut request = RunRequest::new("direct-named", "child task");
+    request.agent_code = Some("reviewer".into());
+    assert!(agent.run(request).await.is_err());
     assert!(agent.framework().close().await.is_success());
 }

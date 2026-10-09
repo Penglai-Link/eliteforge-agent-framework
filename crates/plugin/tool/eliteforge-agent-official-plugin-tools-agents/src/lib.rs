@@ -21,6 +21,8 @@ const MAX_READ_MESSAGES: usize = 100;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SpawnInput {
+    #[serde(default, rename = "agentCode")]
+    agent_code: Option<String>,
     task: String,
     #[serde(default)]
     max_steps: Option<usize>,
@@ -31,6 +33,8 @@ struct SpawnInput {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateThreadInput {
+    #[serde(default, rename = "agentCode")]
+    agent_code: Option<String>,
     task: String,
     #[serde(default)]
     title: Option<String>,
@@ -101,6 +105,19 @@ fn task(value: String) -> Result<String, ToolError> {
     if trimmed.is_empty() || trimmed.len() > MAX_TASK_BYTES {
         return Err(ToolError::Failed(
             "task/message must be nonempty and at most 16384 bytes".into(),
+        ));
+    }
+    Ok(value)
+}
+
+fn agent_code(value: Option<String>) -> Result<Option<String>, ToolError> {
+    if value
+        .as_ref()
+        .is_some_and(|code| code.trim().is_empty() || code.len() > 256 || code.trim() != code)
+    {
+        return Err(ToolError::Failed(
+            "agentCode must be nonempty, at most 256 bytes and have no surrounding whitespace"
+                .into(),
         ));
     }
     Ok(value)
@@ -199,6 +216,7 @@ impl AgentSpawnTool {
             json!({
                 "type":"object","additionalProperties":false,"required":["task"],"properties":{
                     "task":{"type":"string","minLength":1,"maxLength":16384},
+                    "agentCode":{"type":"string","minLength":1,"maxLength":256,"description":"Target Agent code from the available Agent directory. Omit to use the current Agent. The host resolves configuration and checks authorization."},
                     "max_steps":{"type":"integer","minimum":1,"maximum":ceilings.max_steps},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
@@ -213,17 +231,14 @@ impl Tool for AgentSpawnTool {
         let input: SpawnInput = serde_json::from_value(arguments)
             .map_err(|_| ToolError::Failed("invalid agent_spawn arguments".into()))?;
         let task = task(input.task)?;
+        let agent_code = agent_code(input.agent_code)?;
         let runtime = runtime(context)?;
-        let result = runtime
-            .spawn_child(
-                request(
-                    task,
-                    limits(input.max_steps, input.max_total_tokens, context)?,
-                ),
-                context,
-            )
-            .await
-            .map_err(failed)?;
+        let mut run = request(
+            task,
+            limits(input.max_steps, input.max_total_tokens, context)?,
+        );
+        run.agent_code = agent_code;
+        let result = runtime.spawn_child(run, context).await.map_err(failed)?;
         Ok(spawn_result(result))
     }
 }
@@ -240,6 +255,7 @@ impl ThreadCreateTool {
             json!({
                 "type":"object","additionalProperties":false,"required":["task"],"properties":{
                     "task":{"type":"string","minLength":1,"maxLength":16384},
+                    "agentCode":{"type":"string","minLength":1,"maxLength":256,"description":"Target Agent code from the available Agent directory. Omit to use the current Agent. The host resolves configuration and checks authorization."},
                     "title":{"type":"string","minLength":1,"maxLength":200},
                     "max_steps":{"type":"integer","minimum":1,"maximum":ceilings.max_steps},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
@@ -255,6 +271,7 @@ impl Tool for ThreadCreateTool {
         let input: CreateThreadInput = serde_json::from_value(arguments)
             .map_err(|_| ToolError::Failed("invalid thread_create arguments".into()))?;
         let task = task(input.task)?;
+        let agent_code = agent_code(input.agent_code)?;
         if input
             .title
             .as_ref()
@@ -263,10 +280,11 @@ impl Tool for ThreadCreateTool {
             return Err(ToolError::Failed("title must not be blank".into()));
         }
         let runtime = runtime(context)?;
-        let run = request(
+        let mut run = request(
             task,
             limits(input.max_steps, input.max_total_tokens, context)?,
         );
+        run.agent_code = agent_code;
         Ok(thread_summary(
             runtime
                 .create_thread(run, input.title, context)
@@ -518,5 +536,46 @@ impl Plugin for AgentToolsPlugin {
         ]));
         context.contribute(ToolProviderService(provider.clone()))?;
         context.contribute_extension(provider)
+    }
+}
+
+#[cfg(test)]
+mod named_agent_tests {
+    use super::*;
+
+    #[test]
+    fn target_code_is_optional_and_preserved_exactly() {
+        let value = json!({"task":"review","agentCode":"database-reviewer"});
+        let spawn: SpawnInput = serde_json::from_value(value.clone()).unwrap();
+        let thread: CreateThreadInput = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            agent_code(spawn.agent_code).unwrap().as_deref(),
+            Some("database-reviewer")
+        );
+        assert_eq!(
+            agent_code(thread.agent_code).unwrap().as_deref(),
+            Some("database-reviewer")
+        );
+        let legacy: SpawnInput = serde_json::from_value(json!({"task":"review"})).unwrap();
+        assert!(legacy.agent_code.is_none());
+        for value in [
+            "".into(),
+            " ".into(),
+            " reviewer".into(),
+            "reviewer ".into(),
+            "x".repeat(257),
+        ] {
+            assert!(agent_code(Some(value)).is_err());
+        }
+        let mut run = RunRequest::new("test", "review");
+        run.agent_code = Some("reviewer".into());
+        let encoded = serde_json::to_value(&run).unwrap();
+        assert_eq!(encoded["agentCode"], "reviewer");
+        assert_eq!(
+            serde_json::from_value::<RunRequest>(encoded)
+                .unwrap()
+                .agent_code,
+            run.agent_code
+        );
     }
 }

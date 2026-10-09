@@ -14,6 +14,29 @@ flowchart LR
     Parent -->|thread_close| Closed[释放 registry 容量]
 ```
 
+## 选择命名 Agent
+
+`agent_spawn` 和 `thread_create` 接受可选 `agentCode`，例如
+`{"task":"检查数据库迁移","agentCode":"database-reviewer"}`。省略时沿用当前 Agent。
+编码必须非空、不带首尾空白且不超过 256 字节。
+
+```text
+ContextContributor 提供可选 Agent 目录
+    → 官方工具把 agentCode 写入 RunRequest.agent_code
+    → 宿主 AgentCollaborationRuntime 解析配置、校验当前调用者授权
+    → 选定 Agent，清除 request.agent_code，调用 Framework 执行
+```
+
+Agent 目录、编码解析和授权属于宿主（例如 Tron），Framework 不读取业务配置。
+宿主实现 `spawn_child` 时可调用目标 `Agent::run_child_with_id(request, parent)`，保留
+取消、预算与 lineage；独立 Thread 使用目标 Agent 的 `start` / `wait`，并由宿主保存
+thread_id 到目标 Agent 的绑定，后续 send、answer、read、wait 和 close 必须继续路由到该目标。
+目录可见性不等于执行授权，每次派发和后续 Thread 操作都由宿主校验。
+
+默认进程内运行时没有命名 Agent 注册表，带编码的请求会明确报错，不会退回当前 Agent。
+直接执行 `Agent::start` / `run_child` 前也必须完成解析并清除编码，以免遗漏路由。
+本接入不自动为 Tron 安装目录 Contributor 或业务解析器。
+
 ## 子 Agent
 
 `agent_spawn` 适合一次性的专家委派：主运行给出一个聚焦任务，子运行完成后把结果同步返回。

@@ -544,6 +544,11 @@ impl RunLimits {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRequest {
+    /// Optional named Agent selected by collaboration tools. The host collaboration
+    /// runtime must resolve and authorize it, then clear it before executing the run.
+    /// A plain Agent cannot resolve application-owned Agent configuration.
+    #[serde(default, rename = "agentCode", skip_serializing_if = "Option::is_none")]
+    pub agent_code: Option<String>,
     /// Host admission identity, shared by control, events and durable run records.
     #[serde(default)]
     pub run_id: Option<RunId>,
@@ -581,6 +586,7 @@ impl RunRequest {
     }
     pub fn new(session_id: impl Into<String>, input: impl Into<crate::Content>) -> Self {
         Self {
+            agent_code: None,
             session_id: session_id.into(),
             run_id: None,
             execution_scope: None,

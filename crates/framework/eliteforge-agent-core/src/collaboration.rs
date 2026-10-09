@@ -142,6 +142,12 @@ pub struct ThreadView {
 
 /// Bridge used by the official collaboration tools.
 ///
+/// For `spawn_child` and `create_thread`, `RunRequest::agent_code` carries the
+/// optional application-owned target. Implementations must resolve and authorize
+/// it using the caller context, then clear it before executing on the target
+/// Agent. Never silently fall back for unknown or unauthorized codes. Independent
+/// threads must retain their target binding for all subsequent operations.
+///
 /// `spawn_child` is an in-tree delegation: it inherits the parent run's
 /// cancellation, deadline, lineage and reserved allowance. Thread operations
 /// intentionally do not inherit those properties; they address independent

@@ -1216,6 +1216,11 @@ impl AgentGeneration {
     }
 
     fn validate_request(&self, request: &RunRequest) -> Result<(), AgentError> {
+        if request.agent_code.is_some() {
+            return Err(AgentError::InvalidConfiguration(
+                "named Agent selection requires a host AgentCollaborationRuntime to resolve and authorize agentCode before execution".into(),
+            ));
+        }
         if request.resume.is_some() && !self.inner.agent_loop.supports_resume() {
             return Err(AgentError::InvalidConfiguration(
                 "installed loop does not support durable resume".into(),
