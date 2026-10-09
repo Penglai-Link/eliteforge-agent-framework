@@ -1,0 +1,13 @@
+# Shared local compiler caches, including builds from Git worktrees.
+# Environment variables can override the cache paths and C/C++ compilers.
+[build]
+rustc-wrapper = "sccache"
+incremental = false
+
+[env]
+SCCACHE_DIR = "/Users/clouds3n/rust-cache/sccache"
+SCCACHE_BASEDIRS = { value = ".", relative = true }
+CCACHE_DIR = "/Users/clouds3n/rust-cache/ccache"
+CCACHE_BASEDIR = { value = ".", relative = true }
+CC = "ccache cc"
+CXX = "ccache c++"
