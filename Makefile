@@ -6,6 +6,12 @@ SKIP_TESTS ?= false
 TEST ?=
 ALL_FEATURES ?= false
 
+# Keep compiler caches outside the repository so worktrees can share them.
+_BUILD_CACHE_HOME := $(if $(filter Windows_NT,$(OS)),$(if $(strip $(USERPROFILE)),$(subst \,/,$(USERPROFILE)),$(HOME)),$(HOME))
+export RUST_CACHE_DIR ?= $(_BUILD_CACHE_HOME)/rust-cache
+export SCCACHE_DIR ?= $(RUST_CACHE_DIR)/sccache
+export CCACHE_DIR ?= $(RUST_CACHE_DIR)/ccache
+
 ifeq ($(OS),Windows_NT)
 _NULL := NUL
 _FAIL := exit /b 1
@@ -74,17 +80,20 @@ help:
 	@echo   ALL_FEATURES   默认 false，仅允许 true 或 false；适用于 lint、test、build
 	@echo                  true 启用全部特性，包括可选 SQLite 原生资源及其完整性检查
 	@echo 工具链：仓库已验证 Rust/Cargo 1.95.0，尚未声明最低支持版本
+	@echo   RUST_CACHE_DIR 默认当前用户目录下的 rust-cache；编译前自动创建，worktree 共用
 
 doctor:
 	@echo 检查：统一本地路径需要 Cargo、rustc、rustfmt、Clippy 和 C 工具链
 ifeq ($(OS),Windows_NT)
 	@where cargo >$(_NULL) 2>&1 || (echo 错误：缺少 cargo，请准备 Rust 工具链 & $(_FAIL))
 	@where rustc >$(_NULL) 2>&1 || (echo 错误：缺少 rustc，请准备 Rust 工具链 & $(_FAIL))
+	@where sccache >$(_NULL) 2>&1 || (echo 错误：缺少 sccache，请安装编译缓存工具 & $(_FAIL))
 	@rustc -vV | findstr /c:"-pc-windows-msvc" >$(_NULL) && (where cl >$(_NULL) 2>&1 && where lib >$(_NULL) 2>&1 && where link >$(_NULL) 2>&1) || (rustc -vV | findstr /c:"-pc-windows-gnu" >$(_NULL) && where gcc >$(_NULL) 2>&1 && where ar >$(_NULL) 2>&1) || (echo 错误：MSVC 需要 cl、lib、link；GNU 需要 gcc、ar，请准备匹配的 Windows C 工具链 & $(_FAIL))
 	@if not exist Cargo.lock (echo 错误：缺少 Cargo.lock，不能执行锁定构建 & $(_FAIL))
 else
 	@command -v cargo >$(_NULL) 2>&1 || { echo 错误：缺少 cargo，请准备 Rust 工具链; $(_FAIL); }
 	@command -v rustc >$(_NULL) 2>&1 || { echo 错误：缺少 rustc，请准备 Rust 工具链; $(_FAIL); }
+	@command -v sccache >$(_NULL) 2>&1 || { echo 错误：缺少 sccache，请安装编译缓存工具; $(_FAIL); }
 	@command -v cc >$(_NULL) 2>&1 || { echo 错误：SQLite bundled 构建需要 C 编译器 cc; $(_FAIL); }
 	@command -v ar >$(_NULL) 2>&1 || { echo 错误：SQLite bundled 构建需要归档工具 ar; $(_FAIL); }
 	@test -f Cargo.lock || { echo 错误：缺少 Cargo.lock，不能执行锁定构建; $(_FAIL); }
@@ -155,4 +164,14 @@ else ifneq ($(VERSION),$(_WORKSPACE_VERSION))
 	@$(_FAIL)
 else
 	@echo 检查：目标版本与 Cargo 清单一致，为 $(_WORKSPACE_VERSION)
+endif
+
+.PHONY: _build-cache
+lint test build: | _build-cache
+_build-cache:
+ifeq ($(OS),Windows_NT)
+	@if not exist "$(subst /,\,$(SCCACHE_DIR))\" mkdir "$(subst /,\,$(SCCACHE_DIR))"
+	@if not exist "$(subst /,\,$(CCACHE_DIR))\" mkdir "$(subst /,\,$(CCACHE_DIR))"
+else
+	@mkdir -p "$(SCCACHE_DIR)" "$(CCACHE_DIR)"
 endif
