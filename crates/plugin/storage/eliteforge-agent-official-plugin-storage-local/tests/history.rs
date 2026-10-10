@@ -364,3 +364,143 @@ async fn history_joins_the_hosts_transaction_and_sees_its_own_writes() {
         1
     );
 }
+
+#[tokio::test]
+async fn session_queries_isolate_child_records_versions_and_pending_interactions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("isolated.db");
+    let database = SqliteDatabase::open(&path).await.unwrap();
+    let store = SqliteStateStore::with_database(database.clone(), Default::default())
+        .await
+        .unwrap();
+    let lifecycle = SqliteLifecycleStore::with_database(database).await.unwrap();
+    let root = RunId::new_v4();
+    let child = RunId::new_v4();
+    let grandchild = RunId::new_v4();
+    for (id, session, parent) in [
+        (root, "parent", None),
+        (child, "child", Some(root)),
+        (grandchild, "grandchild", Some(child)),
+    ] {
+        lifecycle
+            .register_run(
+                ManagedRun {
+                    id,
+                    session_id: session.into(),
+                    execution_scope: "main".into(),
+                    conversation_branch: "main".into(),
+                    parent_run_id: parent,
+                    root_run_id: root,
+                    goal_id: None,
+                    kind: "test".into(),
+                    status: ManagedRunStatus::Running,
+                    result: None,
+                    error: None,
+                    started_at_ms: unix_time_ms(),
+                    finished_at_ms: None,
+                    lease_until_ms: unix_time_ms() + 30_000,
+                },
+                false,
+            )
+            .await
+            .unwrap();
+        let mut checkpoint = Checkpoint::new(id, session, "test", 1, json!({}));
+        checkpoint
+            .history
+            .messages
+            .push(HistoryMessage::user(id, &format!("{session} task").into()));
+        if id != root {
+            checkpoint.history.interactions.push(HistoryInteraction {
+                id: RunId::new_v4(),
+                run_id: id,
+                invocation_id: None,
+                prompt: vec![HistoryContentBlock::Text {
+                    text: "child question".into(),
+                }],
+                response_schema: json!({"type":"string"}),
+                presentation: None,
+                response: None,
+                expires_at_ms: None,
+            });
+        }
+        store.create(checkpoint, None).await.unwrap();
+    }
+    let parent = store
+        .read_session("parent", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        parent.runs.iter().map(|run| run.id).collect::<Vec<_>>(),
+        vec![root]
+    );
+    assert_eq!(parent.records.messages.len(), 1);
+    assert_eq!(parent.active_runs.len(), 1);
+    assert!(parent.pending_interactions.is_empty());
+    let child_page = store
+        .read_session("child", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(child_page.runs.len(), 1);
+    assert_eq!(child_page.runs[0].id, child);
+    assert_eq!(child_page.runs[0].root_run_id, root);
+    assert_eq!(child_page.records.messages.len(), 1);
+    assert_eq!(child_page.pending_interactions.len(), 1);
+    assert_eq!(
+        store
+            .read_session("grandchild", Default::default())
+            .await
+            .unwrap()
+            .runs[0]
+            .id,
+        grandchild
+    );
+    let mut finished = lifecycle.get_run(child).await.unwrap();
+    finished.status = ManagedRunStatus::Cancelled;
+    finished.finished_at_ms = Some(unix_time_ms());
+    lifecycle.finish_run(finished).await.unwrap();
+    let after = store
+        .read_session("parent", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        parent.version, after.version,
+        "child writes must not invalidate parent cursors"
+    );
+    assert_ne!(
+        child_page.version,
+        store
+            .read_session("child", Default::default())
+            .await
+            .unwrap()
+            .version
+    );
+    assert_eq!(
+        store.run(child).await.unwrap().status,
+        HistoryStatus::Interrupted
+    );
+    // Prove isolation happens in SQL, before parsing other sessions' payloads.
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute(
+        "UPDATE ef_history_messages SET record='corrupt' WHERE session_id<>'parent'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        store.run(child).await.unwrap().status,
+        HistoryStatus::Interrupted,
+        "status summaries must not load transcript payloads"
+    );
+    db.execute(
+        "UPDATE ef_history_runs SET record='corrupt' WHERE session_id<>'parent'",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .read_session("parent", Default::default())
+            .await
+            .unwrap()
+            .records,
+        parent.records
+    );
+}

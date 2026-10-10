@@ -33,6 +33,13 @@ passwords, and sessions do not belong in the snapshot.
 This implementation targets a single machine with an embedded database and
 filesystem. It does not provide distributed consistency or multi-node HA.
 
+Public history queries read only the requested `session_id`, including its own
+pending interactions and active runs. Parent/root lineage does not merge child
+session transcripts. Each session has its own history version, so a child update
+does not invalidate the parent's pagination cursor. `HistoryService::run` reads
+one run summary without loading messages, tools, or recovery checkpoints; hosts
+can use summaries for child status lists and load a child's session on demand.
+
 Session deletion is available through the installed `SessionStoreService` and
 typed Agent operations:
 

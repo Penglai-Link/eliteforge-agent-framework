@@ -16,6 +16,9 @@ pub(crate) fn initialize(c: &rusqlite::Connection) -> Result<(), StateError> {
         CREATE INDEX IF NOT EXISTS ef_history_turns ON ef_history_runs(owner_session_id, ordinal DESC) WHERE id=root_run_id;
         CREATE INDEX IF NOT EXISTS ef_history_roots ON ef_history_runs(owner_session_id, root_run_id, ordinal);
         CREATE INDEX IF NOT EXISTS ef_history_active ON ef_history_runs(owner_session_id, active);
+        CREATE INDEX IF NOT EXISTS ef_history_session_order ON ef_history_runs(session_id, ordinal DESC);
+        CREATE INDEX IF NOT EXISTS ef_history_session_roots ON ef_history_runs(session_id, root_run_id, ordinal);
+        CREATE INDEX IF NOT EXISTS ef_history_session_active ON ef_history_runs(session_id, active, ordinal);
         CREATE TABLE IF NOT EXISTS ef_history_steps(id TEXT PRIMARY KEY, run_id TEXT NOT NULL, session_id TEXT NOT NULL, position INTEGER NOT NULL, record TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS ef_history_step_order ON ef_history_steps(run_id, position);
         CREATE INDEX IF NOT EXISTS ef_history_step_session ON ef_history_steps(session_id);
@@ -33,9 +36,9 @@ pub(crate) fn touch(c: &rusqlite::Connection, owner: &str) -> Result<(), StateEr
     c.execute("INSERT INTO ef_history_versions VALUES (?1,?2) ON CONFLICT(session_id) DO UPDATE SET version=excluded.version", params![owner, RunId::new_v4().to_string()]).map_err(sql)?;
     Ok(())
 }
-fn owner(c: &rusqlite::Connection, run_id: RunId) -> Result<String, StateError> {
+fn session(c: &rusqlite::Connection, run_id: RunId) -> Result<String, StateError> {
     c.query_row(
-        "SELECT owner_session_id FROM ef_history_runs WHERE id=?1",
+        "SELECT session_id FROM ef_history_runs WHERE id=?1",
         [run_id.to_string()],
         |r| r.get(0),
     )
@@ -45,7 +48,7 @@ fn put_run(c: &rusqlite::Connection, run: &HistoryRun, owner: &str) -> Result<()
     let active = matches!(run.status, HistoryStatus::Running | HistoryStatus::Waiting);
     c.execute("INSERT INTO ef_history_runs(id,session_id,owner_session_id,root_run_id,active,record) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET owner_session_id=excluded.owner_session_id,root_run_id=excluded.root_run_id,active=excluded.active,record=excluded.record",
         params![run.id.to_string(),run.session_id,owner,run.root_run_id.to_string(),active,encode(run)?]).map_err(sql)?;
-    touch(c, owner)
+    touch(c, &run.session_id)
 }
 pub(crate) fn managed_run(
     c: &rusqlite::Connection,
@@ -237,7 +240,7 @@ pub(crate) fn answer(
             params![interaction.id.to_string(), encode(&interaction)?],
         )
         .map_err(sql)?;
-        touch(c, &owner(c, record.run_id)?)?;
+        touch(c, &session(c, record.run_id)?)?;
     }
     Ok(())
 }
@@ -258,6 +261,21 @@ fn records<T: DeserializeOwned>(
 }
 #[async_trait]
 impl HistoryStore for SqliteStateStore {
+    async fn run(&self, run_id: RunId) -> Result<HistoryRun, StateError> {
+        self.execute(move |c| {
+            let record = c
+                .query_row(
+                    "SELECT record FROM ef_history_runs WHERE id=?1",
+                    [run_id.to_string()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(sql)?
+                .ok_or(StateError::NotFound)?;
+            decode(record)
+        })
+        .await
+    }
     async fn read_session(
         &self,
         session_id: &str,
@@ -298,7 +316,7 @@ impl HistoryStore for SqliteStateStore {
             let before = query.cursor.as_ref().map(|c| c.before).unwrap_or(i64::MAX as u64);
             let mut roots: Vec<(u64, String)> = {
                 let mut q = tx.prepare(
-                    "SELECT ordinal,id FROM ef_history_runs WHERE owner_session_id=?1 AND id=root_run_id AND ordinal<?2 ORDER BY ordinal DESC LIMIT ?3"
+                    "SELECT r.ordinal,r.root_run_id FROM ef_history_runs r WHERE r.session_id=?1 AND r.ordinal<?2 AND NOT EXISTS(SELECT 1 FROM ef_history_runs p WHERE p.session_id=r.session_id AND p.root_run_id=r.root_run_id AND p.ordinal<r.ordinal) ORDER BY r.ordinal DESC LIMIT ?3"
                 ).map_err(sql)?;
                 q.query_map(params![session_id, before, query.limit + 1], |r| Ok((r.get(0)?, r.get(1)?)))
                     .map_err(sql)?.collect::<Result<_, _>>().map_err(sql)?
@@ -316,7 +334,7 @@ impl HistoryStore for SqliteStateStore {
             for (_, root) in roots {
                 let rows: Vec<String> = {
                     let mut q = tx.prepare(
-                        "SELECT record FROM ef_history_runs WHERE owner_session_id=?1 AND root_run_id=?2 ORDER BY ordinal"
+                        "SELECT record FROM ef_history_runs WHERE session_id=?1 AND root_run_id=?2 ORDER BY ordinal"
                     ).map_err(sql)?;
                     q.query_map(params![session_id, root], |r| r.get(0))
                         .map_err(sql)?.collect::<Result<_, _>>().map_err(sql)?
@@ -332,14 +350,14 @@ impl HistoryStore for SqliteStateStore {
             }
             let pending_interactions = {
                 let mut q = tx.prepare(
-                    "SELECT i.record FROM ef_history_interactions i JOIN ef_history_runs r ON r.id=i.run_id WHERE r.owner_session_id=?1 AND r.active=1 AND i.answered=0 ORDER BY r.ordinal,i.position"
+                    "SELECT i.record FROM ef_history_interactions i JOIN ef_history_runs r ON r.id=i.run_id WHERE r.session_id=?1 AND r.active=1 AND i.answered=0 ORDER BY r.ordinal,i.position"
                 ).map_err(sql)?;
                 q.query_map([&session_id], |r| r.get(0)).map_err(sql)?
                     .map(|r| decode(r.map_err(sql)?)).collect::<Result<Vec<HistoryInteraction>, _>>()?
             };
             let active_runs = {
                 let mut q = tx.prepare(
-                    "SELECT record FROM ef_history_runs WHERE owner_session_id=?1 AND active=1 ORDER BY ordinal"
+                    "SELECT record FROM ef_history_runs WHERE session_id=?1 AND active=1 ORDER BY ordinal"
                 ).map_err(sql)?;
                 q.query_map([&session_id], |r| r.get(0)).map_err(sql)?
                     .map(|r| decode(r.map_err(sql)?)).collect::<Result<Vec<HistoryRun>, _>>()?

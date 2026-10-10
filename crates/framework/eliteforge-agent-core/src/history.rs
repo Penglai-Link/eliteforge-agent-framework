@@ -354,6 +354,14 @@ pub struct SessionHistory {
 }
 #[async_trait]
 pub trait HistoryStore: Send + Sync {
+    /// Metadata only; does not read messages, tools or recovery checkpoints.
+    async fn run(&self, _run_id: RunId) -> Result<HistoryRun, StateError> {
+        Err(StateError::Invalid(
+            "history run summary query is unavailable".into(),
+        ))
+    }
+    /// Reads only the requested session. Lineage is metadata, not permission to
+    /// merge another session's transcript into this one.
     async fn read_session(
         &self,
         session_id: &str,
@@ -364,6 +372,9 @@ pub struct HistoryStoreService(pub Arc<dyn HistoryStore>);
 #[derive(Clone)]
 pub struct HistoryService(pub Arc<dyn HistoryStore>);
 impl HistoryService {
+    pub async fn run(&self, run_id: RunId) -> Result<HistoryRun, StateError> {
+        self.0.run(run_id).await
+    }
     pub async fn read_session(
         &self,
         session_id: &str,
