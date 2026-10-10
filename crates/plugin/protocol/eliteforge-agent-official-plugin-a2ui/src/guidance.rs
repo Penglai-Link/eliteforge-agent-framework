@@ -6,6 +6,7 @@ pub const A2UI_SKILL_NAME: &str = "a2ui-interface";
 pub const A2UI_EXPAND_TOOL: &str = "a2ui_expand";
 const SKILL: &str = include_str!("../skills/a2ui-interface/SKILL.md");
 const EXAMPLES: &str = include_str!("../skills/a2ui-interface/references/examples.json");
+const COMPONENTS: &str = include_str!("../skills/a2ui-interface/references/components.md");
 
 /// Installs A2UI and requests the Framework's single aggregate Skills runtime.
 /// Omit this pack entirely when a host does not support A2UI.
@@ -92,7 +93,7 @@ impl ContextContributor for Guidance {
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let messages = if negotiated(&input.run.extensions) {
             vec![Message::system(
-                "A2UI interactive interfaces are available. Use text for ordinary answers and native ask-user for simple clarification. For reports, structured forms or reusable query controls, load the a2ui-interface skill with skill_load, then call a2ui_expand to expose the UI tools. Display is read-only; SubmitOnce resumes the original run; Reusable actions start another run. Tool approvals remain controlled by native tool policy. Follow the user's requested language and presentation preference.",
+                "A2UI interactive interfaces are available. Use text for ordinary answers. Use native ask-user for clarification and questionnaires; the built-in QuestionCard owns layout and navigation, so do not rebuild it from atomic components. Native tool policy owns approvals and their ApprovalCard projection. For reports, custom structured forms or reusable query controls, load the a2ui-interface skill with skill_load, then call a2ui_expand to expose the UI tools. Display is read-only; SubmitOnce resumes the original run; Reusable actions start another run. Follow the user's requested language and presentation preference.",
             )]
         } else {
             vec![]
@@ -124,6 +125,7 @@ fn catalogs(run: &RunContext) -> Vec<(&'static str, Value)> {
 }
 fn resource_paths(run: &RunContext) -> Vec<String> {
     let mut paths = vec![
+        "references/components.md".into(),
         "references/examples.json".into(),
         "catalog.json".into(),
         "protocol.json".into(),
@@ -142,6 +144,7 @@ fn resource(run: &RunContext, path: &str) -> Result<String, AgentError> {
     }
     let catalogs = catalogs(run);
     match path {
+        "references/components.md" => Ok(COMPONENTS.into()),
         "references/examples.json" => Ok(EXAMPLES.replace(
             AGENT_CATALOG_ID,
             catalogs[0].1["catalogId"].as_str().unwrap(),
@@ -150,8 +153,8 @@ fn resource(run: &RunContext, path: &str) -> Result<String, AgentError> {
         "common-types.json" => Ok(include_str!("schemas/common_types.json").into()),
         "catalog.json" => {
             let index=catalogs.iter().map(|(alias,catalog)| {
-                let components=catalog["components"].as_object().unwrap().keys().map(|name|(name.clone(),format!("components/{alias}/{name}.json"))).collect::<BTreeMap<_,_>>();
-                json!({"catalogId":catalog["catalogId"],"components":components,"commonComponentProperties":catalog["$defs"]["CatalogComponentCommon"]})
+                let components=catalog["components"].as_object().unwrap().keys().collect::<Vec<_>>();
+                json!({"catalogId":catalog["catalogId"],"components":components,"componentResourceTemplate":format!("components/{alias}/{{component}}.json"),"commonComponentProperties":catalog["$defs"]["CatalogComponentCommon"]})
             }).collect::<Vec<_>>();
             Ok(json!({"version":VERSION,"catalogs":index,"commonTypesResource":"common-types.json","functionExpressions":false}).to_string())
         }

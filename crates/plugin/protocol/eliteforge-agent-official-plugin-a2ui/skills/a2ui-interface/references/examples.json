@@ -176,5 +176,315 @@
         }
       }
     ]
+  },
+  "atomicForm": {
+    "mode": "SubmitOnce",
+    "responseSchema": {
+      "type": "object",
+      "required": [
+        "name",
+        "priority",
+        "date",
+        "notes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "urgent"
+          ]
+        },
+        "date": {
+          "type": "string",
+          "format": "date"
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "messages": [
+      {
+        "version": "v0.9.1",
+        "createSurface": {
+          "surfaceId": "task-form",
+          "catalogId": "https://eliteforge.dev/a2ui/v0.9.1/agent"
+        }
+      },
+      {
+        "version": "v0.9.1",
+        "updateComponents": {
+          "surfaceId": "task-form",
+          "components": [
+            {
+              "id": "root",
+              "component": "Column",
+              "children": [
+                "name-field",
+                "priority-field",
+                "date-field",
+                "notes-field",
+                "submit"
+              ]
+            },
+            {
+              "id": "name-field",
+              "component": "Field",
+              "label": "Task name",
+              "child": "name",
+              "description": "A short, specific title."
+            },
+            {
+              "id": "name",
+              "component": "TextField",
+              "value": {
+                "path": "/response/name"
+              },
+              "accessibility": {
+                "label": "Task name"
+              },
+              "label": ""
+            },
+            {
+              "id": "priority-field",
+              "component": "Field",
+              "label": "Priority",
+              "child": "priority"
+            },
+            {
+              "id": "priority",
+              "component": "Select",
+              "value": {
+                "path": "/response/priority"
+              },
+              "options": [
+                {
+                  "value": "normal",
+                  "label": "Normal"
+                },
+                {
+                  "value": "urgent",
+                  "label": "Urgent"
+                }
+              ],
+              "accessibility": {
+                "label": "Priority"
+              },
+              "label": ""
+            },
+            {
+              "id": "date-field",
+              "component": "Field",
+              "label": "Due date",
+              "child": "date"
+            },
+            {
+              "id": "date",
+              "component": "DatePicker",
+              "value": {
+                "path": "/response/date"
+              },
+              "accessibility": {
+                "label": "Due date"
+              }
+            },
+            {
+              "id": "notes-field",
+              "component": "Field",
+              "label": "Notes",
+              "child": "notes"
+            },
+            {
+              "id": "notes",
+              "component": "Textarea",
+              "value": {
+                "path": "/response/notes"
+              },
+              "rows": 3,
+              "placeholder": "Optional details",
+              "accessibility": {
+                "label": "Notes"
+              }
+            },
+            {
+              "id": "submit",
+              "component": "Button",
+              "child": "submit-label",
+              "action": {
+                "event": {
+                  "name": "submit",
+                  "context": {
+                    "response": {
+                      "path": "/response"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "id": "submit-label",
+              "component": "Text",
+              "text": "Create task"
+            }
+          ]
+        }
+      },
+      {
+        "version": "v0.9.1",
+        "updateDataModel": {
+          "surfaceId": "task-form",
+          "value": {
+            "response": {
+              "name": "",
+              "priority": "normal",
+              "date": "2026-10-12",
+              "notes": ""
+            }
+          }
+        }
+      }
+    ]
+  },
+  "statistics": {
+    "mode": "Display",
+    "messages": [
+      {
+        "version": "v0.9.1",
+        "createSurface": {
+          "surfaceId": "service-report",
+          "catalogId": "https://eliteforge.dev/a2ui/v0.9.1/agent"
+        }
+      },
+      {
+        "version": "v0.9.1",
+        "updateComponents": {
+          "surfaceId": "service-report",
+          "components": [
+            {
+              "id": "root",
+              "component": "Column",
+              "children": [
+                "requests",
+                "change",
+                "history",
+                "capacity",
+                "latency",
+                "details"
+              ]
+            },
+            {
+              "id": "requests",
+              "component": "Statistic",
+              "label": "Requests",
+              "value": {
+                "path": "/requests"
+              },
+              "grouping": true
+            },
+            {
+              "id": "change",
+              "component": "Trend",
+              "label": "Change",
+              "value": {
+                "path": "/change"
+              },
+              "unit": "%",
+              "precision": 1,
+              "positiveIsGood": true
+            },
+            {
+              "id": "history",
+              "component": "Sparkline",
+              "label": "Recent requests",
+              "values": {
+                "path": "/history"
+              }
+            },
+            {
+              "id": "capacity",
+              "component": "Meter",
+              "label": "Capacity used",
+              "value": {
+                "path": "/capacity"
+              },
+              "min": 0,
+              "max": 100,
+              "low": 60,
+              "high": 85,
+              "optimum": 30,
+              "unit": "%"
+            },
+            {
+              "id": "latency",
+              "component": "Chart",
+              "label": "Latency (ms)",
+              "type": "line",
+              "labels": {
+                "path": "/labels"
+              },
+              "series": {
+                "path": "/series"
+              }
+            },
+            {
+              "id": "details",
+              "component": "DescriptionList",
+              "items": {
+                "path": "/details"
+              }
+            }
+          ]
+        }
+      },
+      {
+        "version": "v0.9.1",
+        "updateDataModel": {
+          "surfaceId": "service-report",
+          "value": {
+            "requests": 12840,
+            "change": 6.2,
+            "history": [
+              120,
+              135,
+              128,
+              152,
+              170
+            ],
+            "capacity": 72,
+            "labels": [
+              "09:00",
+              "10:00",
+              "11:00"
+            ],
+            "series": [
+              {
+                "name": "p95",
+                "values": [
+                  210,
+                  190,
+                  180
+                ]
+              }
+            ],
+            "details": [
+              {
+                "label": "Window",
+                "value": "Last 3 hours"
+              },
+              {
+                "label": "Healthy",
+                "value": true
+              }
+            ]
+          }
+        }
+      }
+    ]
   }
 }

@@ -901,15 +901,43 @@ mod form_validation_tests {
     use super::*;
 
     #[test]
+    fn skill_examples_validate_against_each_negotiated_catalog() {
+        let service = A2uiService::new().unwrap();
+        let examples: Value = serde_json::from_str(include_str!(
+            "../skills/a2ui-interface/references/examples.json"
+        ))
+        .unwrap();
+        for catalog in [MINIMAL_CATALOG_ID, AGENT_CATALOG_ID] {
+            let capabilities = A2uiClientCapabilities {
+                version: VERSION.into(),
+                catalog_ids: vec![catalog.into()],
+            };
+            for (name, input) in examples.as_object().unwrap() {
+                let messages: Vec<Value> = serde_json::from_str(
+                    &input["messages"]
+                        .to_string()
+                        .replace(AGENT_CATALOG_ID, catalog),
+                )
+                .unwrap();
+                validate_input_messages(&service, &messages, &capabilities)
+                    .unwrap_or_else(|error| panic!("{catalog} / {name}: {error}"));
+            }
+        }
+    }
+
+    #[test]
     fn form_errors_locate_the_message_and_field() {
         let service = A2uiService::new().unwrap();
         let capabilities = A2uiClientCapabilities {
-            version: VERSION.into(), catalog_ids: vec![AGENT_CATALOG_ID.into()],
+            version: VERSION.into(),
+            catalog_ids: vec![AGENT_CATALOG_ID.into()],
         };
         let messages = vec![json!({"version": VERSION, "createSurface": {
             "surfaceId": "form", "catalogId": AGENT_CATALOG_ID, "sendDataModel": "wrong"
         }})];
-        let error = validate_input_messages(&service, &messages, &capabilities).unwrap_err().to_string();
+        let error = validate_input_messages(&service, &messages, &capabilities)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("messages[0]"), "{error}");
         assert!(error.contains("sendDataModel"), "{error}");
         assert!(error.contains("boolean"), "{error}");
