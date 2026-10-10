@@ -44,6 +44,10 @@ thread_id 到目标 Agent 的绑定，后续 send、answer、read、wait 和 clo
 父运行可以直接使用返回结果继续推理；官方工具保留 `content`、`structured`、`interactions`、
 精确状态、usage、步骤和工具调用统计，不把富内容压成纯文本。
 
+委派工具不接受 `max_steps` 或工具调用次数参数。默认 runtime 沿用当前运行限制；
+命名 Agent 的步数和工具次数由宿主从目标定义解析，不交给模型临时收紧。
+可选 `max_total_tokens` 仍受父运行的 token 配额约束。
+
 ```text
 主运行 ──等待──> agent_spawn(“只检查数据库迁移”) ──> 子结果 ──> 主运行继续
 ```

@@ -25,8 +25,6 @@ struct SpawnInput {
     agent_code: Option<String>,
     task: String,
     #[serde(default)]
-    max_steps: Option<usize>,
-    #[serde(default)]
     max_total_tokens: Option<u64>,
 }
 
@@ -212,12 +210,11 @@ impl AgentSpawnTool {
         ToolDescriptor::new(
             "agent.spawn",
             "agent_spawn",
-            "Delegate one focused task to a child agent and wait for its result.",
+            "Delegate one focused task to a child agent and wait for its result. Step and tool-call limits are resolved by the host from the target Agent configuration; do not set them in the task unless the user explicitly requests a task constraint.",
             json!({
                 "type":"object","additionalProperties":false,"required":["task"],"properties":{
                     "task":{"type":"string","minLength":1,"maxLength":16384},
                     "agentCode":{"type":"string","minLength":1,"maxLength":256,"description":"Target Agent code from the available Agent directory. Omit to use the current Agent. The host resolves configuration and checks authorization."},
-                    "max_steps":{"type":"integer","minimum":1,"maximum":ceilings.max_steps},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
@@ -233,10 +230,7 @@ impl Tool for AgentSpawnTool {
         let task = task(input.task)?;
         let agent_code = agent_code(input.agent_code)?;
         let runtime = runtime(context)?;
-        let mut run = request(
-            task,
-            limits(input.max_steps, input.max_total_tokens, context)?,
-        );
+        let mut run = request(task, limits(None, input.max_total_tokens, context)?);
         run.agent_code = agent_code;
         let result = runtime.spawn_child(run, context).await.map_err(failed)?;
         Ok(spawn_result(result))

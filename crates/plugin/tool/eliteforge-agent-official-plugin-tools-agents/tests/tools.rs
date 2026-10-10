@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_official_plugin_tools_agents::{AgentToolsPlugin, ThreadCreateTool};
+use eliteforge_agent_official_plugin_tools_agents::{
+    AgentSpawnTool, AgentToolsPlugin, ThreadCreateTool,
+};
 use eliteforge_agent_official_plugin_tools_human::HumanInteractionPlugin;
 use eliteforge_agent_test_support::TestBuilder;
 use serde_json::{Value, json};
@@ -268,6 +270,17 @@ async fn agent() -> Agent {
         .build()
         .await
         .unwrap()
+}
+
+#[test]
+fn spawn_tool_uses_host_agent_limits_instead_of_model_step_overrides() {
+    let schema = compile_schema(&AgentSpawnTool::descriptor().input_schema).unwrap();
+    assert!(schema.is_valid(&json!({"task":"review", "agentCode":"reviewer"})));
+    for field in ["max_steps", "max_tool_calls"] {
+        let mut input = json!({"task":"review"});
+        input[field] = json!(1);
+        assert!(!schema.is_valid(&input));
+    }
 }
 
 #[test]
