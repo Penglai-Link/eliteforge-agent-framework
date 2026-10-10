@@ -57,6 +57,8 @@ pub use plugins::*;
 pub use session::*;
 pub use skills::*;
 pub use state::*;
+mod telemetry;
+pub use telemetry::*;
 pub use tokens::*;
 pub use transaction::*;
 pub use types::*;

@@ -101,3 +101,26 @@ shutdown. Individual stores never close the injected connection.
 
 See [Session and Goal API](../../../../docs/会话与目标存储.md) for lifecycle
 and continuation examples.
+
+
+## Telemetry storage
+
+`TelemetryStoragePlugin::new(path, retention)` installs the Core
+`TelemetryStoreService` independently of session storage. It owns the SQLite
+runtime it opens and closes it during plugin shutdown. Direct users can instead
+call `SqliteTelemetryStore::with_database(database, retention)` to share a runtime
+whose lifecycle remains owned by the caller.
+
+The store owns `ef_telemetry_traces`, `ef_telemetry_spans`, and
+`ef_telemetry_metric_points`. Traces contain generic attributes; tenant, workspace,
+session and application status interpretation belong to the host.
+`TelemetryRetention` requires trace and metric ages and an optional completed
+trace count. A completed trace exceeding either age or count is removed with all
+its spans in one transaction. Active traces are excluded. Metrics expire by age
+only. Writes and startup apply retention; the Collector schedules idle cleanup.
+On reopen, unfinished traces are marked abandoned and become eligible for retention.
+
+Span retries upsert by trace/span identity. Metric retries deduplicate by point
+identity. Root spans update trace metadata; later child spans do not replace its
+status or attributes. The generic query port supports attribute filters, paging,
+metric resource filters and numeric span attribute totals.

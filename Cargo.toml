@@ -14,6 +14,7 @@ members = [
     "crates/plugin/model/eliteforge-agent-official-plugin-model-http",
     "crates/plugin/agent/eliteforge-agent-official-plugin-agent-external",
     "crates/plugin/observe/eliteforge-agent-official-plugin-otel",
+    "crates/plugin/observe/eliteforge-agent-official-plugin-otel-collector",
     "crates/plugin/protocol/eliteforge-agent-official-plugin-agui",
     "crates/plugin/protocol/eliteforge-agent-official-plugin-a2ui",
     "crates/plugin/skill/eliteforge-agent-official-plugin-skills",

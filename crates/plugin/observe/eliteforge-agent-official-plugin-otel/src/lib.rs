@@ -1,8 +1,10 @@
 //! OpenTelemetry observation with explicit provider ownership and bounded state.
 //!
 //! The default plugin reads the host's global providers during installation;
-//! `new` accepts explicit providers. The host owns exporter configuration,
-//! flushing and shutdown. This crate never changes the global provider. Prompts, tool
+//! `TelemetryPlugin::new` accepts explicit providers whose configuration and
+//! lifecycle remain owned by the host. The optional `runtime` feature adds a
+//! managed SDK plugin that owns its providers, exporters and process sampling.
+//! Neither plugin changes global providers. Prompts, tool
 //! arguments/results, model responses, sessions, credentials, and extensions
 //! are not collected as payloads. Error text is omitted unless the host supplies
 //! an explicit redactor. Optional identifiers remain span-only.
@@ -60,6 +62,8 @@ pub struct TelemetryConfig {
     /// default. These identifiers are host-controlled and must not contain secrets.
     pub record_identifiers: bool,
     pub max_identifier_bytes: usize,
+    /// Include structured error reports. Hosts may disable them to persist only error kinds.
+    pub record_error_reports: bool,
 }
 
 impl Default for TelemetryConfig {
@@ -70,6 +74,7 @@ impl Default for TelemetryConfig {
             max_model_links_per_run: 256,
             record_identifiers: false,
             max_identifier_bytes: 128,
+            record_error_reports: true,
         }
     }
 }
@@ -445,15 +450,13 @@ impl Observation {
 
     fn report(&self, span: &SpanGuard, report: ErrorReport) {
         // Events inherit trace/span identity without a second asynchronous sink.
-        if let Ok(json) = serde_json::to_string(&report) {
-            span.context.span().add_event(
-                "agent.error",
-                vec![
-                    KeyValue::new("error.type", report.kind),
-                    KeyValue::new("agent.error.report", json),
-                ],
-            );
+        let mut attributes = vec![KeyValue::new("error.type", report.kind.clone())];
+        if self.config.record_error_reports
+            && let Ok(json) = serde_json::to_string(&report)
+        {
+            attributes.push(KeyValue::new("agent.error.report", json));
         }
+        span.context.span().add_event("agent.error", attributes);
     }
 
     fn identifier(&self, attributes: &mut Vec<KeyValue>, key: &'static str, value: &str) {
@@ -989,3 +992,8 @@ impl EventSink for Observation {
     }
     async fn on_event(&self, _: &RunContext, _: &AgentEvent) {}
 }
+
+#[cfg(feature = "runtime")]
+mod runtime;
+#[cfg(feature = "runtime")]
+pub use runtime::{OtelRuntimeConfig, OtelRuntimePlugin, OtelRuntimeService};

@@ -3,13 +3,25 @@ name = "eliteforge-agent-official-plugin-otel"
 description = "Privacy-preserving OpenTelemetry middleware for eliteforge-agent-framework"
 version.workspace = true
 edition.workspace = true
+[features]
+default = []
+runtime = ["dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:sysinfo", "dep:reqwest", "dep:tokio", "dep:tokio-util", "dep:eliteforge-agent-official-plugin-otel-collector"]
+
 [dependencies]
 eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
 async-trait.workspace = true
 serde_json.workspace = true
 opentelemetry = { version = "=0.32.0", default-features = false, features = ["trace", "metrics"] }
+opentelemetry_sdk = { version = "=0.32.0", default-features = false, features = ["trace", "metrics"], optional = true }
+opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics"], optional = true }
+sysinfo = { version = "0.37", default-features = false, features = ["system"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["blocking"], optional = true }
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+eliteforge-agent-official-plugin-otel-collector = { path = "../eliteforge-agent-official-plugin-otel-collector", optional = true }
 [dev-dependencies]
 eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
+eliteforge-agent-plugin-core = { path = "../../../framework/eliteforge-agent-plugin-core" }
 eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }
 tempfile = "3"
 futures.workspace = true

@@ -15,6 +15,8 @@ mod model_catalog;
 mod operations;
 mod state;
 mod summary;
+mod telemetry;
+pub use telemetry::{SqliteTelemetryStore, TelemetryStoragePlugin};
 
 pub use artifact::{FileArtifactLimits, FileArtifactStore};
 pub use conversation::{SqliteConversationOptions, SqliteConversationStore};
