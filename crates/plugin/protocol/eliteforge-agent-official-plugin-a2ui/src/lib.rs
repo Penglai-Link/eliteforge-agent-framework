@@ -809,6 +809,21 @@ impl Tool for A2uiTool {
         }))
     }
 }
+fn form_error_details(error: &jsonschema::ValidationError<'_>, index: usize) -> Vec<String> {
+    use jsonschema::error::ValidationErrorKind;
+    match error.kind() {
+        ValidationErrorKind::OneOfNotValid { context }
+        | ValidationErrorKind::AnyOf { context } => context.iter()
+            .min_by_key(|branch| branch.len())
+            .into_iter()
+            .flatten()
+            .flat_map(|child| form_error_details(child, index))
+            .take(16)
+            .collect(),
+        _ => vec![format!("messages[{index}]{}: {error}", error.instance_path())],
+    }
+}
+
 fn validate_input_messages(
     service: &A2uiService,
     messages: &[Value],
@@ -839,8 +854,19 @@ fn validate_input_messages(
         .ok_or_else(|| invalid("Unsupported catalog"))?;
     let mut components = BTreeMap::new();
     for (index, message) in messages.iter().enumerate() {
-        if !safe(message) || message["version"] != VERSION || !validator.is_valid(message) {
-            return Err(invalid("Invalid form envelope"));
+        if !safe(message) {
+            return Err(invalid(format!("messages[{index}]: unsafe form content")));
+        }
+        if message["version"] != VERSION {
+            return Err(invalid(format!("messages[{index}]/version: expected {VERSION}")));
+        }
+        if !validator.is_valid(message) {
+            let details = validator.iter_errors(message)
+                .take(8)
+                .flat_map(|error| form_error_details(&error, index))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(invalid(format!("Invalid form envelope: {details}")));
         }
         let payload = message
             .as_object()
@@ -868,4 +894,24 @@ fn validate_input_messages(
         return Err(invalid("Form root missing"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod form_validation_tests {
+    use super::*;
+
+    #[test]
+    fn form_errors_locate_the_message_and_field() {
+        let service = A2uiService::new().unwrap();
+        let capabilities = A2uiClientCapabilities {
+            version: VERSION.into(), catalog_ids: vec![AGENT_CATALOG_ID.into()],
+        };
+        let messages = vec![json!({"version": VERSION, "createSurface": {
+            "surfaceId": "form", "catalogId": AGENT_CATALOG_ID, "sendDataModel": "wrong"
+        }})];
+        let error = validate_input_messages(&service, &messages, &capabilities).unwrap_err().to_string();
+        assert!(error.contains("messages[0]"), "{error}");
+        assert!(error.contains("sendDataModel"), "{error}");
+        assert!(error.contains("boolean"), "{error}");
+    }
 }
