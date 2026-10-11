@@ -205,14 +205,18 @@ impl AgentLoop for DagWorkflowLoop {
                 self.definition.version,
                 encode(&state)?,
             )
-            .with_execution_scope(request.scope());
+            .with_execution_scope(request.scope())
+            .with_host_metadata(request);
             if let Some(previous) = &previous {
                 cp.transcript = previous.transcript.clone();
             }
-            cp.transcript.push(Message::user(&request.input));
-            cp.history
-                .messages
-                .push(HistoryMessage::user(context.run_id, &request.input));
+            cp.transcript.push(
+                Message::user(&request.input).with_provenance(request.message_provenance.clone()),
+            );
+            cp.history.messages.push(
+                HistoryMessage::user(context.run_id, &request.input)
+                    .with_provenance(request.message_provenance.clone()),
+            );
             store.create(cp, previous.map(|p| p.run_id)).await?
         };
         let state = self.validate_checkpoint(&cp, request, context)?;

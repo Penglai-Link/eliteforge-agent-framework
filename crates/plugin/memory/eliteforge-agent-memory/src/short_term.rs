@@ -1,8 +1,15 @@
 //! Scoped block sources and assembly. Host DTOs are opaque to the memory engine.
 use crate::ModelContextBudgetPlan;
 use eliteforge_agent_core::MemoryError;
+/// Platform memory has its own identity, independent of any workspace/namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemoryScopeKind {
+    Namespace,
+    Platform,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryScope {
+    kind: MemoryScopeKind,
     namespace: String,
     session: String,
 }
@@ -16,8 +23,48 @@ impl MemoryScope {
         if namespace.trim().is_empty() || session.trim().is_empty() {
             return Err(MemoryError::Invalid("memory scope is empty".into()));
         }
-        Ok(Self { namespace, session })
+        Ok(Self {
+            kind: MemoryScopeKind::Namespace,
+            namespace,
+            session,
+        })
     }
+    /// A platform session needs no synthetic workspace record. The kind is part
+    /// of scope equality, so a host namespace called `platform` cannot collide.
+    pub fn platform(session: impl Into<String>) -> Result<Self, MemoryError> {
+        let session = session.into();
+        if session.trim().is_empty() {
+            return Err(MemoryError::Invalid("memory session is empty".into()));
+        }
+        Ok(Self {
+            kind: MemoryScopeKind::Platform,
+            namespace: "platform".into(),
+            session,
+        })
+    }
+    pub fn kind(&self) -> MemoryScopeKind {
+        self.kind
+    }
+    pub fn is_platform(&self) -> bool {
+        self.kind == MemoryScopeKind::Platform
+    }
+    /// Stable, unambiguous key for caches and host persistence. Includes the
+    /// scope kind so platform sessions cannot reuse a namespace's summaries.
+    pub fn storage_key(&self) -> String {
+        let kind = match self.kind {
+            MemoryScopeKind::Namespace => "namespace",
+            MemoryScopeKind::Platform => "platform",
+        };
+        format!(
+            "{}:{}:{}:{}:{}",
+            kind,
+            self.namespace.len(),
+            self.namespace,
+            self.session.len(),
+            self.session
+        )
+    }
+    /// Hosts must include `kind()` alongside this label in persisted scope keys.
     pub fn namespace(&self) -> &str {
         &self.namespace
     }
@@ -221,4 +268,38 @@ pub fn estimate_serialized_tokens<T: serde::Serialize>(entry: &T) -> u32 {
     serde_json::to_vec(entry)
         .map(|v| v.len().saturating_add(16).min(u32::MAX as usize) as u32)
         .unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+mod platform_scope_tests {
+    use super::*;
+    #[test]
+    fn platform_scope_is_explicit_and_cannot_alias_a_host_namespace() {
+        let platform = MemoryScope::platform("session").unwrap();
+        assert!(platform.is_platform());
+        assert_eq!(platform.kind(), MemoryScopeKind::Platform);
+        assert_ne!(platform, MemoryScope::new("platform", "session").unwrap());
+        assert_ne!(
+            platform.storage_key(),
+            MemoryScope::new("platform", "session")
+                .unwrap()
+                .storage_key()
+        );
+        assert!(MemoryScope::platform(" ").is_err());
+        assert!(MemoryScope::new("", "session").is_err());
+        let original = MemoryRevision {
+            scope: platform,
+            generation: "g".into(),
+            revision: 1,
+        };
+        let other = MemoryRevision {
+            scope: MemoryScope::new("platform", "session").unwrap(),
+            generation: "g".into(),
+            revision: 1,
+        };
+        assert!(matches!(
+            original.ensure_current(&other),
+            Err(MemoryError::Conflict)
+        ));
+    }
 }

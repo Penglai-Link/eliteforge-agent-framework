@@ -1593,3 +1593,54 @@ async fn final_only_output_after_progress_is_visible() {
     );
     agent.framework().close().await;
 }
+
+#[tokio::test]
+async fn structured_sender_provenance_survives_agui_live_and_replay_transport() {
+    let agent = TestBuilder::default()
+        .plugin(AgUiPlugin::default())
+        .plugin(ChatModelPlugin::new(Streaming))
+        .build()
+        .await
+        .unwrap();
+    let mut request = RunRequest::new("dude-work", "task");
+    let provenance = MessageProvenance {
+        sender: MessageSender {
+            kind: "dude".into(),
+            id: Some("main".into()),
+            display_name: Some("Main Dude".into()),
+            avatar_url: Some("avatar.svg".into()),
+        },
+        source: Some("heartbeat".into()),
+        correlation: Some(json!({"eventId":"event-1"})),
+    };
+    request.assistant_provenance = Some(provenance.clone());
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    result.unwrap();
+    let custom = events
+        .iter()
+        .find_map(|event| match event {
+            Event::Custom(event) if event.name == "framework.message.provenance" => Some(event),
+            _ => None,
+        })
+        .expect("missing structured attribution");
+    assert_eq!(
+        custom.value["provenance"],
+        serde_json::to_value(provenance).unwrap()
+    );
+    let message_id = events
+        .iter()
+        .find_map(|event| match event {
+            Event::TextMessageStart(event) => Some(event.message_id.to_string()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(custom.value["messageId"], json!(message_id));
+    assert_eq!(custom.value["sessionId"], json!("dude-work"));
+    assert_eq!(
+        custom.base.metadata.as_ref().unwrap()["framework"]["sessionId"],
+        json!("dude-work")
+    );
+    validate_client(&events).await;
+    assert!(agent.framework().close().await.is_success());
+}

@@ -56,7 +56,7 @@ sequenceDiagram
 ```
 
 因此，AG-UI 事件的顺序来自 Framework 的实时发布顺序，而非普通观察者 `on_event` 的处理顺序。
-`RUN_STARTED` 在 `Agent::start()` 返回 `RunHandle` 前已发布；终态则在执行器返回后发布。
+`RUN_STARTED` 在新运行的 `Agent::start()` 返回 `RunHandle` 前已发布；恢复运行会先读取 Checkpoint 的宿主身份，再发布开始事件。终态在执行器返回后发布。
 
 ## 事件映射
 
@@ -65,7 +65,7 @@ sequenceDiagram
 
 | Framework 事件 | 发出方与时机 | AG-UI 事件 | 关键字段 |
 |---|---|---|---|
-| `RunStarted` | `Agent::start()` 完成同步准入并创建输出通道后；返回 `RunHandle` 前 | `RUN_STARTED` | `threadId=session_id`；`runId=executionId` |
+| `RunStarted` | 新运行同步准入并创建输出通道后；恢复运行读取原宿主元数据后 | `RUN_STARTED` | `threadId=session_id`；`runId=executionId` |
 | `StepStarted / StepFinished` | `ModelInvoker` 开始一次模型调用；`AttemptStream` 在响应完成、取消或退出时关闭 | `STEP_STARTED / STEP_FINISHED` | `stepName` 含节点执行身份和步骤 ID |
 | `WorkflowNodeChanged` | Workflow / DAG 调度器使节点进入 `Running` 或离开运行态时 | `STEP_STARTED / STEP_FINISHED`；`CUSTOM framework.node` | `nodeId`、`status` |
 | `MessageStarted / TextDelta / MessageFinished` | `ModelInvoker` 开启模型流、收到文本、收束响应时 | `TEXT_MESSAGE_START / TEXT_MESSAGE_CONTENT / TEXT_MESSAGE_END` | `messageId`；`delta` 是本次追加内容 |
@@ -135,3 +135,13 @@ sequenceDiagram
 - 通道溢出、事件超限或协议顺序错误会结束该 AG-UI 流并发送 `RUN_ERROR`，不会取消 Agent、重试工具或改变 `agent.wait(handle)` 的结果。
 - `on_published` 必须快速，不得 I/O、等待或再次发布事件；普通 `on_event` 是尽力的异步观测，不能替代 AG-UI 输出。
 - 此插件不实现 HTTP 端点、客户端工具执行、历史快照或 SSE 重连回放；这些能力由上层应用实现。
+
+
+## 消息发送者
+
+设置 `RunRequest.assistant_provenance` 后，消息开始时会产生 `framework.message.provenance`
+CUSTOM 事件，value 为 `{ messageId, provenance, sessionId, runId }`。`provenance.sender` 包含
+`kind` 以及可选的 `id / displayName / avatarUrl`，另有可选 `source / correlation`。
+消息角色仍遵循 AG-UI；界面按 provenance 显示实际发言身份。事件 metadata 的
+`framework.sessionId` 也携带会话范围。历史查询从 `HistoryMessage.provenance` 还原相同信息，
+回放保留原 CUSTOM 事件；客户端应按会话和消息 ID 关联，不能让不同并行会话互相覆盖。

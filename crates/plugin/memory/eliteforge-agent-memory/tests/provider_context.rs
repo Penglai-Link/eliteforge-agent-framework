@@ -597,7 +597,9 @@ fn semantic_assembler(
                 .reduce_with(reducer),
             config(HISTORY_BLOCK, 8000),
         ]),
-        vec![contributor("data", data)],
+        vec![Arc::new(
+            MemoryContextContributor::new("data", data.revision.scope.clone(), data).unwrap(),
+        )],
     )
     .unwrap()
     .with_policy(Arc::new(BorrowUnusedMemoryBudget))
@@ -1009,5 +1011,40 @@ async fn persistent_summary_reopens_and_source_correction_or_scope_change_invali
         .await
         .unwrap();
     assert_eq!(provider.requests.lock().unwrap().len(), 3);
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn platform_semantic_summary_cache_is_distinct_from_same_named_namespace() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        SqliteSummaryStore::open(
+            temp.path().join("platform.sqlite"),
+            SummaryStoreOptions::default(),
+        )
+        .await
+        .unwrap(),
+    );
+    let provider = Provider::default();
+    let named = MemoryScope::new("platform", "session-a").unwrap();
+    let platform = MemoryScope::platform("session-a").unwrap();
+    for scope in [named.clone(), platform, named] {
+        let mut data = (*source("data", vec!["scoped historical facts ".repeat(100)], 1)).clone();
+        data.revision.scope = scope;
+        execute(fixture(
+            semantic_assembler(
+                Arc::new(data),
+                store.clone(),
+                Arc::new(Audit::default()),
+                None,
+            ),
+            provider.clone(),
+            vec![],
+            false,
+        ))
+        .await
+        .unwrap();
+    }
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
     store.close().await.unwrap();
 }

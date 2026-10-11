@@ -566,6 +566,7 @@ impl ModelInvoker {
                 run_id: context.run_id,
                 step_id: Some(stream.message_id.clone()),
                 role: Role::Assistant,
+                provenance: context.assistant_provenance(),
                 content: Vec::new(),
                 structured: None,
                 status: HistoryStatus::Running,

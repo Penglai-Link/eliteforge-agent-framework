@@ -1251,6 +1251,11 @@ impl AgentGeneration {
         mut request: RunRequest,
         parent: Option<&RunContext>,
     ) -> Result<RunHandle, AgentError> {
+        if request.host_context.is_none()
+            && let Some(parent) = parent
+        {
+            request.inherit_host_context(parent);
+        }
         if request.model.is_none() {
             request.model = self.inner.default_model.clone();
         }
@@ -1294,6 +1299,9 @@ impl AgentGeneration {
         let execution_id = RunId::new_v4();
         let mut outputs = RunOutputs::default();
         let mut extensions = request.extensions.clone();
+        extensions.insert(RunHostMetadataService(Arc::new(std::sync::RwLock::new(
+            request.host_metadata(),
+        ))));
         for factory in &self.inner.outputs {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 factory.prepare(&request, execution_id, &mut extensions, &mut outputs)
@@ -1477,7 +1485,9 @@ impl AgentGeneration {
             .get::<SessionLifecycleStoreService>();
         // Output reservations and the owning handle exist synchronously. SQL
         // admission still completes before any loop or lifecycle hook executes.
-        context.publish(started);
+        if request.resume.is_none() {
+            context.publish(started.clone());
+        }
         let kind = inner.agent_loop.execution_kind();
         let mut managed = ManagedRun {
             id: run_id,
@@ -1501,6 +1511,45 @@ impl AgentGeneration {
         };
         runtime.spawn(async move {
             let mut request = request;
+            // Restore trusted metadata before hooks/tools execute. Host services
+            // remain nonserialized and are reconstructed by the caller.
+            if let Some(resume) = &request.resume
+                && let Some(store) = &inner.services.state
+            {
+                match store.load(resume.run_id).await.and_then(|checkpoint| {
+                    if checkpoint.session_id != request.session_id {
+                        return Err(StateError::Invalid(
+                            "resume session identity mismatch".into(),
+                        ));
+                    }
+                    Ok(checkpoint)
+                }) {
+                    Ok(checkpoint) => {
+                        request.host_context = checkpoint.host_metadata.host_context.clone();
+                        request.message_provenance =
+                            checkpoint.host_metadata.message_provenance.clone();
+                        request.assistant_provenance =
+                            checkpoint.host_metadata.assistant_provenance.clone();
+                        if let Some(service) = context.extensions.get::<RunHostMetadataService>() {
+                            *service.0.write().unwrap_or_else(|e| e.into_inner()) =
+                                checkpoint.host_metadata;
+                        }
+                    }
+                    Err(error) => {
+                        context.publish(started.clone());
+                        context.publish(AgentEvent::RunFailed(error.to_string()));
+                        if let Some(observers) = &context.observers {
+                            observers.finish(request.limits.cleanup_timeout).await;
+                        }
+                        drop(registration);
+                        let _ = result_sender.send(Err(error.into()));
+                        return;
+                    }
+                }
+            }
+            if request.resume.is_some() {
+                context.publish(started);
+            }
             if let Some(lifecycle) = &lifecycle {
                 if request.resume.is_some()
                     && request.execution_scope.is_none()
@@ -2112,6 +2161,34 @@ impl ChildRunHandle {
     }
 }
 
+/// Cloneable live observation, independent of execution ownership and UI.
+/// This is not durable replay. Hosts persist authoritative terminal results and
+/// use HistoryStore for reconnecting clients that missed live events.
+#[derive(Clone)]
+pub struct RunObservation {
+    pub run_id: RunId,
+    events: Arc<Mutex<broadcast::Receiver<EventEnvelope>>>,
+    completion: Arc<RunCompletion>,
+}
+impl RunObservation {
+    /// Future events only; lag must be recovered from durable host history.
+    pub fn subscribe(&self) -> broadcast::Receiver<EventEnvelope> {
+        self.events
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .resubscribe()
+    }
+    pub fn is_finished(&self) -> bool {
+        self.completion
+            .done
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+    /// Wait without taking ownership. Dropping this future has no side effects.
+    pub async fn finished(&self) {
+        self.completion.wait().await;
+    }
+}
+
 /// Owns the result receiver and cancellation-on-drop lifetime of a run.
 pub struct RunHandle {
     completion: Arc<RunCompletion>,
@@ -2136,6 +2213,15 @@ impl AsRef<RunControl> for RunControl {
 }
 
 impl RunHandle {
+    /// Non-owning observer. Keep this after moving the handle into the host's
+    /// background `wait` task; disconnecting a subscriber never cancels work.
+    pub fn observe(&self) -> RunObservation {
+        RunObservation {
+            run_id: self.run_id,
+            events: Arc::new(Mutex::new(self.events.subscribe())),
+            completion: self.completion.clone(),
+        }
+    }
     fn control(&self) -> RunControl {
         self.control.clone()
     }
@@ -2317,6 +2403,13 @@ impl CollaborationRuntime {
     ) -> RunRequest {
         request.session_id = session_id;
         request.extensions = parent.extensions.clone();
+        request.inherit_host_context(parent);
+        if request.message_provenance.is_none() {
+            request.message_provenance = parent.assistant_provenance();
+        }
+        if request.assistant_provenance.is_none() {
+            request.assistant_provenance = parent.assistant_provenance();
+        }
         if request.model.is_none() {
             request.model = parent.model.clone();
         }

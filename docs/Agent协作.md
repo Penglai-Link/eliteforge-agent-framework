@@ -135,3 +135,42 @@ let agent = framework.agent(AgentSelection::default()).build().await?;
 - `agent_spawn` 会等待子 Agent 返回，不适合交给它承载长期后台任务。
 - 默认 Thread registry 只在当前 Agent 进程内有效；跨进程恢复、身份授权和队列由上层应用实现。
 - Thread 答案必须通过 `thread_answer` 提交，以保留原始交互校验和恢复位置。
+
+## 宿主身份与后台观察
+
+`Role::User` 是模型协议角色。发送者由宿主填写 `RunRequest.message_provenance`，执行者由
+`assistant_provenance` 表示。两者写入 `HistoryMessage.provenance` 和原始 `Message.provenance`，
+不会把 Dude 的委派伪装成人类输入。`MessageSender.kind`、来源和关联字段由宿主定义；它们用于
+归属展示，访问权限仍由宿主验证。
+
+宿主可把所有者、业务范围和任务关联写入 `RunRequest.host_context`。Framework 不解释这些
+JSON 字段，也不把它们写入提示词。内置协作和 `run_child` 保留该值；自定义命名 Agent bridge
+调用 `request.inherit_host_context(parent)`，再设置目标 Agent 的 `assistant_provenance`。
+官方 ReAct、Workflow、DAG 和外部 Agent 运行将宿主元数据写入 Checkpoint；支持恢复的运行在
+发出恢复的 `RunStarted`、执行 Hook 和工具前恢复原值。非序列化的宿主服务仍需重新装配。
+自定义持久化 Loop 应使用 `Checkpoint::with_host_metadata(request)`。
+
+后台宿主保留运行所有权，页面仅订阅：
+
+```mermaid
+flowchart LR
+    H[宿主后台任务] -->|持有 RunHandle 并 wait| R[运行]
+    H --> O[RunHandle.observe]
+    O -->|subscribe| U[页面]
+    O -->|finished| L[生命周期观察]
+    U -->|关闭页面 丢弃订阅| O
+    R -->|持久化终态| S[宿主存储和事件队列]
+```
+
+`RunObservation` 可克隆；丢弃它、事件接收器或 `finished()` Future 都不会取消运行。
+`subscribe()` 只返回后续事件，慢消费者可能 Lagged；重连使用历史或宿主的回放服务。
+`finished()` 表示运行已释放，不取代 `agent.wait(handle)` 的权威结果。丢弃拥有者 `RunHandle`
+或它的 wait Future 仍会取消运行，因此后台任务必须由宿主管理生命周期。
+
+Thread 完成后，默认 runtime 仍向原 Context 发布协作终态；同步 `EventSink::on_published`
+可以观察它，但必须快速且不能 I/O。已结束的父 AG-UI 流不再接受这些事件。需要持久化反馈时，
+宿主的 `AgentCollaborationRuntime` 应直接保存 Thread 结果和 outbox，再唤醒所属业务会话；
+不能把有界、尽力的观察回调当作持久化队列。默认 registry 仍不跨进程恢复。
+
+平台级短期记忆用 `MemoryScope::platform(session)`；`kind()` 与普通命名范围不同，即使
+命名范围叫 `platform` 也不会混淆。宿主持久化范围键和授权判断需要同时使用 kind 和 namespace。

@@ -252,3 +252,17 @@ fn disabled_mandatory_blocks_keep_complete_inputs_and_report_budget_overflow() {
     assert!(assessed.over_budget);
     assert_eq!(assessed.reason, Some("SEED_PROMPT_PREFIX_OVER_BUDGET"));
 }
+
+#[test]
+fn platform_memory_scope_does_not_alias_a_workspace_namespace_or_cache_key() {
+    let platform = MemoryScope::platform("same-session").unwrap();
+    let named = MemoryScope::new("platform", "same-session").unwrap();
+    assert!(platform.is_platform());
+    assert_ne!(platform, named);
+    assert_ne!(platform.storage_key(), named.storage_key());
+    assert_ne!(
+        MemoryScope::new("a:b", "c").unwrap().storage_key(),
+        MemoryScope::new("a", "b:c").unwrap().storage_key()
+    );
+    assert!(MemoryScope::platform("").is_err());
+}

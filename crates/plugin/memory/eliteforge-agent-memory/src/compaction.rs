@@ -320,7 +320,7 @@ impl MemoryCompactor {
             "Continue after the historical memory boundary.",
         ));
         let mut snapshot = ConversationSnapshot::new(
-            ConversationKey::new(revision.scope.session())
+            ConversationKey::new(revision.scope.storage_key())
                 .branch(format!("memory/{}", input.block.id)),
             &revision.generation,
             records.clone(),

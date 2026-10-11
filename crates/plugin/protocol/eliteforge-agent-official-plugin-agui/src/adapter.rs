@@ -560,7 +560,7 @@ impl Adapter {
         for event in events {
             event.base_mut().timestamp = Some(self.timestamp);
             event.base_mut().metadata = Some(json!({"framework": {
-                "runId":self.run_id,"executionId":self.execution_id,"sourceSequence":self.sequence,"node":node
+                "runId":self.run_id,"sessionId":self.thread_id,"executionId":self.execution_id,"sourceSequence":self.sequence,"node":node
             }}).as_object().unwrap().clone());
         }
     }

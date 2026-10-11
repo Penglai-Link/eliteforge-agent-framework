@@ -87,18 +87,25 @@ pub struct HistoryMessage {
     pub run_id: RunId,
     pub step_id: Option<String>,
     pub role: Role,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<MessageProvenance>,
     pub content: Vec<HistoryContentBlock>,
     pub structured: Option<Value>,
     pub status: HistoryStatus,
     pub created_at_ms: u64,
 }
 impl HistoryMessage {
+    pub fn with_provenance(mut self, provenance: Option<MessageProvenance>) -> Self {
+        self.provenance = provenance;
+        self
+    }
     pub fn user(run_id: RunId, content: &Content) -> Self {
         Self {
             id: RunId::new_v4().to_string(),
             run_id,
             step_id: None,
             role: Role::User,
+            provenance: None,
             content: history_content(content),
             structured: None,
             status: HistoryStatus::Completed,
@@ -217,6 +224,7 @@ impl HistoryRecords {
                 .ok_or_else(|| StateError::Invalid("history messages cannot be removed".into()))?;
             if old.run_id != new.run_id
                 || old.role != new.role
+                || old.provenance != new.provenance
                 || old.step_id != new.step_id
                 || old.created_at_ms != new.created_at_ms
                 || (old.status != HistoryStatus::Running && old != new)

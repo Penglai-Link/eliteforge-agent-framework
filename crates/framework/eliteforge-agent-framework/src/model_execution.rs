@@ -160,18 +160,21 @@ impl AgentLoop for ModelExecutionLoop {
                 self.definition.version,
                 serde_json::to_value(state).map_err(state_encoding)?,
             )
-            .with_execution_scope(request.scope());
+            .with_execution_scope(request.scope())
+            .with_host_metadata(request);
             if let Some(snapshot) = initial_snapshot {
                 checkpoint.transcript = snapshot.messages;
             } else if let Some(previous) = &previous {
                 checkpoint.transcript = previous.transcript.clone();
             }
-            checkpoint.transcript.push(Message::user(&request.input));
+            checkpoint.transcript.push(
+                Message::user(&request.input).with_provenance(request.message_provenance.clone()),
+            );
             if context.node_execution().is_none() {
-                checkpoint
-                    .history
-                    .messages
-                    .push(HistoryMessage::user(context.run_id, &request.input));
+                checkpoint.history.messages.push(
+                    HistoryMessage::user(context.run_id, &request.input)
+                        .with_provenance(request.message_provenance.clone()),
+                );
             }
             store.create(checkpoint, previous.map(|p| p.run_id)).await?
         };
@@ -811,13 +814,13 @@ impl ModelExecutionRuntime<'_> {
     }
     async fn record_steering(&mut self, pending: Vec<Content>) -> Result<(), AgentError> {
         for input in pending {
-            self.checkpoint
-                .history
-                .messages
-                .push(HistoryMessage::user(self.context.run_id, &input));
-            self.checkpoint
-                .transcript
-                .push(Message::user(input.clone()));
+            self.checkpoint.history.messages.push(
+                HistoryMessage::user(self.context.run_id, &input)
+                    .with_provenance(self.context.message_provenance()),
+            );
+            self.checkpoint.transcript.push(
+                Message::user(input.clone()).with_provenance(self.context.message_provenance()),
+            );
             // Persist the message and its journal event together before
             // publishing the live event, including at the final reply boundary.
             self.save(Some(AgentEvent::Steered(input.protocol_text())))
@@ -964,7 +967,8 @@ impl ModelExecutionRuntime<'_> {
                     self.state.usage.add(&response.usage);
                     self.state.output = response.content.clone();
                     self.state.structured = response.structured;
-                    let mut assistant = Message::assistant(response.content);
+                    let mut assistant = Message::assistant(response.content)
+                        .with_provenance(self.context.assistant_provenance());
                     assistant.structured = self.state.structured.clone();
                     assistant.tool_calls = response.tool_calls;
                     assistant.model_context = response.model_context;

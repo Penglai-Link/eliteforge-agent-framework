@@ -170,6 +170,8 @@ pub trait ToolPolicy: Send + Sync {
 /// execution strategy. The transcript and event log commit in the same write.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
+    #[serde(default)]
+    pub host_metadata: RunHostMetadata,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capability_versions: Vec<CapabilityVersionBinding>,
     pub schema_version: u32,
@@ -194,6 +196,10 @@ fn default_execution_scope() -> String {
 }
 
 impl Checkpoint {
+    pub fn with_host_metadata(mut self, request: &RunRequest) -> Self {
+        self.host_metadata = request.host_metadata();
+        self
+    }
     pub fn with_execution_scope(mut self, scope: impl Into<String>) -> Self {
         self.execution_scope = scope.into();
         self
@@ -206,6 +212,7 @@ impl Checkpoint {
         state: Value,
     ) -> Self {
         Self {
+            host_metadata: RunHostMetadata::default(),
             capability_versions: Vec::new(),
             schema_version: 1,
             run_id,
@@ -260,6 +267,7 @@ impl Checkpoint {
         if self.run_id != next.run_id
             || self.session_id != next.session_id
             || self.execution_scope != next.execution_scope
+            || self.host_metadata != next.host_metadata
             || self.loop_id != next.loop_id
             || self.loop_version != next.loop_version
         {

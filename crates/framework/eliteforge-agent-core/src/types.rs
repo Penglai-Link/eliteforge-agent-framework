@@ -68,9 +68,55 @@ impl ToolCall {
     }
 }
 
+/// Display identity supplied by the trusted host, independent of provider role.
+/// `kind` is host-owned (for example user, agent, or system).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageSender {
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+}
+
+/// Public attribution. Never use model-generated values as authorization data.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageProvenance {
+    pub sender: MessageSender,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<Value>,
+}
+
+/// Serializable host metadata carried through checkpoints and delegation.
+/// The framework stores it without interpreting ownership or access rules.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunHostMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_context: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_provenance: Option<MessageProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_provenance: Option<MessageProvenance>,
+}
+
+/// Shared so observers created before asynchronous checkpoint recovery see the
+/// same restored metadata as tools and lifecycle hooks.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct RunHostMetadataService(pub Arc<std::sync::RwLock<RunHostMetadata>>);
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     pub role: Role,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<MessageProvenance>,
     pub content: crate::Content,
     /// Structured assistant output, retained alongside the original content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +134,7 @@ impl Message {
     pub fn new(role: Role, content: impl Into<crate::Content>) -> Self {
         Self {
             role,
+            provenance: None,
             content: content.into(),
             structured: None,
             tool_calls: Vec::new(),
@@ -95,6 +142,11 @@ impl Message {
             tool_result: None,
             model_context: None,
         }
+    }
+
+    pub fn with_provenance(mut self, provenance: Option<MessageProvenance>) -> Self {
+        self.provenance = provenance;
+        self
     }
 
     pub fn user(content: impl Into<crate::Content>) -> Self {
@@ -110,6 +162,7 @@ impl Message {
     pub fn tool(call_id: impl Into<String>, content: impl Into<crate::Content>) -> Self {
         Self {
             role: Role::Tool,
+            provenance: None,
             content: content.into(),
             structured: None,
             tool_calls: Vec::new(),
@@ -573,6 +626,13 @@ impl RunLimits {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRequest {
+    /// Trusted, opaque host ownership/scope/correlation data, never a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_context: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_provenance: Option<MessageProvenance>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assistant_provenance: Option<MessageProvenance>,
     /// Optional named Agent selected by collaboration tools. The host collaboration
     /// runtime must resolve and authorize it, then clear it before executing the run.
     /// A plain Agent cannot resolve application-owned Agent configuration.
@@ -602,6 +662,18 @@ pub struct RunRequest {
 }
 
 impl RunRequest {
+    pub fn host_metadata(&self) -> RunHostMetadata {
+        RunHostMetadata {
+            host_context: self.host_context.clone(),
+            message_provenance: self.message_provenance.clone(),
+            assistant_provenance: self.assistant_provenance.clone(),
+        }
+    }
+    /// Copies trusted lineage data. Hosts resolving a different target should
+    /// assign that target's assistant provenance after inheriting the context.
+    pub fn inherit_host_context(&mut self, parent: &RunContext) {
+        self.host_context = parent.host_context();
+    }
     pub fn scope(&self) -> &str {
         self.execution_scope.as_deref().unwrap_or("main")
     }
@@ -616,6 +688,9 @@ impl RunRequest {
     pub fn new(session_id: impl Into<String>, input: impl Into<crate::Content>) -> Self {
         Self {
             agent_code: None,
+            host_context: None,
+            message_provenance: None,
+            assistant_provenance: None,
             session_id: session_id.into(),
             run_id: None,
             execution_scope: None,
@@ -1067,6 +1142,21 @@ pub struct SteeringState {
 }
 
 impl RunContext {
+    pub fn host_metadata(&self) -> RunHostMetadata {
+        self.extensions
+            .get::<RunHostMetadataService>()
+            .map(|service| service.0.read().unwrap_or_else(|e| e.into_inner()).clone())
+            .unwrap_or_default()
+    }
+    pub fn host_context(&self) -> Option<Value> {
+        self.host_metadata().host_context
+    }
+    pub fn message_provenance(&self) -> Option<MessageProvenance> {
+        self.host_metadata().message_provenance
+    }
+    pub fn assistant_provenance(&self) -> Option<MessageProvenance> {
+        self.host_metadata().assistant_provenance
+    }
     /// Limits configured by the host for this run. Descendant or independent
     /// collaboration runs may tighten this policy but must not enlarge it.
     pub fn limits(&self) -> &RunLimits {
@@ -1186,7 +1276,19 @@ impl RunContext {
         self.publish(event);
     }
     pub fn emit_output(&self, event: crate::OutputEvent) {
+        let message_id = match &event {
+            crate::OutputEvent::MessageStarted { message_id } => Some(message_id.clone()),
+            _ => None,
+        };
         self.publish(AgentEvent::Output(Box::new(event)));
+        if let Some(message_id) = message_id
+            && let Some(provenance) = self.assistant_provenance()
+        {
+            self.publish(AgentEvent::Output(Box::new(crate::OutputEvent::Custom {
+                name: "framework.message.provenance".into(),
+                value: serde_json::json!({"messageId":message_id,"provenance":provenance,"sessionId":self.session_id,"runId":self.run_id}),
+            })));
+        }
     }
     #[doc(hidden)]
     pub fn publish(&self, event: AgentEvent) {

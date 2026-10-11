@@ -208,11 +208,12 @@ impl AgentLoop for ExternalAgentLoop {
                 1,
                 serde_json::json!({"dispatched":true}),
             )
-            .with_execution_scope(request.scope());
-            checkpoint
-                .history
-                .messages
-                .push(HistoryMessage::user(context.run_id, &request.input));
+            .with_execution_scope(request.scope())
+            .with_host_metadata(request);
+            checkpoint.history.messages.push(
+                HistoryMessage::user(context.run_id, &request.input)
+                    .with_provenance(request.message_provenance.clone()),
+            );
             checkpoint.history.steps.push(HistoryStep {
                 id: events.message_id.clone(),
                 run_id: context.run_id,
@@ -231,6 +232,7 @@ impl AgentLoop for ExternalAgentLoop {
                 run_id: context.run_id,
                 step_id: Some(events.message_id.clone()),
                 role: Role::Assistant,
+                provenance: context.assistant_provenance(),
                 content: Vec::new(),
                 structured: None,
                 status: HistoryStatus::Running,
