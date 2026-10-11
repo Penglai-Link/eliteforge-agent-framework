@@ -1516,11 +1516,15 @@ impl AgentGeneration {
             if let Some(resume) = &request.resume
                 && let Some(store) = &inner.services.state
             {
-                match store.load(resume.run_id).await.and_then(|checkpoint| {
+                let restored = tokio::select! {
+                    biased;
+                    _ = context.cancelled() => Err(AgentError::Cancelled),
+                    result = store.load(resume.run_id) => result.map_err(AgentError::from),
+                    _ = tokio::time::sleep_until(context.deadline) => Err(AgentError::Run("run deadline exceeded during metadata recovery".into())),
+                };
+                match restored.and_then(|checkpoint| {
                     if checkpoint.session_id != request.session_id {
-                        return Err(StateError::Invalid(
-                            "resume session identity mismatch".into(),
-                        ));
+                        return Err(AgentError::InvalidConfiguration("resume session identity mismatch".into()));
                     }
                     Ok(checkpoint)
                 }) {
@@ -1537,7 +1541,11 @@ impl AgentGeneration {
                     }
                     Err(error) => {
                         context.publish(started.clone());
-                        context.publish(AgentEvent::RunFailed(error.to_string()));
+                        context.publish(if matches!(error.primary(), AgentError::Cancelled) {
+                            AgentEvent::RunCancelled
+                        } else {
+                            AgentEvent::RunFailed(error.to_string())
+                        });
                         if let Some(observers) = &context.observers {
                             observers.finish(request.limits.cleanup_timeout).await;
                         }

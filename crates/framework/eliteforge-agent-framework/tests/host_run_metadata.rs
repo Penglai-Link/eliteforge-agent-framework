@@ -468,3 +468,77 @@ async fn independent_thread_retains_host_lineage_and_finishes_after_origin_run()
     assert_eq!(lifecycle.lock().unwrap().last(), Some(&"thread_finished"));
     assert!(agent.framework().close().await.is_success());
 }
+
+struct PendingRecoveryStore(Arc<Semaphore>);
+#[async_trait]
+impl StateStore for PendingRecoveryStore {
+    async fn create(&self, _: Checkpoint, _: Option<RunId>) -> Result<Checkpoint, StateError> {
+        unreachable!()
+    }
+    async fn load(&self, _: RunId) -> Result<Checkpoint, StateError> {
+        self.0.add_permits(1);
+        std::future::pending().await
+    }
+    async fn latest(&self, _: &str) -> Result<Option<Checkpoint>, StateError> {
+        unreachable!()
+    }
+    async fn latest_scope(&self, _: &str, _: &str) -> Result<Option<Checkpoint>, StateError> {
+        unreachable!()
+    }
+    async fn claim(&self, _: RunId, _: RunId, _: Duration) -> Result<ExecutionLease, StateError> {
+        unreachable!()
+    }
+    async fn renew(&self, _: &ExecutionLease, _: Duration) -> Result<ExecutionLease, StateError> {
+        unreachable!()
+    }
+    async fn commit(
+        &self,
+        _: &ExecutionLease,
+        _: u64,
+        _: Checkpoint,
+    ) -> Result<Checkpoint, StateError> {
+        unreachable!()
+    }
+    async fn release(&self, _: &ExecutionLease) -> Result<(), StateError> {
+        unreachable!()
+    }
+}
+#[tokio::test]
+async fn pending_checkpoint_metadata_recovery_obeys_cancellation_and_deadline() {
+    for cancel in [true, false] {
+        let entered = Arc::new(Semaphore::new(0));
+        let agent = TestBuilder::default()
+            .plugin(StateStorePlugin::new(PendingRecoveryStore(entered.clone())))
+            .plugin(ChatModelPlugin::new(Echo))
+            .build()
+            .await
+            .unwrap();
+        let mut request = RunRequest::new("recover", "");
+        request.resume = Some(ResumeRequest {
+            run_id: RunId::new_v4(),
+            response: None,
+        });
+        if !cancel {
+            request.limits.run_timeout = Duration::from_millis(40);
+        }
+        let handle = agent.start(request).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        if cancel {
+            agent.cancel(&handle).unwrap();
+        }
+        let error = tokio::time::timeout(Duration::from_secs(5), agent.wait(handle))
+            .await
+            .unwrap()
+            .unwrap_err();
+        if cancel {
+            assert!(matches!(error.primary(), AgentError::Cancelled));
+        } else {
+            assert!(error.to_string().contains("deadline"));
+        }
+        assert!(agent.framework().close().await.is_success());
+    }
+}
