@@ -2274,30 +2274,31 @@ struct ThreadRegistryState {
 }
 
 impl ThreadRegistry {
-    fn reserve(self: &Arc<Self>, thread_id: &str) -> Result<ThreadSlotReservation, AgentError> {
+    fn reserve(self: &Arc<Self>, session_id: &str) -> Result<ThreadSlotReservation, AgentError> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.records.len() + state.reservations.len() >= MAX_IN_PROCESS_THREADS {
             return Err(AgentError::Run(
                 "in-process thread capacity exceeded".into(),
             ));
         }
-        if state.records.contains_key(thread_id) || !state.reservations.insert(thread_id.to_owned())
+        if state.records.contains_key(session_id)
+            || !state.reservations.insert(session_id.to_owned())
         {
             return Err(AgentError::Run("thread ID collision".into()));
         }
         Ok(ThreadSlotReservation {
             registry: self.clone(),
-            thread_id: thread_id.to_owned(),
+            session_id: session_id.to_owned(),
             active: true,
         })
     }
 
-    fn find(&self, thread_id: &str) -> Result<Arc<ThreadRecord>, AgentError> {
+    fn find(&self, session_id: &str) -> Result<Arc<ThreadRecord>, AgentError> {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .records
-            .get(thread_id)
+            .get(session_id)
             .cloned()
             .ok_or_else(|| AgentError::Run("thread not found".into()))
     }
@@ -2305,7 +2306,7 @@ impl ThreadRegistry {
 
 struct ThreadSlotReservation {
     registry: Arc<ThreadRegistry>,
-    thread_id: String,
+    session_id: String,
     active: bool,
 }
 
@@ -2316,9 +2317,9 @@ impl ThreadSlotReservation {
             .state
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let reserved = state.reservations.remove(&self.thread_id);
+        let reserved = state.reservations.remove(&self.session_id);
         debug_assert!(reserved, "thread slot reservation must exist");
-        let previous = state.records.insert(self.thread_id.clone(), record);
+        let previous = state.records.insert(self.session_id.clone(), record);
         debug_assert!(previous.is_none(), "reserved thread ID must be unique");
         self.active = false;
     }
@@ -2332,7 +2333,7 @@ impl Drop for ThreadSlotReservation {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .reservations
-                .remove(&self.thread_id);
+                .remove(&self.session_id);
         }
     }
 }
@@ -2497,7 +2498,7 @@ impl CollaborationRuntime {
         parent
             .emit(AgentEvent::Collaboration(Box::new(
                 CollaborationEvent::ThreadRunStarted {
-                    thread_id: record.session_id.clone(),
+                    session_id: record.session_id.clone(),
                     run_id: handle.run_id,
                     cause,
                     interaction_id,
@@ -2510,13 +2511,13 @@ impl CollaborationRuntime {
 }
 
 fn thread_run_finished_event(
-    thread_id: &str,
+    session_id: &str,
     run_id: RunId,
     status: ThreadStatus,
     result: &Result<ThreadResult, String>,
 ) -> CollaborationEvent {
     CollaborationEvent::ThreadRunFinished {
-        thread_id: thread_id.to_owned(),
+        session_id: session_id.to_owned(),
         run_id,
         status,
         interactions: result
@@ -2553,20 +2554,20 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
                 "thread title must be nonempty and at most 200 bytes".into(),
             ));
         }
-        let thread_id = format!("thread-{}", RunId::new_v4());
-        let reservation = self.threads.reserve(&thread_id)?;
+        let session_id = RunId::new_v4().to_string();
+        let reservation = self.threads.reserve(&session_id)?;
         let agent = self.agent()?;
-        let request = Self::prepare_request(request, thread_id.clone(), parent);
+        let request = Self::prepare_request(request, session_id.clone(), parent);
         let handle = agent.start(request)?;
         let run = Arc::new(ThreadRun::new(handle.run_id, parent.execution_id()));
         let summary = ThreadSummary {
-            thread_id: thread_id.clone(),
+            session_id: session_id.clone(),
             title,
             status: ThreadStatus::Running,
             latest_run_id: Some(handle.run_id),
         };
         let record = Arc::new(ThreadRecord {
-            session_id: thread_id.clone(),
+            session_id: session_id.clone(),
             transition: AsyncMutex::new(()),
             state: Mutex::new(ThreadRecordState {
                 summary: summary.clone(),
@@ -2584,7 +2585,7 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
         parent
             .emit(AgentEvent::Collaboration(Box::new(
                 CollaborationEvent::ThreadRunStarted {
-                    thread_id: thread_id.clone(),
+                    session_id: session_id.clone(),
                     run_id: handle.run_id,
                     cause: ThreadRunCause::Created,
                     interaction_id: None,
@@ -2597,11 +2598,11 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
 
     async fn send_thread(
         &self,
-        thread_id: &str,
+        session_id: &str,
         request: RunRequest,
         parent: &RunContext,
     ) -> Result<ThreadSummary, AgentError> {
-        let record = self.threads.find(thread_id)?;
+        let record = self.threads.find(session_id)?;
         let _transition = record.transition.lock().await;
         {
             let state = record.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2610,7 +2611,7 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
                 .as_ref()
                 .is_some_and(|run| !run.done.load(std::sync::atomic::Ordering::Acquire))
             {
-                return Err(AgentError::SessionBusy(thread_id.into()));
+                return Err(AgentError::SessionBusy(session_id.into()));
             }
             if state.summary.status == ThreadStatus::AwaitingInput {
                 return Err(AgentError::Run(
@@ -2633,12 +2634,12 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
 
     async fn answer_thread(
         &self,
-        thread_id: &str,
+        session_id: &str,
         interaction_id: RunId,
         value: serde_json::Value,
         parent: &RunContext,
     ) -> Result<ThreadSummary, AgentError> {
-        let record = self.threads.find(thread_id)?;
+        let record = self.threads.find(session_id)?;
         let _transition = record.transition.lock().await;
         {
             let state = record.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2647,7 +2648,7 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
                 .as_ref()
                 .is_some_and(|run| !run.done.load(std::sync::atomic::Ordering::Acquire))
             {
-                return Err(AgentError::SessionBusy(thread_id.into()));
+                return Err(AgentError::SessionBusy(session_id.into()));
             }
             if state.summary.status != ThreadStatus::AwaitingInput {
                 return Err(AgentError::Run("thread is not awaiting input".into()));
@@ -2671,11 +2672,11 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
 
     async fn wait_thread(
         &self,
-        thread_id: &str,
+        session_id: &str,
         run_id: Option<RunId>,
         parent: &RunContext,
     ) -> Result<ThreadResult, AgentError> {
-        let record = self.threads.find(thread_id)?;
+        let record = self.threads.find(session_id)?;
         let run = record
             .state
             .lock()
@@ -2702,15 +2703,15 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
             };
             parent
                 .emit(AgentEvent::Collaboration(Box::new(
-                    thread_run_finished_event(thread_id, run.run_id, status, &stored),
+                    thread_run_finished_event(session_id, run.run_id, status, &stored),
                 )))
                 .await;
         }
         result
     }
 
-    async fn read_thread(&self, thread_id: &str, limit: usize) -> Result<ThreadView, AgentError> {
-        let record = self.threads.find(thread_id)?;
+    async fn read_thread(&self, session_id: &str, limit: usize) -> Result<ThreadView, AgentError> {
+        let record = self.threads.find(session_id)?;
         let agent = self.agent()?;
         let mut conversation = agent
             .conversation(&ConversationKey::new(record.session_id.clone()))
@@ -2749,8 +2750,8 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
             .collect())
     }
 
-    async fn close_thread(&self, thread_id: &str, _parent: &RunContext) -> Result<(), AgentError> {
-        let record = self.threads.find(thread_id)?;
+    async fn close_thread(&self, session_id: &str, _parent: &RunContext) -> Result<(), AgentError> {
+        let record = self.threads.find(session_id)?;
         let _transition = record.transition.lock().await;
         {
             let state = record.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -2759,14 +2760,14 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
                 .as_ref()
                 .is_some_and(|run| !run.done.load(std::sync::atomic::Ordering::Acquire))
             {
-                return Err(AgentError::SessionBusy(thread_id.into()));
+                return Err(AgentError::SessionBusy(session_id.into()));
             }
         }
         {
             let mut registry = self.threads.state.lock().unwrap_or_else(|e| e.into_inner());
-            match registry.records.get(thread_id) {
+            match registry.records.get(session_id) {
                 Some(current) if Arc::ptr_eq(current, &record) => {
-                    registry.records.remove(thread_id);
+                    registry.records.remove(session_id);
                 }
                 _ => return Err(AgentError::Run("thread not found".into())),
             }
@@ -2774,7 +2775,7 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
         _parent
             .emit(AgentEvent::Collaboration(Box::new(
                 CollaborationEvent::ThreadClosed {
-                    thread_id: thread_id.to_owned(),
+                    session_id: session_id.to_owned(),
                 },
             )))
             .await;

@@ -45,7 +45,7 @@ struct CreateThreadInput {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendThreadInput {
-    thread_id: String,
+    session_id: String,
     message: String,
     #[serde(default)]
     max_steps: Option<usize>,
@@ -56,7 +56,7 @@ struct SendThreadInput {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AnswerThreadInput {
-    thread_id: String,
+    session_id: String,
     interaction_id: RunId,
     answer: Value,
 }
@@ -64,7 +64,7 @@ struct AnswerThreadInput {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WaitThreadInput {
-    thread_id: String,
+    session_id: String,
     #[serde(default)]
     run_id: Option<RunId>,
 }
@@ -72,7 +72,7 @@ struct WaitThreadInput {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReadThreadInput {
-    thread_id: String,
+    session_id: String,
     #[serde(default = "default_read_limit")]
     limit: usize,
 }
@@ -87,7 +87,7 @@ struct ListThreadsInput {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CloseThreadInput {
-    thread_id: String,
+    session_id: String,
 }
 
 fn default_read_limit() -> usize {
@@ -121,10 +121,10 @@ fn agent_code(value: Option<String>) -> Result<Option<String>, ToolError> {
     Ok(value)
 }
 
-fn thread_id(value: String) -> Result<String, ToolError> {
+fn session_id(value: String) -> Result<String, ToolError> {
     if value.trim().is_empty() || value.len() > MAX_THREAD_ID_BYTES {
         return Err(ToolError::Failed(
-            "thread_id must be nonempty and at most 256 bytes".into(),
+            "session_id must be nonempty and at most 256 bytes".into(),
         ));
     }
     Ok(value)
@@ -298,8 +298,8 @@ impl ThreadSendTool {
             "thread_send",
             "Send a new message to an existing independent thread and start its next run.",
             json!({
-                "type":"object","additionalProperties":false,"required":["thread_id","message"],"properties":{
-                    "thread_id":{"type":"string","minLength":1,"maxLength":256},
+                "type":"object","additionalProperties":false,"required":["session_id","message"],"properties":{
+                    "session_id":{"type":"string","minLength":1,"maxLength":256},
                     "message":{"type":"string","minLength":1,"maxLength":16384},
                     "max_steps":{"type":"integer","minimum":1,"maximum":ceilings.max_steps},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
@@ -317,7 +317,7 @@ impl Tool for ThreadSendTool {
         let runtime = runtime(context)?;
         let summary = runtime
             .send_thread(
-                &thread_id(input.thread_id)?,
+                &session_id(input.session_id)?,
                 request(
                     task(input.message)?,
                     limits(input.max_steps, input.max_total_tokens, context)?,
@@ -340,8 +340,8 @@ impl ThreadAnswerTool {
             "Answer a pending interaction and resume the independent thread.",
             json!({
                 "type":"object","additionalProperties":false,
-                "required":["thread_id","interaction_id","answer"],"properties":{
-                    "thread_id":{"type":"string","minLength":1,"maxLength":256},
+                "required":["session_id","interaction_id","answer"],"properties":{
+                    "session_id":{"type":"string","minLength":1,"maxLength":256},
                     "interaction_id":{"type":"string","format":"uuid"},
                     "answer":{}
                 }
@@ -357,7 +357,7 @@ impl Tool for ThreadAnswerTool {
             .map_err(|_| ToolError::Failed("invalid thread_answer arguments".into()))?;
         let summary = runtime(context)?
             .answer_thread(
-                &thread_id(input.thread_id)?,
+                &session_id(input.session_id)?,
                 input.interaction_id,
                 input.answer,
                 context,
@@ -377,8 +377,8 @@ impl ThreadWaitTool {
             "thread_wait",
             "Wait for an independent thread run and return its result.",
             json!({
-                "type":"object","additionalProperties":false,"required":["thread_id"],"properties":{
-                    "thread_id":{"type":"string","minLength":1,"maxLength":256},
+                "type":"object","additionalProperties":false,"required":["session_id"],"properties":{
+                    "session_id":{"type":"string","minLength":1,"maxLength":256},
                     "run_id":{"type":"string","format":"uuid"}
                 }
             }),
@@ -392,7 +392,7 @@ impl Tool for ThreadWaitTool {
         let input: WaitThreadInput = serde_json::from_value(arguments)
             .map_err(|_| ToolError::Failed("invalid thread_wait arguments".into()))?;
         let result = runtime(context)?
-            .wait_thread(&thread_id(input.thread_id)?, input.run_id, context)
+            .wait_thread(&session_id(input.session_id)?, input.run_id, context)
             .await
             .map_err(failed)?;
         Ok(structured(
@@ -410,8 +410,8 @@ impl ThreadReadTool {
             "thread_read",
             "Read recent messages and status from an independent thread.",
             json!({
-                "type":"object","additionalProperties":false,"required":["thread_id"],"properties":{
-                    "thread_id":{"type":"string","minLength":1,"maxLength":256},
+                "type":"object","additionalProperties":false,"required":["session_id"],"properties":{
+                    "session_id":{"type":"string","minLength":1,"maxLength":256},
                     "limit":{"type":"integer","minimum":1,"maximum":100}
                 }
             }),
@@ -428,7 +428,7 @@ impl Tool for ThreadReadTool {
             return Err(ToolError::Failed("limit must be between 1 and 100".into()));
         }
         let value: ThreadView = runtime(context)?
-            .read_thread(&thread_id(input.thread_id)?, input.limit)
+            .read_thread(&session_id(input.session_id)?, input.limit)
             .await
             .map_err(failed)?;
         Ok(structured(
@@ -480,8 +480,8 @@ impl ThreadCloseTool {
             "thread_close",
             "Close a finished or paused independent thread and release its in-process registry capacity.",
             json!({
-                "type":"object","additionalProperties":false,"required":["thread_id"],"properties":{
-                    "thread_id":{"type":"string","minLength":1,"maxLength":256}
+                "type":"object","additionalProperties":false,"required":["session_id"],"properties":{
+                    "session_id":{"type":"string","minLength":1,"maxLength":256}
                 }
             }),
         )
@@ -493,12 +493,14 @@ impl Tool for ThreadCloseTool {
     async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
         let input: CloseThreadInput = serde_json::from_value(arguments)
             .map_err(|_| ToolError::Failed("invalid thread_close arguments".into()))?;
-        let thread_id = thread_id(input.thread_id)?;
+        let session_id = session_id(input.session_id)?;
         runtime(context)?
-            .close_thread(&thread_id, context)
+            .close_thread(&session_id, context)
             .await
             .map_err(failed)?;
-        Ok(structured(json!({"thread_id": thread_id, "closed": true})))
+        Ok(structured(
+            json!({"session_id": session_id, "closed": true}),
+        ))
     }
 }
 

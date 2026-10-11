@@ -58,14 +58,14 @@ pub enum CollaborationEvent {
         summary: ThreadSummary,
     },
     ThreadRunStarted {
-        thread_id: String,
+        session_id: String,
         run_id: RunId,
         cause: ThreadRunCause,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         interaction_id: Option<RunId>,
     },
     ThreadRunFinished {
-        thread_id: String,
+        session_id: String,
         run_id: RunId,
         status: ThreadStatus,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -74,7 +74,7 @@ pub enum CollaborationEvent {
         error: Option<String>,
     },
     ThreadClosed {
-        thread_id: String,
+        session_id: String,
     },
 }
 
@@ -91,7 +91,8 @@ impl From<&RunStatus> for ThreadStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadSummary {
-    pub thread_id: String,
+    /// The native Session ID. Thread operations never allocate a second identity.
+    pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub status: ThreadStatus,
@@ -170,14 +171,14 @@ pub trait AgentCollaborationRuntime: Send + Sync {
 
     async fn send_thread(
         &self,
-        thread_id: &str,
+        session_id: &str,
         request: RunRequest,
         parent: &RunContext,
     ) -> Result<ThreadSummary, AgentError>;
 
     async fn answer_thread(
         &self,
-        thread_id: &str,
+        session_id: &str,
         interaction_id: RunId,
         value: serde_json::Value,
         parent: &RunContext,
@@ -185,16 +186,16 @@ pub trait AgentCollaborationRuntime: Send + Sync {
 
     async fn wait_thread(
         &self,
-        thread_id: &str,
+        session_id: &str,
         run_id: Option<RunId>,
         parent: &RunContext,
     ) -> Result<ThreadResult, AgentError>;
 
-    async fn read_thread(&self, thread_id: &str, limit: usize) -> Result<ThreadView, AgentError>;
+    async fn read_thread(&self, session_id: &str, limit: usize) -> Result<ThreadView, AgentError>;
 
     async fn list_threads(&self, parent: &RunContext) -> Result<Vec<ThreadSummary>, AgentError>;
 
-    async fn close_thread(&self, thread_id: &str, parent: &RunContext) -> Result<(), AgentError>;
+    async fn close_thread(&self, session_id: &str, parent: &RunContext) -> Result<(), AgentError>;
 }
 
 /// Run-local extension used by official tools to find the configured bridge.

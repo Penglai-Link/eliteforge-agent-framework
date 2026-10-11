@@ -15,7 +15,7 @@ struct MessageState {
 pub(crate) struct Adapter {
     pub options: AgUiOptions,
     execution_id: RunId,
-    thread_id: String,
+    session_id: String,
     run_id: String,
     sequence: u64,
     timestamp: i64,
@@ -34,7 +34,7 @@ impl Adapter {
         Self {
             options,
             execution_id,
-            thread_id: String::new(),
+            session_id: String::new(),
             run_id: String::new(),
             sequence: 0,
             timestamp: 0,
@@ -75,15 +75,15 @@ impl Adapter {
             }
             self.started = true;
             self.run_id = run_id.to_string();
-            self.thread_id = session_id.clone();
+            self.session_id = session_id.clone();
             out.push(Event::run_started(
-                self.thread_id.clone(),
+                self.session_id.clone(),
                 self.execution_id.to_string(),
             ));
         } else {
             if !self.started
                 || self.run_id != envelope.run_id.to_string()
-                || self.thread_id != envelope.session_id
+                || self.session_id != envelope.session_id
             {
                 return Err("AGUI_EVENT_ORDER");
             }
@@ -234,28 +234,28 @@ impl Adapter {
             CollaborationEvent::ThreadCreated { summary } => out.push(Event::custom(
                 "framework.thread.created",
                 json!({
-                    "threadId":summary.thread_id,
+                    "sessionId":summary.session_id,
                     "title":summary.title,
                     "status":summary.status,
                     "latestRunId":summary.latest_run_id,
                 }),
             )),
             CollaborationEvent::ThreadRunStarted {
-                thread_id,
+                session_id,
                 run_id,
                 cause,
                 interaction_id,
             } => out.push(Event::custom(
                 "framework.thread.run.started",
                 json!({
-                    "threadId":thread_id,
+                    "sessionId":session_id,
                     "runId":run_id,
                     "cause":cause,
                     "interactionId":interaction_id,
                 }),
             )),
             CollaborationEvent::ThreadRunFinished {
-                thread_id,
+                session_id,
                 run_id,
                 status,
                 interactions,
@@ -263,7 +263,7 @@ impl Adapter {
             } => out.push(Event::custom(
                 "framework.thread.run.finished",
                 json!({
-                    "threadId":thread_id,
+                    "sessionId":session_id,
                     "runId":run_id,
                     "status":status,
                     "interactions":interactions,
@@ -274,9 +274,9 @@ impl Adapter {
                     }),
                 }),
             )),
-            CollaborationEvent::ThreadClosed { thread_id } => out.push(Event::custom(
+            CollaborationEvent::ThreadClosed { session_id } => out.push(Event::custom(
                 "framework.thread.closed",
-                json!({"threadId":thread_id}),
+                json!({"sessionId":session_id}),
             )),
         }
         Ok(())
@@ -523,7 +523,7 @@ impl Adapter {
             }
         };
         let mut finished =
-            ag_ui::RunFinishedEvent::new(self.thread_id.clone(), self.execution_id.to_string())
+            ag_ui::RunFinishedEvent::new(self.session_id.clone(), self.execution_id.to_string())
                 .with_outcome(outcome);
         if let Some(result) = self.result.take() {
             finished.result = Some(serde_json::to_value(result).map_err(|_| "AGUI_SERIALIZATION")?);
@@ -560,7 +560,7 @@ impl Adapter {
         for event in events {
             event.base_mut().timestamp = Some(self.timestamp);
             event.base_mut().metadata = Some(json!({"framework": {
-                "runId":self.run_id,"sessionId":self.thread_id,"executionId":self.execution_id,"sourceSequence":self.sequence,"node":node
+                "runId":self.run_id,"sessionId":self.session_id,"executionId":self.execution_id,"sourceSequence":self.sequence,"node":node
             }}).as_object().unwrap().clone());
         }
     }

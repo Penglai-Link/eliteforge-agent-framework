@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_tools_agents::{
-    AgentSpawnTool, AgentToolsPlugin, ThreadCreateTool,
+    AgentSpawnTool, AgentToolsPlugin, ThreadAnswerTool, ThreadCloseTool, ThreadCreateTool,
+    ThreadReadTool, ThreadSendTool, ThreadWaitTool,
 };
 use eliteforge_agent_official_plugin_tools_human::HumanInteractionPlugin;
 use eliteforge_agent_test_support::TestBuilder;
@@ -148,7 +149,7 @@ impl ChatModel for CollaborationModel {
                 .get("structured")
                 .filter(|value| value.is_object())
                 .unwrap_or(&value);
-            let thread_id = request
+            let session_id = request
                 .messages
                 .iter()
                 .rev()
@@ -156,7 +157,7 @@ impl ChatModel for CollaborationModel {
                 .filter_map(|message| serde_json::from_str::<Value>(&message.content.text()).ok())
                 .find_map(|value| {
                     value
-                        .get("thread_id")
+                        .get("session_id")
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                 })
@@ -165,7 +166,7 @@ impl ChatModel for CollaborationModel {
                 return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
                     "send-call",
                     "thread_send",
-                    json!({"thread_id":thread_id,"message":"thread followup"}),
+                    json!({"session_id":session_id,"message":"thread followup"}),
                 )]));
             }
             if value.get("threads").is_some() {
@@ -175,7 +176,7 @@ impl ChatModel for CollaborationModel {
                 return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
                     "wait-call",
                     "thread_wait",
-                    json!({"thread_id":thread_id}),
+                    json!({"session_id":session_id}),
                 )]));
             }
             if value.get("output").and_then(Value::as_str) == Some("thread followup result") {
@@ -188,7 +189,7 @@ impl ChatModel for CollaborationModel {
             return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
                 "read-call",
                 "thread_read",
-                json!({"thread_id":thread_id,"limit":20}),
+                json!({"session_id":session_id,"limit":20}),
             )]));
         }
         if input == "use interactive thread" {
@@ -207,9 +208,9 @@ impl ChatModel for CollaborationModel {
                 .filter_map(|message| serde_json::from_str::<Value>(&message.content.text()).ok())
                 .collect::<Vec<_>>();
             let latest = &values[0];
-            let thread_id = values
+            let session_id = values
                 .iter()
-                .find_map(|value| value.get("thread_id").and_then(Value::as_str))
+                .find_map(|value| value.get("session_id").and_then(Value::as_str))
                 .expect("thread create returns an ID");
             let call_id = format!("interactive-call-{}", values.len());
             if let Some(threads) = latest.get("threads").and_then(Value::as_array) {
@@ -227,7 +228,7 @@ impl ChatModel for CollaborationModel {
                 return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
                     call_id,
                     "thread_close",
-                    json!({"thread_id":thread_id}),
+                    json!({"session_id":session_id}),
                 )]));
             }
             if let Some(interaction) = latest
@@ -247,7 +248,7 @@ impl ChatModel for CollaborationModel {
                     call_id,
                     "thread_answer",
                     json!({
-                        "thread_id":thread_id,
+                        "session_id":session_id,
                         "interaction_id":interaction_id,
                         "answer":{"answers":answers}
                     }),
@@ -256,7 +257,7 @@ impl ChatModel for CollaborationModel {
             return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
                 call_id,
                 "thread_wait",
-                json!({"thread_id":thread_id}),
+                json!({"session_id":session_id}),
             )]));
         }
         Err(ModelError::Fatal("unexpected scripted request".into()))
@@ -295,6 +296,40 @@ fn thread_tool_schema_cannot_raise_host_default_limits() {
         "task":"too many tokens",
         "max_total_tokens":defaults.max_total_tokens + 1
     })));
+}
+
+#[test]
+fn thread_tools_address_native_sessions_without_an_alias_id() {
+    use eliteforge_agent_core::compile_schema;
+    for descriptor in [
+        ThreadSendTool::descriptor(),
+        ThreadReadTool::descriptor(),
+        ThreadWaitTool::descriptor(),
+        ThreadAnswerTool::descriptor(),
+        ThreadCloseTool::descriptor(),
+    ] {
+        assert!(
+            descriptor.input_schema["properties"]
+                .get("session_id")
+                .is_some()
+        );
+        assert!(
+            descriptor.input_schema["properties"]
+                .get("thread_id")
+                .is_none()
+        );
+        let schema = compile_schema(&descriptor.input_schema).unwrap();
+        assert!(!schema.is_valid(&json!({"thread_id":"alias"})));
+    }
+    let summary = serde_json::to_value(ThreadSummary {
+        session_id: "native-session".into(),
+        title: None,
+        status: ThreadStatus::Completed,
+        latest_run_id: None,
+    })
+    .unwrap();
+    assert_eq!(summary["session_id"], "native-session");
+    assert!(summary.get("thread_id").is_none());
 }
 
 #[tokio::test]

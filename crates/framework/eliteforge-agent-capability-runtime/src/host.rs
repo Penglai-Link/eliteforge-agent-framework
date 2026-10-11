@@ -216,7 +216,7 @@ impl<'a> RunHost<'a> {
                     runtime
                         .0
                         .wait_thread(
-                            params["thread_id"]
+                            params["session_id"]
                                 .as_str()
                                 .ok_or_else(|| RpcFault::new("missing thread id"))?,
                             decode(params["run_id"].clone())?,
@@ -235,7 +235,7 @@ impl<'a> RunHost<'a> {
                 runtime
                     .0
                     .close_thread(
-                        params["thread_id"]
+                        params["session_id"]
                             .as_str()
                             .ok_or_else(|| RpcFault::new("missing thread id"))?,
                         self.run,

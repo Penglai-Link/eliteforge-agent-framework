@@ -807,13 +807,13 @@ impl AgentLoop for CollaborationPresentationLoop {
             )))
             .await;
 
-        let thread_id = "thread-collaboration".to_owned();
+        let session_id = "thread-collaboration".to_owned();
         let thread_run_id = RunId::new_v4();
         context
             .emit(AgentEvent::Collaboration(Box::new(
                 CollaborationEvent::ThreadCreated {
                     summary: ThreadSummary {
-                        thread_id: thread_id.clone(),
+                        session_id: session_id.clone(),
                         title: Some("worker".into()),
                         status: ThreadStatus::Running,
                         latest_run_id: Some(thread_run_id),
@@ -824,7 +824,7 @@ impl AgentLoop for CollaborationPresentationLoop {
         context
             .emit(AgentEvent::Collaboration(Box::new(
                 CollaborationEvent::ThreadRunStarted {
-                    thread_id: thread_id.clone(),
+                    session_id: session_id.clone(),
                     run_id: thread_run_id,
                     cause: ThreadRunCause::Created,
                     interaction_id: None,
@@ -834,7 +834,7 @@ impl AgentLoop for CollaborationPresentationLoop {
         context
             .emit(AgentEvent::Collaboration(Box::new(
                 CollaborationEvent::ThreadRunFinished {
-                    thread_id: thread_id.clone(),
+                    session_id: session_id.clone(),
                     run_id: thread_run_id,
                     status: ThreadStatus::AwaitingInput,
                     interactions: vec![interaction.clone()],
@@ -844,7 +844,7 @@ impl AgentLoop for CollaborationPresentationLoop {
             .await;
         context
             .emit(AgentEvent::Collaboration(Box::new(
-                CollaborationEvent::ThreadClosed { thread_id },
+                CollaborationEvent::ThreadClosed { session_id },
             )))
             .await;
 
@@ -914,6 +914,14 @@ async fn collaboration_events_map_to_subagent_lifecycle_and_thread_custom_events
             "framework.thread.closed",
         ]
     );
+    for event in &events {
+        if let Event::Custom(event) = event
+            && event.name.starts_with("framework.thread.")
+        {
+            assert_eq!(event.value["sessionId"], "thread-collaboration");
+            assert!(event.value.get("threadId").is_none());
+        }
+    }
     let thread_finished = events.iter().find_map(|event| match event {
         Event::Custom(event) if event.name == "framework.thread.run.finished" => Some(&event.value),
         _ => None,

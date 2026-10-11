@@ -77,10 +77,10 @@ sequenceDiagram
 | `Collaboration::ChildRunStarted` | `agent_spawn` 成功启动子 Agent 后，由父 `RunContext` 发布 | `SUBAGENT_STARTED` | `subagentRunId`；`name=agent_spawn` |
 | `Collaboration::ChildRunFinished` | 子 Agent 返回结果后，由父运行发布 | `SUBAGENT_FINISHED`，或 `SUBAGENT_ERROR` | 成功、暂停和执行上限分别映射为对应结果；交互附在 `framework.subagent.interactions` |
 | `Collaboration::ChildRunFailed` | 子 Agent 失败、取消，或完成守卫在异常退出时析构 | `SUBAGENT_ERROR` | `AGENT_RUN_FAILED` 或 `AGENT_CANCELLED` |
-| `Collaboration::ThreadCreated` | `thread_create` 写入 Thread 记录后 | `CUSTOM framework.thread.created` | `threadId`、`title`、`status`、`latestRunId` |
-| `Collaboration::ThreadRunStarted` | 新建、普通消息或 `thread_answer` 启动 Thread 运行后 | `CUSTOM framework.thread.run.started` | `threadId`、`runId`、`cause`、必要时 `interactionId` |
-| `Collaboration::ThreadRunFinished` | Thread 运行结束、终态已确定后 | `CUSTOM framework.thread.run.finished` | `threadId`、`runId`、`status`、待处理 `interactions` |
-| `Collaboration::ThreadClosed` | `thread_close` 删除记录并释放容量后 | `CUSTOM framework.thread.closed` | `threadId` |
+| `Collaboration::ThreadCreated` | `thread_create` 写入 Thread 记录后 | `CUSTOM framework.thread.created` | `sessionId`、`title`、`status`、`latestRunId` |
+| `Collaboration::ThreadRunStarted` | 新建、普通消息或 `thread_answer` 启动 Thread 运行后 | `CUSTOM framework.thread.run.started` | `sessionId`、`runId`、`cause`、必要时 `interactionId` |
+| `Collaboration::ThreadRunFinished` | Thread 运行结束、终态已确定后 | `CUSTOM framework.thread.run.finished` | `sessionId`、`runId`、`status`、待处理 `interactions` |
+| `Collaboration::ThreadClosed` | `thread_close` 删除记录并释放容量后 | `CUSTOM framework.thread.closed` | `sessionId` |
 | `RunFinished { Completed }` | 执行器成功返回后 | `RUN_FINISHED` | `outcome=success`；可带 `result` |
 | `RunFinished { AwaitingInput }` | 执行器保存等待交互的状态后 | `RUN_FINISHED` | `outcome=interrupt`；含交互 ID、提示和响应 schema |
 | `RunFinished { StepLimit / ToolCallLimit }` | 执行器因限制结束后 | `RUN_ERROR` | `code=AGENT_LIMIT_REACHED` |

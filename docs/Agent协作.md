@@ -30,7 +30,7 @@ ContextContributor 提供可选 Agent 目录
 Agent 目录、编码解析和授权属于宿主（例如 Tron），Framework 不读取业务配置。
 宿主实现 `spawn_child` 时可调用目标 `Agent::run_child_with_id(request, parent)`，保留
 取消、预算与 lineage；独立 Thread 使用目标 Agent 的 `start` / `wait`，并由宿主保存
-thread_id 到目标 Agent 的绑定，后续 send、answer、read、wait 和 close 必须继续路由到该目标。
+session_id 到目标 Agent 的绑定，后续 send、answer、read、wait 和 close 必须继续路由到该目标。
 目录可见性不等于执行授权，每次派发和后续 Thread 操作都由宿主校验。
 
 默认进程内运行时没有命名 Agent 注册表，带编码的请求会明确报错，不会退回当前 Agent。
@@ -57,7 +57,9 @@ thread_id 到目标 Agent 的绑定，后续 send、answer、read、wait 和 clo
 
 ## Thread
 
-`thread_create` 适合独立、可寻址、可继续的任务：主运行创建后立即拿到 `thread_id`，Thread
+Thread 是原生 Session 的独立委派用途，不分配另一种 ID。协作工具参数、结果及关联记录统一使用 `session_id`；协作 CUSTOM 事件使用 `sessionId`。AG-UI 标准事件的 `threadId` 仅在协议边界表示同一个 Session ID。
+
+`thread_create` 适合独立、可寻址、可继续的任务：主运行创建后立即拿到 `session_id`，Thread
 在自己的 session 中运行；之后可以用 `thread_wait` 等待本次运行、用 `thread_read` 读取上下文、
 用 `thread_send` 发送下一条消息。`thread_list` 用来发现当前 Agent 创建的 Threads，完成后使用
 `thread_close` 释放默认进程内 registry 的容量。
