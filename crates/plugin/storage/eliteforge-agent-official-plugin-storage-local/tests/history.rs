@@ -420,6 +420,7 @@ async fn session_queries_isolate_child_records_versions_and_pending_interactions
                 response_schema: json!({"type":"string"}),
                 presentation: None,
                 response: None,
+                response_provenance: None,
                 expires_at_ms: None,
             });
         }

@@ -351,15 +351,17 @@ impl AgentLoop for ModelExecutionLoop {
                 if let Some(response) = incoming.resume.as_ref().and_then(|r| r.response.as_ref())
                     && let Some(interaction) = state.interactions.iter().find(|i|i.id == response.interaction_id) {
                         interaction.validate_response(response, 0)?;
-                        manager.0.answer(&context.session_id, response).await?;
+                        manager.0.answer_with_provenance(&context.session_id, response, incoming.message_provenance.as_ref()).await?;
                         incoming.resume.as_mut().unwrap().response = None;
                 }
                 // Apply committed answers only when their tool batch is complete.
                 for interaction in state.interactions.clone() {
                     let unfinished = matches!(&state.cursor, WorkflowCursor::Tools { executions, .. } if executions.iter().any(|e| !matches!(e.state, ToolExecutionState::Finished(_))));
                     if matches!(interaction.kind, InteractionKind::Input) && unfinished { continue; }
-                    if let Some(response) = manager.0.get(&context.session_id, interaction.id).await?.response {
+                    let record = manager.0.get(&context.session_id, interaction.id).await?;
+                    if let Some(response) = record.response {
                         let mut answered = incoming.clone();
+                        answered.message_provenance = record.response_provenance;
                         answered.resume = Some(ResumeRequest {run_id:context.run_id,response:Some(response)});
                         apply_resume(&answered, &mut state, &mut checkpoint, &tools)?;
                     }
@@ -552,7 +554,7 @@ fn apply_resume(
                     }
                     checkpoint.transcript.push(Message::user(Content(vec![ContentBlock::Json {
                         value: serde_json::json!({"interaction_id":response.interaction_id,"answer":response.value}),
-                    }])));
+                    }])).with_provenance(request.message_provenance.clone()));
                 }
                 InteractionKind::Approval { invocation_id } => {
                     let WorkflowCursor::Tools { executions, .. } = &mut state.cursor else {
@@ -569,6 +571,15 @@ fn apply_resume(
                         ))
                     };
                 }
+            }
+            if let Some(record) = checkpoint
+                .history
+                .interactions
+                .iter_mut()
+                .find(|i| i.id == response.interaction_id)
+            {
+                record.response = Some(response.value.clone());
+                record.response_provenance = request.message_provenance.clone();
             }
             state.interactions.remove(index);
             state.answers.push(response.clone());
@@ -676,6 +687,7 @@ impl ModelExecutionRuntime<'_> {
                         response_schema: request.response_schema.clone(),
                         presentation: request.presentation.clone(),
                         response: None,
+                        response_provenance: None,
                         expires_at_ms: request.expires_at_unix_ms,
                     });
             }

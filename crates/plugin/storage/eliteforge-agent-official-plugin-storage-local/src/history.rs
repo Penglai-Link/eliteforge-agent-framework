@@ -235,6 +235,7 @@ pub(crate) fn answer(
     if let Some(old) = old {
         let mut interaction: HistoryInteraction = decode(old)?;
         interaction.response = record.response.as_ref().map(|r| r.value.clone());
+        interaction.response_provenance = record.response_provenance.clone();
         c.execute(
             "UPDATE ef_history_interactions SET answered=1,record=?2 WHERE id=?1",
             params![interaction.id.to_string(), encode(&interaction)?],

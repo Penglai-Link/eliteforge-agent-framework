@@ -703,6 +703,9 @@ impl WorkflowNode for ReactWorkflowNode {
         };
         let mut request = input.request;
         request.extensions = context.run.extensions.clone();
+        // Node checkpoints retain the original initiator; the current resume
+        // may carry a separately attributed intervention.
+        request.message_provenance = context.run.message_provenance();
         request.resume = if input.checkpoint.is_some() {
             Some(context.resume.clone().unwrap_or_else(|| ResumeRequest {
                 run_id: context.run.run_id,

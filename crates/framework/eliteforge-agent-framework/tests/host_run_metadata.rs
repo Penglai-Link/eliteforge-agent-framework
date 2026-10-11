@@ -355,6 +355,132 @@ async fn fresh_host_restores_original_metadata_before_observers_and_tools_on_res
     store.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn fresh_host_keeps_original_owner_and_attributes_human_intervention_on_resume() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("restore.db");
+    let store = Arc::new(
+        SqliteStateStore::open(&path, Default::default())
+            .await
+            .unwrap(),
+    );
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let agent = recovery_agent(store.clone(), capture.clone()).await;
+    let mut request = RunRequest::new("work", "start");
+    request.host_context = Some(json!({"owner":"dude","task":"task-1"}));
+    request.message_provenance = Some(provenance("dude", "main"));
+    request.assistant_provenance = Some(provenance("agent", "worker"));
+    let expected = request.host_metadata();
+    let handle = agent.start(request).unwrap();
+    let run_id = handle.run_id;
+    let result = agent.wait(handle).await.unwrap();
+    assert_eq!(result.status, RunStatus::AwaitingInput);
+    agent.framework().close().await;
+    store.close().await.unwrap();
+    let store = Arc::new(
+        SqliteStateStore::open(&path, Default::default())
+            .await
+            .unwrap(),
+    );
+    let agent = recovery_agent(store.clone(), capture.clone()).await;
+    // Hosts commonly commit with agent.answer before attaching the trusted
+    // identity to the returned request. Recovery must fill attribution once.
+    let mut resume = agent
+        .answer("work", result.interactions[0].id, json!(true))
+        .await
+        .unwrap();
+    assert!(
+        InteractionStore::get(store.as_ref(), "work", result.interactions[0].id)
+            .await
+            .unwrap()
+            .response_provenance
+            .is_none()
+    );
+    resume.host_context = Some(json!({"owner":"wrong"}));
+    let human = provenance("human", "operator");
+    resume.message_provenance = Some(human.clone());
+    resume.assistant_provenance = Some(provenance("agent", "wrong-worker"));
+    resume.resume = Some(ResumeRequest {
+        run_id,
+        response: Some(InteractionResponse {
+            interaction_id: result.interactions[0].id,
+            value: json!(true),
+        }),
+    });
+    assert_eq!(
+        agent.run(resume).await.unwrap().status,
+        RunStatus::Completed
+    );
+    let mut effective = expected.clone();
+    effective.message_provenance = Some(human.clone());
+    assert_eq!(
+        capture.lock().unwrap().as_slice(),
+        &[expected.clone(), effective]
+    );
+    let checkpoint = store.load(run_id).await.unwrap();
+    assert_eq!(checkpoint.host_metadata, expected);
+    assert_eq!(
+        checkpoint.history.interactions[0].response_provenance,
+        Some(human.clone())
+    );
+    assert_eq!(checkpoint.transcript.last().unwrap().role, Role::Assistant);
+    assert!(
+        checkpoint
+            .transcript
+            .iter()
+            .any(|m| m.provenance == Some(human.clone()))
+    );
+    let history = agent
+        .framework()
+        .history()
+        .unwrap()
+        .read_session("work", HistoryQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        history.records.interactions[0].response_provenance,
+        Some(human.clone())
+    );
+    assert_eq!(
+        history
+            .records
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .unwrap()
+            .provenance,
+        expected.message_provenance
+    );
+    let record = InteractionStore::get(store.as_ref(), "work", result.interactions[0].id)
+        .await
+        .unwrap();
+    assert_eq!(record.response_provenance, Some(human.clone()));
+    assert_eq!(record.resume_request().message_provenance, Some(human));
+    assert!(
+        InteractionStore::answer_with_provenance(
+            store.as_ref(),
+            "work",
+            record.response.as_ref().unwrap(),
+            Some(&provenance("dude", "forged"))
+        )
+        .await
+        .is_err()
+    );
+    agent.framework().close().await;
+    store.close().await.unwrap();
+    let reopened = SqliteStateStore::open(&path, Default::default())
+        .await
+        .unwrap();
+    let persisted = HistoryStore::read_session(&reopened, "work", HistoryQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        persisted.records.interactions[0].response_provenance,
+        Some(provenance("human", "operator"))
+    );
+    reopened.close().await.unwrap();
+}
+
 struct IndependentThreadLoop {
     entered: Arc<Semaphore>,
     release: Arc<Semaphore>,

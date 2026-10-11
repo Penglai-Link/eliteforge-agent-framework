@@ -174,3 +174,19 @@ Thread 完成后，默认 runtime 仍向原 Context 发布协作终态；同步 
 
 平台级短期记忆用 `MemoryScope::platform(session)`；`kind()` 与普通命名范围不同，即使
 命名范围叫 `platform` 也不会混淆。宿主持久化范围键和授权判断需要同时使用 kind 和 namespace。
+
+### 恢复运行时的回答身份
+
+恢复沿用 checkpoint 中的 `host_context` 和 `assistant_provenance`，保持原任务归属及执行者。宿主可以在恢复请求中明确传入新的 `message_provenance`，用于本次人工介入；缺省沿用原输入身份。原 checkpoint 的 `host_metadata` 保持不变。
+
+交互回答的身份保存在 `HistoryInteraction.responseProvenance` 和 `InteractionRecord.response_provenance`，与回答一起由 SQLite InteractionStore 原子持久化。`answer_with_provenance` 接口支持一次提交身份及回答；兼容原 `agent.answer` 后附加身份的路径，未归因回答可以补充一次身份，已知身份及答案不可改写。自定义 InteractionStore 若需持久化身份，应实现该接口；默认实现保留现有 answer 兼容性。
+
+```mermaid
+flowchart LR
+  Original[原 Dude 任务归属] --> Checkpoint[不可变 checkpoint host metadata]
+  Human[本次人工回答身份] --> Resume[恢复请求 message provenance]
+  Resume --> Answer[交互回答及 response provenance]
+  Checkpoint --> Run[恢复运行]
+  Answer --> Run
+  Answer --> History[独立持久化的回答身份]
+```

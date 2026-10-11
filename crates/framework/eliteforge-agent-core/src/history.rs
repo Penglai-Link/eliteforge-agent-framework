@@ -157,6 +157,9 @@ pub struct HistoryInteraction {
     pub response_schema: Value,
     pub presentation: Option<Value>,
     pub response: Option<Value>,
+    /// Sender of the committed answer, independent of the original run initiator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_provenance: Option<MessageProvenance>,
     pub expires_at_ms: Option<u64>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -209,6 +212,7 @@ impl HistoryRecords {
             if interaction.id.is_nil()
                 || interaction.run_id != run_id
                 || !invocations.insert(interaction.id)
+                || (interaction.response.is_none() && interaction.response_provenance.is_some())
             {
                 return Err(StateError::Invalid("invalid history interaction".into()));
             }
@@ -287,6 +291,8 @@ impl HistoryRecords {
                 || old.presentation != new.presentation
                 || old.expires_at_ms != new.expires_at_ms
                 || (old.response.is_some() && old.response != new.response)
+                || (old.response_provenance.is_some()
+                    && old.response_provenance != new.response_provenance)
             {
                 return Err(StateError::Invalid(
                     "history interaction identity/answer is immutable".into(),

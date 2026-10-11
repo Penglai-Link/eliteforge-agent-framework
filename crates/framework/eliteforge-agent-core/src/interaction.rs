@@ -15,12 +15,15 @@ pub struct InteractionRecord {
     /// The original provider call and arguments. Approval always targets this call.
     pub tool_call: Option<ToolCall>,
     pub response: Option<InteractionResponse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_provenance: Option<MessageProvenance>,
     pub created_at_unix_ms: u64,
     pub answered_at_unix_ms: Option<u64>,
 }
 impl InteractionRecord {
     pub fn resume_request(&self) -> RunRequest {
         let mut request = RunRequest::new(&self.session_id, "");
+        request.message_provenance = self.response_provenance.clone();
         request.resume = Some(ResumeRequest {
             run_id: self.run_id,
             response: self.response.clone(),
@@ -43,6 +46,27 @@ pub trait InteractionStore: Send + Sync {
         session_id: &str,
         response: &InteractionResponse,
     ) -> Result<InteractionRecord, AgentError>;
+    /// Atomically persist answer attribution when supported by the store.
+    /// An unknown sender may be filled once; an already attributed answer is immutable.
+    /// The default preserves compatibility for stores without attribution persistence.
+    async fn answer_with_provenance(
+        &self,
+        session_id: &str,
+        response: &InteractionResponse,
+        provenance: Option<&MessageProvenance>,
+    ) -> Result<InteractionRecord, AgentError> {
+        let mut record = self.answer(session_id, response).await?;
+        if provenance.is_some()
+            && record.response_provenance.is_some()
+            && provenance != record.response_provenance.as_ref()
+        {
+            return Err(StateError::Conflict.into());
+        }
+        if record.response_provenance.is_none() {
+            record.response_provenance = provenance.cloned();
+        }
+        Ok(record)
+    }
 }
 
 pub struct InteractionStoreService(pub Arc<dyn InteractionStore>);
@@ -130,6 +154,7 @@ impl InteractionManager {
                     request: request.clone(),
                     tool_call: call,
                     response: None,
+                    response_provenance: None,
                     created_at_unix_ms: unix_time_ms(),
                     answered_at_unix_ms: None,
                 })

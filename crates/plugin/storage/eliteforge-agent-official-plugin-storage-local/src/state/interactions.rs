@@ -50,6 +50,7 @@ impl InteractionStore for SqliteStateStore {
             || record.run_id.is_nil()
             || record.session_id.trim().is_empty()
             || record.response.is_some()
+            || record.response_provenance.is_some()
             || record.answered_at_unix_ms.is_some()
         {
             return Err(StateError::Invalid("invalid pending interaction".into()));
@@ -111,8 +112,17 @@ impl InteractionStore for SqliteStateStore {
         session: &str,
         response: &InteractionResponse,
     ) -> Result<InteractionRecord, AgentError> {
+        self.answer_with_provenance(session, response, None).await
+    }
+    async fn answer_with_provenance(
+        &self,
+        session: &str,
+        response: &InteractionResponse,
+        provenance: Option<&MessageProvenance>,
+    ) -> Result<InteractionRecord, AgentError> {
         let session = session.to_owned();
         let response = response.clone();
+        let provenance = provenance.cloned();
         let max = self.max_checkpoint_bytes;
         // Validation and the pending -> answered transition share one write transaction.
         Ok(self
@@ -120,26 +130,36 @@ impl InteractionStore for SqliteStateStore {
                 let tx = crate::database::begin(c).map_err(database_error)?;
                 let mut record = read_record(&tx, &session, response.interaction_id, max)?;
                 if let Some(previous) = &record.response {
-                    return if previous == &response {
-                        Ok(record)
-                    } else {
-                        Err(StateError::Conflict)
-                    };
+                    if previous != &response
+                        || (provenance.is_some()
+                            && record.response_provenance.is_some()
+                            && provenance != record.response_provenance)
+                    {
+                        return Err(StateError::Conflict);
+                    }
+                    if provenance.is_none() || record.response_provenance.is_some() {
+                        return Ok(record);
+                    }
+                    // The legacy answer API can commit before the host supplies
+                    // its trusted sender on the resume request. Fill it once.
+                } else {
+                    let now = db_now(&tx)?;
+                    record
+                        .request
+                        .validate_response(&response, now)
+                        .map_err(|_| {
+                            StateError::Invalid(
+                                "answer does not match the pending request or it has expired"
+                                    .into(),
+                            )
+                        })?;
+                    record.response = Some(response);
+                    record.answered_at_unix_ms = Some(now);
                 }
-                let now = db_now(&tx)?;
-                record
-                    .request
-                    .validate_response(&response, now)
-                    .map_err(|_| {
-                        StateError::Invalid(
-                            "answer does not match the pending request or it has expired".into(),
-                        )
-                    })?;
-                record.response = Some(response);
-                record.answered_at_unix_ms = Some(now);
+                record.response_provenance = provenance;
                 let encoded = encode_record(&record, max)?;
                 tx.execute(
-                    "UPDATE ef_interactions SET answered=1, record=?1 WHERE id=?2 AND answered=0",
+                    "UPDATE ef_interactions SET answered=1, record=?1 WHERE id=?2",
                     params![encoded, record.request.id.to_string()],
                 )
                 .map_err(database_error)?;

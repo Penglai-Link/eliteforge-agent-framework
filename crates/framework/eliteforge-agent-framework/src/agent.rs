@@ -1530,13 +1530,17 @@ impl AgentGeneration {
                 }) {
                     Ok(checkpoint) => {
                         request.host_context = checkpoint.host_metadata.host_context.clone();
-                        request.message_provenance =
-                            checkpoint.host_metadata.message_provenance.clone();
+                        // A trusted host may attribute this intervention to a different
+                        // sender. Ownership and the executing assistant remain original.
+                        if request.message_provenance.is_none() {
+                            request.message_provenance =
+                                checkpoint.host_metadata.message_provenance.clone();
+                        }
                         request.assistant_provenance =
                             checkpoint.host_metadata.assistant_provenance.clone();
                         if let Some(service) = context.extensions.get::<RunHostMetadataService>() {
                             *service.0.write().unwrap_or_else(|e| e.into_inner()) =
-                                checkpoint.host_metadata;
+                                request.host_metadata();
                         }
                     }
                     Err(error) => {

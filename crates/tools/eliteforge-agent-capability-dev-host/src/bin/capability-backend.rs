@@ -460,6 +460,7 @@ async fn remote_wait(params: Value, ctx: BackendCallContext) -> Result<RunResult
             request: request.clone(),
             tool_call: None,
             response: None,
+            response_provenance: None,
             created_at_unix_ms: unix_time_ms(),
             answered_at_unix_ms: None,
         };

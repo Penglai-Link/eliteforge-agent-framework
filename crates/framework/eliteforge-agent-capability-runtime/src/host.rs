@@ -385,6 +385,7 @@ impl<'a> RunHost<'a> {
                                         request: request.clone(),
                                         tool_call: Some(call.clone()),
                                         response: None,
+                                        response_provenance: None,
                                         created_at_unix_ms: unix_time_ms(),
                                         answered_at_unix_ms: None,
                                     })
