@@ -75,7 +75,7 @@ impl TelemetryStore for SqliteTelemetryStore {
         self.database
             .call(move |c| -> rusqlite::Result<()> {
                 c.execute(
-                    "INSERT OR IGNORE INTO ef_telemetry_traces VALUES(?1,?2,?3,?4,?5,?6)",
+                    "INSERT INTO ef_telemetry_traces VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(trace_id) DO UPDATE SET started_at=MIN(started_at,excluded.started_at),ended_at=excluded.ended_at,status_code=excluded.status_code,attributes=json_patch(attributes,excluded.attributes)",
                     params![
                         t.trace_id,
                         t.started_at,
@@ -97,7 +97,7 @@ impl TelemetryStore for SqliteTelemetryStore {
             let tx=c.transaction()?;
             for s in spans {
                 let root=s.parent_span_id.is_none();
-                tx.execute("INSERT INTO ef_telemetry_traces VALUES(?1,?2,?3,?4,?5,0) ON CONFLICT(trace_id) DO UPDATE SET started_at=MIN(started_at,excluded.started_at),ended_at=CASE WHEN ?6 THEN excluded.ended_at ELSE ended_at END,status_code=CASE WHEN ?6 THEN excluded.status_code ELSE status_code END,attributes=CASE WHEN ?6 THEN json_patch(attributes,excluded.attributes) ELSE attributes END,abandoned=CASE WHEN ?6 THEN 0 ELSE abandoned END",params![s.trace_id,s.started_at,root.then_some(s.ended_at),s.status_code,serde_json::to_string(&s.attributes).map_err(|_|rusqlite::Error::InvalidQuery)?,root])?;
+                tx.execute("INSERT INTO ef_telemetry_traces VALUES(?1,?2,?3,?4,?5,0) ON CONFLICT(trace_id) DO UPDATE SET started_at=MIN(started_at,excluded.started_at),ended_at=CASE WHEN ?6 THEN CASE WHEN ended_at IS NULL THEN excluded.ended_at ELSE MAX(ended_at,excluded.ended_at) END ELSE ended_at END,status_code=CASE WHEN ?6 THEN MAX(status_code,excluded.status_code) ELSE status_code END,attributes=CASE WHEN ?6 THEN json_patch(attributes,excluded.attributes) ELSE attributes END,abandoned=CASE WHEN ?6 THEN 0 ELSE abandoned END",params![s.trace_id,s.started_at,root.then_some(s.ended_at),s.status_code,serde_json::to_string(&s.attributes).map_err(|_|rusqlite::Error::InvalidQuery)?,root])?;
                 let json=serde_json::to_string(&s).map_err(|_|rusqlite::Error::InvalidQuery)?;
                 tx.execute("INSERT OR REPLACE INTO ef_telemetry_spans VALUES(?1,?2,?3,?4)",params![s.trace_id,s.span_id,s.ended_at,json])?;
             }

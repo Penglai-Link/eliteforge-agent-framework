@@ -190,3 +190,32 @@ async fn generic_filters_root_metadata_retries_and_restart_recovery() {
     assert!(page.records[0].abandoned);
     assert!(page.records[0].ended_at.is_some());
 }
+
+#[tokio::test]
+async fn late_business_registration_preserves_browser_root_and_completion_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let store = SqliteTelemetryStore::open(temp.path().join("late.db"), policy()).await.unwrap();
+    let start = now();
+    let browser = TelemetrySpan {
+        trace_id: "trace".into(), span_id: "browser".into(), started_at: start, ended_at: start + 10,
+        attributes: BTreeMap::from([("service.name".into(), "frontend".into())]), ..Default::default()
+    };
+    store.write_spans(vec![browser.clone()]).await.unwrap();
+    store.register_trace(TelemetryTrace {
+        trace_id: "trace".into(), started_at: start + 2,
+        attributes: BTreeMap::from([("workspace".into(), "a".into())]), ..Default::default()
+    }).await.unwrap();
+    store.register_trace(TelemetryTrace {
+        trace_id: "trace".into(), started_at: start + 2, ended_at: Some(start + 100), status_code: 2,
+        attributes: BTreeMap::from([("outcome".into(), "error".into())]), ..Default::default()
+    }).await.unwrap();
+    // A delayed/retried browser export cannot truncate a longer background child execution.
+    store.write_spans(vec![browser]).await.unwrap();
+    let page = store.query_traces(TelemetryTraceFilter::default(), 0, 1).await.unwrap();
+    let trace = &page.records[0];
+    assert_eq!(trace.started_at, start);
+    assert_eq!(trace.ended_at, Some(start + 100));
+    assert_eq!(trace.status_code, 2);
+    assert_eq!(trace.attributes["workspace"], "a");
+    assert_eq!(trace.attributes["service.name"], "frontend");
+}
