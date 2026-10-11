@@ -29,10 +29,19 @@ async fn a_separate_manager_cannot_delete_a_live_static_instance_version() {
         BackendInstance::new(first, pack.clone(), "application", "config.1", Value::Null).unwrap();
     let second = CapabilityPackManager::new(directory.path()).unwrap();
     assert!(matches!(
+        second.check_remove("test.pack", &pack.manifest.version),
+        Err(RuntimeError::Busy(_))
+    ));
+    assert!(pack.path.exists());
+    assert!(matches!(
         second.remove("test.pack", &pack.manifest.version),
         Err(RuntimeError::Busy(_))
     ));
     instance.shutdown().await.unwrap();
+    second
+        .check_remove("test.pack", &pack.manifest.version)
+        .unwrap();
+    assert!(pack.path.exists());
     second.remove("test.pack", &pack.manifest.version).unwrap();
 }
 fn archive(manifest: Value, extra: &[(&str, &[u8])]) -> Vec<u8> {
@@ -104,6 +113,10 @@ fn immutable_install_and_persistent_pin_enforce_version_identity() {
         })
         .unwrap();
     let reopened = CapabilityPackManager::new(directory.path()).unwrap();
+    assert!(matches!(
+        reopened.check_remove("test.pack", &pack.manifest.version),
+        Err(RuntimeError::Busy(_))
+    ));
     assert!(matches!(
         reopened.remove("test.pack", &pack.manifest.version),
         Err(RuntimeError::Busy(_))

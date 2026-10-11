@@ -746,6 +746,36 @@ impl CapabilityPackManager {
         }
         Ok(())
     }
+    /// Read-only removal preflight using the same process, usage and durable-pin
+    /// checks as removal. The mutation repeats these checks under its locks.
+    pub fn check_remove(&self, package: &str, version: &semver::Version) -> RuntimeResult<()> {
+        validate_id(package)?;
+        let _lock = self.lock_store()?;
+        let _version_lock = self.version_lock(package, version, true)?;
+        let _update = self
+            .usage
+            .begin_version_removal(package, &version.to_string())?;
+        let blockers: Vec<_> = self
+            .durable_pins()?
+            .into_iter()
+            .flat_map(|pin| {
+                pin.versions
+                    .into_iter()
+                    .filter(move |v| v.package == package && &v.version == version)
+                    .map(move |v| UsageBlocker {
+                        package: v.package,
+                        version: v.version.to_string(),
+                        scope: pin.scope.clone(),
+                        kind: "durable_pin".into(),
+                        label: pin.id.clone(),
+                    })
+            })
+            .collect();
+        if !blockers.is_empty() {
+            return Err(RuntimeError::Busy(blockers));
+        }
+        Ok(())
+    }
     pub fn remove(&self, package: &str, version: &semver::Version) -> RuntimeResult<()> {
         validate_id(package)?;
         let _lock = self.lock_store()?;
