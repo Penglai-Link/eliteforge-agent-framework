@@ -85,7 +85,7 @@ pub(crate) fn binding(filesystem: FileSystemRoot) -> ToolBinding {
                 "expectedVersions":{"type":"object","additionalProperties":{"type":"string","minLength":1}},
                 "dryRun":{"type":"boolean"}
             }}),
-        ),
+        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command),
         UnifiedPatchTool { filesystem },
     )
 }

@@ -196,6 +196,16 @@ impl Usage {
     }
 }
 
+/// Provider-declared side effects, used for tool selection rather than isolation.
+/// Unknown tools must never be implicitly treated as read-only.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolOperationKind {
+    #[default]
+    Unknown,
+    Query,
+    Command,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolDescriptor {
     /// Stable host/catalog identity; never inferred from the model call name.
@@ -204,6 +214,9 @@ pub struct ToolDescriptor {
     pub call_name: String,
     pub description: String,
     pub input_schema: Value,
+    /// A declaration, not a guarantee that the executor cannot modify data.
+    #[serde(default)]
+    pub operation_kind: ToolOperationKind,
 }
 
 impl ToolDescriptor {
@@ -218,7 +231,13 @@ impl ToolDescriptor {
             call_name: call_name.into(),
             description: description.into(),
             input_schema,
+            operation_kind: ToolOperationKind::Unknown,
         }
+    }
+
+    pub fn with_operation_kind(mut self, operation_kind: ToolOperationKind) -> Self {
+        self.operation_kind = operation_kind;
+        self
     }
 }
 

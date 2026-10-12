@@ -110,7 +110,7 @@ pub fn media_tool_catalog() -> Vec<ToolDescriptor> {
             else { ("media.read_pdf", "media_read_pdf", "Read selected PDF pages from a scoped local file or attachment. Returns text and page numbers; no OCR.") };
         let mut schema = json!({"type":"object","additionalProperties":false,"oneOf":[{"required":["path"]},{"required":["fileRef"]}],"properties":{"path":{"type":"string","minLength":1},"fileRef":{"type":"object"}}});
         if !image { schema["properties"]["startPage"]=json!({"type":"integer","minimum":1}); schema["properties"]["endPage"]=json!({"type":"integer","minimum":1}); }
-        ToolDescriptor::new(id, name, description, schema)
+        ToolDescriptor::new(id, name, description, schema).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }).collect()
 }
 

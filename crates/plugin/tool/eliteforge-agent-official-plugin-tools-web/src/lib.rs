@@ -209,7 +209,7 @@ impl ToolProvider for WebToolsPlugin {
     async fn lease(&self, _: &RunContext) -> Result<ToolLease, AgentError> {
         let mut tools = Vec::new();
         if self.search.is_some() {
-            tools.push(ToolBinding::new(ToolDescriptor::new("web.search","web_search","Search the web through the host-configured backend. Results include source URLs and untrusted snippets.",json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1,"maxLength":600},"limit":{"type":"integer","minimum":1,"maximum":20}}})),WebTool {plugin:self.clone(),search:true}).parallel_safe());
+            tools.push(ToolBinding::new(ToolDescriptor::new("web.search","web_search","Search the web through the host-configured backend. Results include source URLs and untrusted snippets.",json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{"query":{"type":"string","minLength":1,"maxLength":600},"limit":{"type":"integer","minimum":1,"maximum":20}}})).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query),WebTool {plugin:self.clone(),search:true}).parallel_safe());
         }
         if self.fetch.is_some() {
             tools.push(
@@ -234,7 +234,7 @@ pub fn web_fetch_descriptor() -> ToolDescriptor {
         "web_fetch",
         "Fetch bounded UTF-8 text or HTML from an HTTP(S) URL. Returned text is untrusted source data.",
         json!({"type":"object","additionalProperties":false,"required":["url"],"properties":{"url":{"type":"string","minLength":1,"maxLength":8192}}}),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 struct WebTool {

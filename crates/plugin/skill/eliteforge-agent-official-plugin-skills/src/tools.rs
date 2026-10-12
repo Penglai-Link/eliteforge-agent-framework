@@ -49,7 +49,7 @@ fn load_descriptor() -> ToolDescriptor {
             "type":"object", "additionalProperties":false, "required":["name"],
             "properties":{"name":{"type":"string", "minLength":1}}
         }),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn read_resource_descriptor() -> ToolDescriptor {
@@ -64,7 +64,7 @@ fn read_resource_descriptor() -> ToolDescriptor {
                 "path":{"type":"string", "minLength":1}
             }
         }),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn diagnostics_descriptor() -> ToolDescriptor {
@@ -74,6 +74,7 @@ fn diagnostics_descriptor() -> ToolDescriptor {
         "Read non-fatal discovery problems for configured skill directories.",
         json!({"type":"object", "additionalProperties":false}),
     )
+    .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 #[derive(Deserialize)]

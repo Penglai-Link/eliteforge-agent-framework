@@ -75,7 +75,7 @@ pub(crate) fn bindings(filesystem: FileSystemRoot) -> Vec<ToolBinding> {
         };
         ToolBinding::new(ToolDescriptor::new(format!("filesystem.search.{name}"), format!("search_{name}"),
             "Search below the configured root using full glob syntax (**/braces/classes), excludes and .gitignore/.ignore rules. Results use a bounded snapshot: repeat the same query with nextCursor within 120 seconds for stable pages. Inspect complete, skipped and limitReason before treating a scan as exhaustive.",
-            json!({"type":"object","additionalProperties":false,"required":[required],"properties":properties})),
+            json!({"type":"object","additionalProperties":false,"required":[required],"properties":properties})).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query),
             SearchTool {filesystem:filesystem.clone(),kind}).parallel_safe()
     }).collect()
 }

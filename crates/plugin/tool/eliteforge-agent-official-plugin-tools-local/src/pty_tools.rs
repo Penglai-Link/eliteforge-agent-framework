@@ -236,7 +236,11 @@ pub fn terminal_tool_catalog() -> Vec<ToolDescriptor> {
         ("list", "List terminal sessions belonging to the current owner.", json!({"type":"object","properties":{},"additionalProperties":false})),
     ].into_iter().map(|(name, description, schema)| ToolDescriptor::new(
         format!("framework.terminal.{name}"), format!("terminal_{name}"), description, schema
-    )).collect()
+    ).with_operation_kind(if matches!(name, "read" | "list") {
+        eliteforge_agent_core::ToolOperationKind::Query
+    } else {
+        eliteforge_agent_core::ToolOperationKind::Command
+    })).collect()
 }
 // Scope of one awaited invocation, distinct from the persistent terminal owner.
 #[derive(Default)]

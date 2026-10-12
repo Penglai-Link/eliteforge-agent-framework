@@ -117,7 +117,7 @@ fn read_text_descriptor() -> ToolDescriptor {
                 "maxBytes":{"type":"integer", "minimum":1}
             }
         }),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn list_descriptor() -> ToolDescriptor {
@@ -137,7 +137,7 @@ fn list_descriptor() -> ToolDescriptor {
                 "maxResults":{"type":"integer", "minimum":1}
             }
         }),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn stat_descriptor() -> ToolDescriptor {
@@ -149,7 +149,7 @@ fn stat_descriptor() -> ToolDescriptor {
             "type":"object", "additionalProperties":false, "required":["path"],
             "properties": { "path":{"type":"string", "minLength":1}, "followSymlink":{"type":"boolean"} }
         }),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn write_text_descriptor() -> ToolDescriptor {
@@ -168,6 +168,7 @@ fn write_text_descriptor() -> ToolDescriptor {
             }
         }),
     )
+    .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn patch_descriptor() -> ToolDescriptor {
@@ -194,7 +195,7 @@ fn patch_descriptor() -> ToolDescriptor {
                 "expectedVersion":{"type":"string", "minLength":1}
             }
         }),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_descriptor() -> ToolDescriptor {
@@ -216,7 +217,7 @@ fn system_command_descriptor() -> ToolDescriptor {
                 "env":{"type":"object", "additionalProperties":{"type":"string"}}
             }
         }),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_task_read_descriptor() -> ToolDescriptor {
@@ -234,7 +235,7 @@ fn system_command_task_read_descriptor() -> ToolDescriptor {
                 "maxBytes":{"type":"integer", "minimum":1, "maximum":65536}
             }
         }),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn system_command_task_stop_descriptor() -> ToolDescriptor {
@@ -251,7 +252,7 @@ fn system_command_task_stop_descriptor() -> ToolDescriptor {
                 "maxBytes":{"type":"integer", "minimum":1, "maximum":65536}
             }
         }),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_task_write_descriptor() -> ToolDescriptor {
@@ -264,7 +265,7 @@ fn system_command_task_write_descriptor() -> ToolDescriptor {
             "closeStdin":{"type":"boolean"}, "stdoutCursor":{"type":"integer", "minimum":0},
             "stderrCursor":{"type":"integer", "minimum":0}, "waitMs":{"type":"integer", "minimum":0, "maximum":10000}
         }}),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_list_descriptor() -> ToolDescriptor {
@@ -275,7 +276,7 @@ fn system_command_list_descriptor() -> ToolDescriptor {
         json!({"type":"object", "additionalProperties":false, "properties":{
             "includeCompleted":{"type":"boolean"}
         }}),
-    )
+    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 #[derive(Clone)]

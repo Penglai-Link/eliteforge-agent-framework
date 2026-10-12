@@ -94,7 +94,7 @@ impl ToolProvider for ToolDiscoveryPlugin {
             json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{
                 "query":{"type":"string","minLength":1,"maxLength":512},
                 "limit":{"type":"integer","minimum":1,"maximum":20}
-            }})), Search { descriptors }));
+            }})).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query), Search { descriptors }));
         Ok(ToolLease::new(tools))
     }
 }

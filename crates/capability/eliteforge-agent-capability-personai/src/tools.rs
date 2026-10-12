@@ -74,7 +74,11 @@ impl Operation {
             descriptor.input_schema["oneOf"] =
                 json!([{"required":["image_url"]},{"required":["image_base64"]}]);
         }
-        descriptor
+        descriptor.with_operation_kind(if matches!(self, Self::GenerateImage) {
+            eliteforge_agent_core::ToolOperationKind::Command
+        } else {
+            eliteforge_agent_core::ToolOperationKind::Query
+        })
     }
 }
 const OPERATIONS: [Operation; 5] = [

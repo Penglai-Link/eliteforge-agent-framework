@@ -218,7 +218,7 @@ impl AgentSpawnTool {
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
-        )
+        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
 
@@ -255,7 +255,7 @@ impl ThreadCreateTool {
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
-        )
+        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
 
@@ -305,7 +305,7 @@ impl ThreadSendTool {
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
-        )
+        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
 
@@ -347,6 +347,7 @@ impl ThreadAnswerTool {
                 }
             }),
         )
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
 
@@ -382,7 +383,7 @@ impl ThreadWaitTool {
                     "run_id":{"type":"string","format":"uuid"}
                 }
             }),
-        )
+        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }
 }
 
@@ -415,7 +416,7 @@ impl ThreadReadTool {
                     "limit":{"type":"integer","minimum":1,"maximum":100}
                 }
             }),
-        )
+        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }
 }
 
@@ -451,6 +452,7 @@ impl ThreadListTool {
                 }
             }),
         )
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }
 }
 
@@ -484,7 +486,7 @@ impl ThreadCloseTool {
                     "session_id":{"type":"string","minLength":1,"maxLength":256}
                 }
             }),
-        )
+        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
 

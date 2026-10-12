@@ -50,11 +50,17 @@ impl ServerHandler for Server {
         page.tools = names
             .into_iter()
             .map(|name| {
-                Tool::new(
+                let mut tool = Tool::new(
                     name,
                     "fixture",
                     Arc::new(json!({"type":"object"}).as_object().unwrap().clone()),
-                )
+                );
+                tool.annotations = match name {
+                    "echo" => Some(ToolAnnotations::new().read_only(true)),
+                    "slow" => Some(ToolAnnotations::new().read_only(false)),
+                    _ => None,
+                };
+                tool
             })
             .collect();
         if !second || self.cycle {
@@ -180,6 +186,27 @@ async fn check_roundtrip(client: &McpClient) {
     let cancellation = CancellationToken::new();
     let tools = client.discover(&cancellation).await.unwrap();
     assert_eq!(tools.len(), 3);
+    for (name, kind) in [
+        ("echo", eliteforge_agent_framework::ToolOperationKind::Query),
+        (
+            "slow",
+            eliteforge_agent_framework::ToolOperationKind::Command,
+        ),
+        (
+            "typed.output",
+            eliteforge_agent_framework::ToolOperationKind::Unknown,
+        ),
+    ] {
+        assert_eq!(
+            tools
+                .iter()
+                .find(|tool| tool.descriptor.id.ends_with(&format!("/{name}")))
+                .unwrap()
+                .descriptor
+                .operation_kind,
+            kind
+        );
+    }
     assert!(tools.iter().all(|t| !t.parallel_safe));
     assert!(tools.iter().any(
         |t| t.descriptor.id.ends_with("/typed.output") && !t.descriptor.call_name.contains('.')
@@ -789,6 +816,10 @@ async fn legacy_content_length_uses_sdk_discovery_and_calls() {
         let bindings = client.discover(&CancellationToken::new()).await.unwrap();
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].descriptor.id, "mcp/legacy/echo");
+        assert_eq!(
+            bindings[0].descriptor.operation_kind,
+            eliteforge_agent_framework::ToolOperationKind::Unknown
+        );
         let output = client
             .call_tool("echo", json!({"value":"中文"}), &CancellationToken::new())
             .await

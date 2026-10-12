@@ -494,6 +494,13 @@ impl McpClient {
                     call_name,
                     remote.description.as_deref().unwrap_or_default(),
                     schema,
+                )
+                .with_operation_kind(
+                    match remote.annotations.as_ref().and_then(|a| a.read_only_hint) {
+                        Some(true) => eliteforge_agent_core::ToolOperationKind::Query,
+                        Some(false) => eliteforge_agent_core::ToolOperationKind::Command,
+                        None => eliteforge_agent_core::ToolOperationKind::Unknown,
+                    },
                 );
                 // Server annotations are hints, not authority to grant parallel safety.
                 tools.push(ToolBinding::new(
