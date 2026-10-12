@@ -17,6 +17,56 @@ fn now() -> i64 {
         .unwrap()
         .as_millis() as i64
 }
+
+#[tokio::test]
+async fn counts_metric_points_by_resource_or_point_attribute_without_loading_points() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = SqliteDatabase::open(temp.path().join("metrics.db")).await.unwrap();
+    let store = SqliteTelemetryStore::with_database(database.clone(), policy())
+        .await
+        .unwrap();
+    store
+        .write_metrics(vec![
+            TelemetryMetricPoint {
+                point_id: "resource-alpha".into(), timestamp: now(),
+                resource: BTreeMap::from([("tron.workspace.code".into(), "alpha".into())]),
+                ..Default::default()
+            },
+            TelemetryMetricPoint {
+                point_id: "attribute-alpha".into(), timestamp: now(),
+                data: serde_json::json!({
+                    "attributes": [{
+                        "key": "tron.workspace.code",
+                        "value": {"stringValue": "alpha"}
+                    }]
+                }),
+                ..Default::default()
+            },
+            TelemetryMetricPoint {
+                point_id: "other-workspace".into(), timestamp: now(),
+                resource: BTreeMap::from([("tron.workspace.code".into(), "beta".into())]),
+                ..Default::default()
+            },
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .count_metric_points_by_attribute("tron.workspace.code".into(), "alpha".into())
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        store
+            .count_metric_points_by_attribute("tron.workspace.code".into(), "beta".into())
+            .await
+            .unwrap(),
+        1
+    );
+    store.cleanup().await.unwrap();
+}
+
 #[tokio::test]
 async fn retention_removes_entire_traces_and_only_ages_out_metrics() {
     let temp = tempfile::tempdir().unwrap();

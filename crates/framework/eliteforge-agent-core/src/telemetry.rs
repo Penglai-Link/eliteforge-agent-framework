@@ -116,6 +116,12 @@ pub trait TelemetryStore: Send + Sync {
         offset: usize,
         limit: usize,
     ) -> Result<TelemetryPage<TelemetryMetricPoint>, TelemetryError>;
+    /// Count metric points whose resource or point attributes match the given key and value.
+    async fn count_metric_points_by_attribute(
+        &self,
+        attribute: String,
+        value: String,
+    ) -> Result<usize, TelemetryError>;
     async fn latest_metric(
         &self,
         name: String,

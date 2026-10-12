@@ -44,6 +44,7 @@ impl SqliteTelemetryStore {
         retention.validate()?;
         database.call(|c|->rusqlite::Result<()> {c.execute_batch("CREATE TABLE IF NOT EXISTS ef_telemetry_traces (trace_id TEXT PRIMARY KEY,started_at INTEGER NOT NULL,ended_at INTEGER,status_code INTEGER NOT NULL,attributes TEXT NOT NULL,abandoned INTEGER NOT NULL DEFAULT 0);
         CREATE INDEX IF NOT EXISTS ef_telemetry_traces_time ON ef_telemetry_traces(started_at DESC);
+        CREATE INDEX IF NOT EXISTS ef_telemetry_traces_workspace_time ON ef_telemetry_traces(json_extract(attributes,'$.\"tron.workspace.code\"'),started_at DESC,trace_id DESC);
         CREATE INDEX IF NOT EXISTS ef_telemetry_traces_retention ON ef_telemetry_traces(COALESCE(ended_at,started_at) DESC,trace_id DESC) WHERE ended_at IS NOT NULL;
         CREATE TABLE IF NOT EXISTS ef_telemetry_spans(trace_id TEXT NOT NULL REFERENCES ef_telemetry_traces(trace_id) ON DELETE CASCADE,span_id TEXT NOT NULL,ended_at INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(trace_id,span_id));
         CREATE TABLE IF NOT EXISTS ef_telemetry_metric_points(point_id TEXT PRIMARY KEY,name TEXT NOT NULL,timestamp INTEGER NOT NULL,data TEXT NOT NULL);
@@ -149,6 +150,13 @@ impl TelemetryStore for SqliteTelemetryStore {
         limit: usize,
     ) -> Result<TelemetryPage<TelemetryMetricPoint>, TelemetryError> {
         query::points(self, name, offset, limit).await
+    }
+    async fn count_metric_points_by_attribute(
+        &self,
+        attribute: String,
+        value: String,
+    ) -> Result<usize, TelemetryError> {
+        query::count_points_by_attribute(self, attribute, value).await
     }
     async fn latest_metric(
         &self,

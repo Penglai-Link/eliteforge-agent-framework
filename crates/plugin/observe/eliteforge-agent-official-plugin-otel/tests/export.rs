@@ -36,7 +36,10 @@ impl ChatModel for FixtureModel {
             input_tokens: 17,
             output_tokens: 3,
         };
-        Ok(response)
+        Ok(response.with_provider_metrics(eliteforge_agent_core::ProviderMetrics {
+            cached_input_tokens: Some(5),
+            reasoning_tokens: None,
+        }))
     }
 }
 struct FixtureTool;
@@ -113,6 +116,11 @@ async fn real_exporters_record_parentage_tool_link_usage_and_no_payloads() {
         s.attributes
             .iter()
             .any(|a| a.key.as_str() == "gen_ai.usage.input_tokens" && a.value.to_string() == "17")
+    }));
+    assert!(models.iter().all(|s| {
+        s.attributes.iter().any(|a| {
+            a.key.as_str() == "gen_ai.usage.cached_input_tokens" && a.value.to_string() == "5"
+        })
     }));
     let metric_data = metric_exporter.get_finished_metrics().unwrap();
     let observed = format!("{spans:?} {metric_data:?}");

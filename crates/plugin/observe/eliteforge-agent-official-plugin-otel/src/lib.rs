@@ -299,10 +299,24 @@ struct SpanGuard {
 
 impl SpanGuard {
     fn finish(mut self, outcome: Outcome, usage: Option<&Usage>) {
-        self.record(outcome, usage);
+        self.record(outcome, usage, None);
     }
 
-    fn record(&mut self, outcome: Outcome, usage: Option<&Usage>) {
+    fn finish_with_cached_input_tokens(
+        mut self,
+        outcome: Outcome,
+        usage: Option<&Usage>,
+        cached_input_tokens: Option<u64>,
+    ) {
+        self.record(outcome, usage, cached_input_tokens);
+    }
+
+    fn record(
+        &mut self,
+        outcome: Outcome,
+        usage: Option<&Usage>,
+        cached_input_tokens: Option<u64>,
+    ) {
         if self.finished {
             return;
         }
@@ -348,6 +362,12 @@ impl SpanGuard {
                 "gen_ai.usage.output_tokens",
                 as_i64(usage.output_tokens),
             ));
+            if let Some(cached_input_tokens) = cached_input_tokens {
+                span.set_attribute(KeyValue::new(
+                    "gen_ai.usage.cached_input_tokens",
+                    as_i64(cached_input_tokens),
+                ));
+            }
             if self.operation == "model" {
                 self.metrics.tokens.add(
                     usage.input_tokens,
@@ -370,7 +390,7 @@ impl Drop for SpanGuard {
         } else {
             Outcome::Unknown
         };
-        self.record(outcome, None);
+        self.record(outcome, None, None);
     }
 }
 
@@ -656,7 +676,13 @@ impl ModelMiddleware for Observation {
                     }
                 }
                 drop(runs);
-                span.finish(Outcome::Success("completed"), Some(&response.usage));
+                span.finish_with_cached_input_tokens(
+                    Outcome::Success("completed"),
+                    Some(&response.usage),
+                    response
+                        .provider_metrics()
+                        .and_then(|metrics| metrics.cached_input_tokens),
+                );
             }
             Err(error) => {
                 self.report(

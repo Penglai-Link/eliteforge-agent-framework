@@ -14,8 +14,12 @@ fn filter(f: TelemetryTraceFilter) -> (String, Vec<Value>) {
         values.push(Value::Text(id));
     }
     for (key, value) in f.attributes {
-        sql.push_str(" AND json_extract(t.attributes,?)=?");
-        values.push(Value::Text(json_path("$", &key)));
+        if key == "tron.workspace.code" {
+            sql.push_str(" AND json_extract(t.attributes,'$.\"tron.workspace.code\"')=?");
+        } else {
+            sql.push_str(" AND json_extract(t.attributes,?)=?");
+            values.push(Value::Text(json_path("$", &key)));
+        }
         values.push(Value::Text(value));
     }
     (sql, values)
@@ -121,6 +125,25 @@ pub(super) async fn points(
             .collect::<rusqlite::Result<_>>()?;
         Ok(TelemetryPage { total, records })
     }).await.map_err(error)
+}
+
+pub(super) async fn count_points_by_attribute(
+    store: &SqliteTelemetryStore,
+    attribute: String,
+    value: String,
+) -> Result<usize, TelemetryError> {
+    let resource_path = json_path("$.resource", &attribute);
+    store
+        .database
+        .call(move |c| {
+            c.query_row(
+                "SELECT COUNT(*) FROM ef_telemetry_metric_points p WHERE json_extract(p.data,?1)=?2 OR EXISTS (SELECT 1 FROM json_each(json_extract(p.data,'$.data.attributes')) a WHERE json_extract(a.value,'$.key')=?3 AND json_extract(a.value,'$.value.stringValue')=?2)",
+                rusqlite::params![resource_path, value, attribute],
+                |row| row.get(0),
+            )
+        })
+        .await
+        .map_err(error)
 }
 
 pub(super) async fn latest(
