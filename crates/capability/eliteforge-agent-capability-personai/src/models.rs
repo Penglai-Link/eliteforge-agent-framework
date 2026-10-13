@@ -473,7 +473,12 @@ impl BoundPersonAiModels {
     ) -> Result<ChatResponse, ModelError> {
         self.ensure_current()?;
         let body = match protocol {
-            ProtocolType::ChatCompletions => chat_completions_request(model_id, &request)?,
+            ProtocolType::ChatCompletions => {
+                let mut body = chat_completions_request(model_id, &request)?;
+                // The SDK adds `stream`, but usage must be requested explicitly.
+                body["stream_options"] = json!({ "include_usage": true });
+                body
+            }
             ProtocolType::Responses => responses_request(model_id, &request)?,
         };
         let raw =
@@ -1403,7 +1408,10 @@ mod tests {
     use super::*;
     use crate::PersonAiContextHandle;
     use crab_serverapi::base::AuthorizedClientContext;
-    use rsa::{RsaPrivateKey, pkcs8::EncodePublicKey};
+    use rsa::{
+        RsaPrivateKey,
+        pkcs8::{EncodePrivateKey, EncodePublicKey},
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
@@ -1493,6 +1501,12 @@ mod tests {
         let url = format!("http://{}", listener.local_addr().unwrap());
         let (accepted_tx, accepted_rx) = oneshot::channel();
         let (release_tx, release_rx) = oneshot::channel();
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let public = private
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        let private_pem = private.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -1519,11 +1533,30 @@ mod tests {
                     }
                 }
             }
+            let end = request
+                .windows(4)
+                .position(|bytes| bytes == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let envelope: crab_serverapi::crypto::ClientEncryptedEnvelope =
+                serde_json::from_slice(&request[end..]).unwrap();
+            let plaintext = crab_serverapi::crypto::ClientCrypto::decrypt_to_string(
+                private_pem.as_str(),
+                &envelope.encrypted_key,
+                &envelope.iv,
+                &envelope.ciphertext,
+            )
+            .unwrap();
+            let body: Value = serde_json::from_str(&plaintext).unwrap();
+            // Assert the actual SDK-encrypted HTTP payload, not just the builder.
+            assert_eq!(body["stream"], true);
+            assert_eq!(body["stream_options"]["include_usage"], true);
             accepted_tx.send(()).unwrap();
             release_rx.await.unwrap();
             let body = concat!(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"hel\"}}]}\n\n",
                 "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n",
                 "data: [DONE]\n\n"
             );
             let response = format!(
@@ -1532,11 +1565,7 @@ mod tests {
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
-        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
-        let public = private
-            .to_public_key()
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap();
+
         let provider = Arc::new(PersonAiContextHandle::default());
         let auth = AuthorizedClientContext::new()
             .with_token("token")
@@ -1577,6 +1606,8 @@ mod tests {
         release_tx.send(()).unwrap();
         let response = running.await.unwrap().unwrap();
         assert_eq!(response.content.text(), "hello");
+        assert_eq!(response.usage.input_tokens, 7);
+        assert_eq!(response.usage.output_tokens, 3);
         assert_eq!(events.0.lock().await.as_slice(), ["hel", "lo"]);
         assert!(
             adapter
