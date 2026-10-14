@@ -13,7 +13,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-crab-serverapi = { git = "https://gitee.com/person-ai/person-ai-index-rust-sdk.git", rev = "3a6453c04b4bafe69ba6a2ede0700f0ad6892f34" }
+crab-serverapi = { git = "https://gitee.com/person-ai/person-ai-index-rust-sdk.git", rev = "d36495205418c1925f32a09267c68401ec4d24b5" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "io-util"] }

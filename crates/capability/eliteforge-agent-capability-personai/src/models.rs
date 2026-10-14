@@ -907,6 +907,11 @@ impl VideoGenerationModel for BoundPersonAiModels {
                     .map(media_url)
                     .collect::<Result<_, _>>()?,
             ),
+            img_url: None,
+            video_url: None,
+            audio_url: None,
+            negative_prompt: None,
+            input: None,
             extra_params: Some(extra_params),
         };
         let response = self
