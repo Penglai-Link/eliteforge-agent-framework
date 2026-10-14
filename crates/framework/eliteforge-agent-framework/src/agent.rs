@@ -2506,6 +2506,17 @@ impl DetachedChildRegistry {
     fn insert(&self, record: Arc<DetachedChildRecord>) -> Result<(), AgentError> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.records.len() >= MAX_IN_PROCESS_DETACHED_CHILDREN {
+            // Terminal runs whose result was already delivered keep only a
+            // small snapshot; release them before refusing new work.
+            state.records.retain(|_, record| {
+                !record
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .delivered
+            });
+        }
+        if state.records.len() >= MAX_IN_PROCESS_DETACHED_CHILDREN {
             return Err(AgentError::Run(
                 "in-process detached child capacity exceeded; collect finished children first"
                     .into(),
@@ -2515,11 +2526,17 @@ impl DetachedChildRegistry {
         debug_assert!(previous.is_none(), "detached child run IDs are unique");
         Ok(())
     }
-    fn remove_if(&self, child_run_id: RunId, expected: &Arc<DetachedChildRecord>) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+    /// Mark one record's result as delivered. Delivered records stay
+    /// addressable for read/send/answer until capacity pressure releases them.
+    fn delivered(&self, child_run_id: RunId, expected: &Arc<DetachedChildRecord>) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         match state.records.get(&child_run_id) {
             Some(current) if Arc::ptr_eq(current, expected) => {
-                state.records.remove(&child_run_id);
+                current
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .delivered = true;
                 true
             }
             _ => false,
@@ -2537,6 +2554,8 @@ struct DetachedChildRecord {
 struct DetachedChildState {
     summary: DetachedChildSummary,
     run: Option<Arc<DetachedChildRun>>,
+    /// True once `wait_child` returned this run's final result.
+    delivered: bool,
 }
 
 struct DetachedChildRun {
@@ -2880,6 +2899,7 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
                     status: ChildRunStatus::Running,
                 },
                 run: Some(run.clone()),
+                delivered: false,
             }),
         });
         let summary = record
@@ -2907,9 +2927,9 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
             .clone()
             .ok_or_else(|| AgentError::Run("child run has no execution".into()))?;
         let result = run.wait().await;
-        // Delivery releases the registry slot: the result is now owned by the
-        // caller and durable history, not by the in-memory lifecycle.
-        self.children.remove_if(child_run_id, &record);
+        // The result is now owned by the caller; the record stays addressable
+        // for read/send/answer until capacity pressure releases it.
+        self.children.delivered(child_run_id, &record);
         result
     }
 
