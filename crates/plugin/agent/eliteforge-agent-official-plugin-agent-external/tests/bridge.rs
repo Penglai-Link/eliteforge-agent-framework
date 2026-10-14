@@ -85,7 +85,7 @@ async fn bridge_agent_routes_start_and_native_session_continuation() {
     let first = fw::ExternalAgent::run(
         &agent,
         fw::ExternalAgentRequest {
-            input: "start".into(),
+            annotations: Vec::new(),            input: "start".into(),
             model: None,
             session: None,
             extensions: fw::Extensions::default(),
@@ -102,7 +102,7 @@ async fn bridge_agent_routes_start_and_native_session_continuation() {
     let _ = fw::ExternalAgent::run(
         &agent,
         fw::ExternalAgentRequest {
-            input: "continue".into(),
+            annotations: Vec::new(),            input: "continue".into(),
             model: None,
             session: first.session,
             extensions: fw::Extensions::default(),

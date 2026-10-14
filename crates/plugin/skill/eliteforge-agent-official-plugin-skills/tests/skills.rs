@@ -1768,6 +1768,7 @@ impl LiveInputSource for OneLiveSelection {
     async fn drain_inputs(&self, _: &RunContext, _: bool) -> Result<Vec<LiveInput>, AgentError> {
         Ok(if self.0.fetch_add(1, Ordering::SeqCst) == 1 {
             vec![LiveInput {
+                annotations: Vec::new(),
                 content: "$release-notes update now".into(),
                 requested_skills: vec!["release-notes".into()],
             }]

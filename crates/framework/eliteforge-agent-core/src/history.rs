@@ -84,6 +84,8 @@ impl From<&Usage> for HistoryUsage {
 #[serde(rename_all = "camelCase")]
 pub struct HistoryMessage {
     #[serde(default)]
+    pub annotations: Vec<MessageAnnotation>,
+    #[serde(default)]
     pub requested_skills: Vec<String>,
     pub id: String,
     pub run_id: RunId,
@@ -97,6 +99,10 @@ pub struct HistoryMessage {
     pub created_at_ms: u64,
 }
 impl HistoryMessage {
+    pub fn with_annotations(mut self, annotations: Vec<MessageAnnotation>) -> Self {
+        self.annotations = annotations;
+        self
+    }
     pub fn with_provenance(mut self, provenance: Option<MessageProvenance>) -> Self {
         self.provenance = provenance;
         self
@@ -112,6 +118,7 @@ impl HistoryMessage {
             step_id: None,
             role: Role::User,
             provenance: None,
+            annotations: Vec::new(),
             requested_skills: Vec::new(),
             content: history_content(content),
             structured: None,
@@ -187,6 +194,7 @@ impl HistoryRecords {
         }
         ids.clear();
         for message in &self.messages {
+            validate_annotations(&message.annotations).map_err(StateError::Invalid)?;
             if message.id.is_empty()
                 || message.run_id != run_id
                 || !matches!(message.role, Role::User | Role::Assistant)
@@ -235,6 +243,7 @@ impl HistoryRecords {
                 .ok_or_else(|| StateError::Invalid("history messages cannot be removed".into()))?;
             if old.run_id != new.run_id
                 || old.role != new.role
+                || old.annotations != new.annotations
                 || old.provenance != new.provenance
                 || old.step_id != new.step_id
                 || old.created_at_ms != new.created_at_ms
@@ -375,6 +384,12 @@ pub struct SessionHistory {
 }
 #[async_trait]
 pub trait HistoryStore: Send + Sync {
+    /// Check references before admission; writers repeat this under their transaction.
+    async fn validate_annotation_sources(&self, _session_id: &str, annotations: &[MessageAnnotation]) -> Result<(), StateError> {
+        if annotations.is_empty() { return Ok(()); }
+        Err(StateError::Invalid("annotation source validation is unavailable".into()))
+    }
+
     /// Metadata only; does not read messages, tools or recovery checkpoints.
     async fn run(&self, _run_id: RunId) -> Result<HistoryRun, StateError> {
         Err(StateError::Invalid(
@@ -393,6 +408,10 @@ pub struct HistoryStoreService(pub Arc<dyn HistoryStore>);
 #[derive(Clone)]
 pub struct HistoryService(pub Arc<dyn HistoryStore>);
 impl HistoryService {
+    pub async fn validate_annotation_sources(&self, session_id: &str, annotations: &[MessageAnnotation]) -> Result<(), StateError> {
+        self.0.validate_annotation_sources(session_id, annotations).await
+    }
+
     pub async fn run(&self, run_id: RunId) -> Result<HistoryRun, StateError> {
         self.0.run(run_id).await
     }

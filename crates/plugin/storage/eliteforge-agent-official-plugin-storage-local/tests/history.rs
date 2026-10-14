@@ -505,3 +505,171 @@ async fn session_queries_isolate_child_records_versions_and_pending_interactions
         parent.records
     );
 }
+
+#[derive(Clone, Default)]
+struct AnnotationModel(Arc<std::sync::Mutex<Vec<ChatRequest>>>);
+#[async_trait]
+impl ChatModel for AnnotationModel {
+    async fn generate(
+        &self,
+        _: &str,
+        request: ChatRequest,
+        _: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        self.0.lock().unwrap().push(request);
+        Ok(ChatResponse::text(
+            "[Annotation 1](#chat-annotation-a-1) answer",
+        ))
+    }
+}
+
+#[tokio::test]
+async fn native_annotations_survive_storage_reopen_without_changing_message_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("annotations.db");
+    let store = Arc::new(
+        SqliteStateStore::open(&path, Default::default())
+            .await
+            .unwrap(),
+    );
+    let model = AnnotationModel::default();
+    let agent = TestBuilder::default()
+        .plugin(store.clone().plugin())
+        .plugin(ChatModelPlugin::new(model.clone()))
+        .build()
+        .await
+        .unwrap();
+    agent
+        .run(RunRequest::new("annotated", "Original message"))
+        .await
+        .unwrap();
+    let original = store
+        .read_session("annotated", Default::default())
+        .await
+        .unwrap();
+    let source = original
+        .records
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Assistant)
+        .unwrap()
+        .id
+        .clone();
+    let annotation = MessageAnnotation {
+        id: "a-1".into(),
+        message_id: source,
+        selected_text: "answer".into(),
+        comment: "Why?".into(),
+    };
+    let mut request = RunRequest::new("annotated", "Explain");
+    request.annotations = vec![annotation.clone()];
+    agent.run(request).await.unwrap();
+    let checkpoint = store.latest("annotated").await.unwrap().unwrap();
+    let user = checkpoint
+        .transcript
+        .iter()
+        .find(|m| !m.annotations.is_empty())
+        .unwrap();
+    assert_eq!(user.content, Content::from("Explain"));
+    assert_eq!(user.annotations, vec![annotation.clone()]);
+    {
+        let calls = model.0.lock().unwrap();
+        let projected = calls
+            .last()
+            .unwrap()
+            .messages
+            .iter()
+            .find(|m| m.content.protocol_text().contains("Explain"))
+            .unwrap();
+        assert!(projected.content.0.iter().any(|block| matches!(block, ContentBlock::Json { value } if value["conversationAnnotations"][0]["comment"] == "Why?")));
+    }
+    let history = store
+        .read_session("annotated", Default::default())
+        .await
+        .unwrap();
+    let persisted = history
+        .records
+        .messages
+        .iter()
+        .find(|m| !m.annotations.is_empty())
+        .unwrap();
+    assert_eq!(
+        persisted.content,
+        vec![HistoryContentBlock::Text {
+            text: "Explain".into()
+        }]
+    );
+    assert_eq!(persisted.annotations, vec![annotation.clone()]);
+    let mut illegal = checkpoint.clone();
+    illegal
+        .history
+        .messages
+        .iter_mut()
+        .find(|m| !m.annotations.is_empty())
+        .unwrap()
+        .annotations[0]
+        .comment = "rewritten".into();
+    assert!(
+        checkpoint
+            .history
+            .validate_successor(&illegal.history)
+            .is_err()
+    );
+    agent.framework().close().await;
+    drop(agent);
+    drop(store);
+    let reopened = SqliteStateStore::open(&path, Default::default())
+        .await
+        .unwrap();
+    let restored = reopened
+        .read_session("annotated", Default::default())
+        .await
+        .unwrap();
+    assert_eq!(restored.records, history.records);
+    assert_eq!(
+        restored
+            .records
+            .messages
+            .iter()
+            .find(|m| !m.annotations.is_empty())
+            .unwrap()
+            .annotations,
+        vec![annotation]
+    );
+}
+
+#[tokio::test]
+async fn annotation_source_is_session_scoped_and_invalid_writes_roll_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = SqliteStateStore::open(directory.path().join("scope.db"), Default::default())
+        .await
+        .unwrap();
+    let mut source = Checkpoint::new(RunId::new_v4(), "private", "test", 1, json!({}));
+    source.history.messages.push(HistoryMessage::user(
+        source.run_id,
+        &"private source".into(),
+    ));
+    let source_id = source.history.messages[0].id.clone();
+    store.create(source, None).await.unwrap();
+    let run_id = RunId::new_v4();
+    let mut forged = Checkpoint::new(run_id, "other", "test", 1, json!({}));
+    forged.history.messages.push(
+        HistoryMessage::user(run_id, &"Question".into()).with_annotations(vec![
+            MessageAnnotation {
+                id: "a-1".into(),
+                message_id: source_id,
+                selected_text: "private source".into(),
+                comment: "Explain".into(),
+            },
+        ]),
+    );
+    assert!(matches!(
+        store.create(forged, None).await,
+        Err(StateError::Invalid(_))
+    ));
+    assert!(store.load(run_id).await.is_err());
+    assert!(matches!(
+        store.read_session("other", Default::default()).await,
+        Err(StateError::NotFound)
+    ));
+}

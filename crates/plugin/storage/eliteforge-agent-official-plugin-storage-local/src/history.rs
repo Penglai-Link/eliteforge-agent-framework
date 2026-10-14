@@ -133,12 +133,30 @@ fn put<T: Serialize>(
     }
     Ok(())
 }
+fn annotation_sources(c: &rusqlite::Connection, session: &str, annotations: &[MessageAnnotation]) -> Result<(), StateError> {
+    validate_annotations(annotations).map_err(StateError::Invalid)?;
+    for annotation in annotations {
+        let valid: bool = c.query_row(
+            "SELECT EXISTS(SELECT 1 FROM ef_history_messages WHERE id=?1 AND session_id=?2)",
+            params![annotation.message_id, session], |row| row.get(0),
+        ).map_err(sql)?;
+        if !valid { return Err(StateError::Invalid("annotation source is not in this session history".into())); }
+    }
+    Ok(())
+}
+
 /// Invoked inside the checkpoint transaction, after fencing/revision validation.
 pub(crate) fn checkpoint(
     c: &rusqlite::Connection,
     next: &Checkpoint,
     previous: Option<&Checkpoint>,
 ) -> Result<(), StateError> {
+    for message in &next.history.messages {
+        if previous.is_some_and(|old| old.history.messages.iter().any(|record| record.id == message.id && record.annotations == message.annotations)) {
+            continue;
+        }
+        annotation_sources(c, &next.session_id, &message.annotations)?;
+    }
     let old: Option<String> = c
         .query_row(
             "SELECT record FROM ef_history_runs WHERE id=?1",
@@ -262,6 +280,12 @@ fn records<T: DeserializeOwned>(
 }
 #[async_trait]
 impl HistoryStore for SqliteStateStore {
+    async fn validate_annotation_sources(&self, session: &str, annotations: &[MessageAnnotation]) -> Result<(), StateError> {
+        let session = session.to_owned();
+        let annotations = annotations.to_vec();
+        self.execute(move |connection| annotation_sources(connection, &session, &annotations)).await
+    }
+
     async fn run(&self, run_id: RunId) -> Result<HistoryRun, StateError> {
         self.execute(move |c| {
             let record = c

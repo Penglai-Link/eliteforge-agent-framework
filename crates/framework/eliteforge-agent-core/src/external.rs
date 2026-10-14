@@ -12,6 +12,7 @@ pub struct ExternalSessionRef {
 }
 
 pub struct ExternalAgentRequest {
+    pub annotations: Vec<MessageAnnotation>,
     pub input: Content,
     pub model: Option<String>,
     pub session: Option<ExternalSessionRef>,

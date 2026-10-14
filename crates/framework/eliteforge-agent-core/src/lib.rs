@@ -1,6 +1,8 @@
 //! Shared Agent contracts and portable registration/context primitives.
 extern crate self as eliteforge_agent_core;
 
+pub mod annotations;
+pub use annotations::*;
 pub mod budget;
 pub mod capability_packs;
 pub mod collaboration;

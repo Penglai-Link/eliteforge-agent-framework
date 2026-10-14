@@ -182,6 +182,14 @@ impl ModelNext<'_> {
                         ModelError::Fatal("output reserve exceeds context window".into())
                     })?);
             }
+            // Project structured comments only for the provider call; checkpoints
+            // and conversation/history records retain the original body and metadata.
+            for message in &mut request.messages {
+                if let Some(value) = annotation_model_context(&message.annotations) {
+                    message.content.0.push(ContentBlock::Json { value });
+                    message.annotations.clear();
+                }
+            }
             validate_model_request(
                 &request,
                 budget,

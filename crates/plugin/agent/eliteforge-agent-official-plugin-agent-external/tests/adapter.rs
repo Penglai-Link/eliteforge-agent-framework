@@ -19,9 +19,8 @@ impl fw::ExternalAgentEventSink for Events {
     }
 }
 
-fn request(session: Option<fw::ExternalSessionRef>) -> fw::ExternalAgentRequest {
-    fw::ExternalAgentRequest {
-        input: "hello".into(),
+fn request(session: Option<fw::ExternalSessionRef>) -> fw::ExternalAgentRequest {    fw::ExternalAgentRequest {
+            annotations: Vec::new(),        input: "hello".into(),
         model: None,
         session,
         extensions: fw::Extensions::default(),

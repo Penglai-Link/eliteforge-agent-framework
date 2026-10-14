@@ -114,6 +114,8 @@ pub struct RunHostMetadataService(pub Arc<std::sync::RwLock<RunHostMetadata>>);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
+    #[serde(default)]
+    pub annotations: Vec<crate::MessageAnnotation>,
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<MessageProvenance>,
@@ -134,6 +136,7 @@ impl Message {
     pub fn new(role: Role, content: impl Into<crate::Content>) -> Self {
         Self {
             role,
+            annotations: Vec::new(),
             provenance: None,
             content: content.into(),
             structured: None,
@@ -142,6 +145,11 @@ impl Message {
             tool_result: None,
             model_context: None,
         }
+    }
+
+    pub fn with_annotations(mut self, annotations: Vec<crate::MessageAnnotation>) -> Self {
+        self.annotations = annotations;
+        self
     }
 
     pub fn with_provenance(mut self, provenance: Option<MessageProvenance>) -> Self {
@@ -162,6 +170,7 @@ impl Message {
     pub fn tool(call_id: impl Into<String>, content: impl Into<crate::Content>) -> Self {
         Self {
             role: Role::Tool,
+            annotations: Vec::new(),
             provenance: None,
             content: content.into(),
             structured: None,
@@ -645,6 +654,8 @@ impl RunLimits {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRequest {
+    #[serde(default)]
+    pub annotations: Vec<crate::MessageAnnotation>,
     /// Trusted, opaque host ownership/scope/correlation data, never a prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_context: Option<Value>,
@@ -709,8 +720,8 @@ impl RunRequest {
     }
     pub fn new(session_id: impl Into<String>, input: impl Into<crate::Content>) -> Self {
         Self {
-            agent_code: None,
-            host_context: None,
+            annotations: Vec::new(),
+            agent_code: None,            host_context: None,
             message_provenance: None,
             assistant_provenance: None,
             session_id: session_id.into(),
@@ -1169,6 +1180,7 @@ pub trait LiveInputSource: Send + Sync {
 }
 #[derive(Debug, Clone)]
 pub struct LiveInput {
+    pub annotations: Vec<crate::MessageAnnotation>,
     pub content: crate::Content,
     pub requested_skills: Vec<String>,
 }
@@ -1176,6 +1188,7 @@ impl From<crate::Content> for LiveInput {
     fn from(content: crate::Content) -> Self {
         Self {
             content,
+            annotations: Vec::new(),
             requested_skills: Vec::new(),
         }
     }

@@ -54,6 +54,7 @@ pub fn estimate_message_tokens(message: &Message) -> usize {
     message
         .content
         .estimated_tokens()
+        .saturating_add(annotation_model_context(&message.annotations).as_ref().map_or(0, |value| value.to_string().len()))
         .saturating_add(message.structured.as_ref().map_or(0, |data| {
             serde_json::to_vec(data).map_or(usize::MAX, |bytes| bytes.len())
         }))
@@ -131,6 +132,7 @@ impl TokenEstimator for UnicodeTokenEstimator {
             });
         }
         tokens = tokens
+            .saturating_add(annotation_model_context(&message.annotations).as_ref().map_or(0, unicode_json_tokens))
             .saturating_add(message.structured.as_ref().map_or(0, unicode_json_tokens))
             .saturating_add(message.tool_result.as_ref().map_or(0, unicode_json_tokens))
             .saturating_add(

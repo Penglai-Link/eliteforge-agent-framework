@@ -40,8 +40,12 @@ impl fw::ExternalAgent for CliExternalAgent {
                 callback_overflow.store(true, std::sync::atomic::Ordering::Release);
             }
         });
+        let mut provider_input = request.input.clone();
+        if let Some(value) = fw::annotation_model_context(&request.annotations) {
+            provider_input.0.push(fw::ContentBlock::Json { value });
+        }
         let context = ExternalCliRequest {
-            prompt: request.input.protocol_text(),
+            prompt: provider_input.protocol_text(),
             model: self.native_model.clone(),
             session_id: request
                 .session

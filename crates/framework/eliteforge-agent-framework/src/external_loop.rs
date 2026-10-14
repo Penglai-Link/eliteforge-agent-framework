@@ -212,6 +212,7 @@ impl AgentLoop for ExternalAgentLoop {
             .with_host_metadata(request);
             checkpoint.history.messages.push(
                 HistoryMessage::user(context.run_id, &request.input)
+                        .with_annotations(request.annotations.clone())
                     .with_provenance(request.message_provenance.clone()),
             );
             checkpoint.history.steps.push(HistoryStep {
@@ -228,6 +229,7 @@ impl AgentLoop for ExternalAgentLoop {
                 finished_at_ms: None,
             });
             checkpoint.history.messages.push(HistoryMessage {
+                annotations: Vec::new(),
                 requested_skills: Vec::new(),
                 id: events.message_id.clone(),
                 run_id: context.run_id,
@@ -262,6 +264,7 @@ impl AgentLoop for ExternalAgentLoop {
             _=tokio::time::sleep_until(context.deadline)=>Err(AgentError::Run("external run deadline exceeded".into())),
             result=external.run(
                 ExternalAgentRequest {
+                    annotations: request.annotations.clone(),
                     input: request.input.clone(),
                     model: request
                         .model

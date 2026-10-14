@@ -156,6 +156,7 @@ pub trait ConversationSession: Send {
 pub fn validate_messages(messages: &[Message]) -> Result<(), ConversationError> {
     let mut pending = HashSet::new();
     for message in messages {
+        crate::validate_annotations(&message.annotations).map_err(ConversationError::Other)?;
         if !message.tool_calls.is_empty() && message.role != Role::Assistant {
             return Err(ConversationError::Other(
                 "only assistant messages may request tools".into(),

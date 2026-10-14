@@ -14,7 +14,7 @@ pub(crate) fn encode(message: &AgentMessage) -> Result<Message, String> {
         "tool" => Role::Tool,
         other => return Err(format!("unsupported conversation role: {other}")),
     };
-    let mut result = Message::new(role, Content::default());
+    let mut result = Message::new(role, Content::default()).with_annotations(message.annotations.clone());
     for part in &message.parts {
         let block = match part {
             AgentMessagePart::Text { text } => ContentBlock::Text { text: text.clone() },
@@ -234,7 +234,9 @@ pub(crate) fn decode(message: &Message) -> Result<AgentMessage, String> {
             }
         }
     }
-    Ok(AgentMessage::new(role, parts))
+    let mut result = AgentMessage::new(role, parts);
+    result.annotations = message.annotations.clone();
+    Ok(result)
 }
 
 /// Legacy runs predate mandatory provider call IDs. Preserve their content while

@@ -562,6 +562,7 @@ impl ModelInvoker {
                 finished_at_ms: None,
             };
             let mut history_message = HistoryMessage {
+                annotations: Vec::new(),
                 requested_skills: Vec::new(),
                 id: stream.message_id.clone(),
                 run_id: context.run_id,

@@ -211,10 +211,11 @@ impl AgentLoop for DagWorkflowLoop {
                 cp.transcript = previous.transcript.clone();
             }
             cp.transcript.push(
-                Message::user(&request.input).with_provenance(request.message_provenance.clone()),
+                Message::user(&request.input).with_annotations(request.annotations.clone()).with_provenance(request.message_provenance.clone()),
             );
             cp.history.messages.push(
                 HistoryMessage::user(context.run_id, &request.input)
+                        .with_annotations(request.annotations.clone())
                     .with_provenance(request.message_provenance.clone()),
             );
             store.create(cp, previous.map(|p| p.run_id)).await?

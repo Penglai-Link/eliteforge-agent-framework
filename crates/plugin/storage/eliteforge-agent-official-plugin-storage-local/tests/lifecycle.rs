@@ -1423,3 +1423,35 @@ async fn synchronous_waiters_do_not_starve_the_native_transaction_runtime() {
     assert_eq!(f.count("tron_links").await, 3);
     f.framework.close().await;
 }
+
+#[tokio::test]
+async fn missing_session_lookup_allows_creation_in_shared_transaction() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = SqliteDatabase::open(directory.path().join("lookup-create.sqlite"))
+        .await
+        .unwrap();
+    let lifecycle = SqliteLifecycleStore::with_database(database.clone())
+        .await
+        .unwrap();
+    database
+        .transaction(async {
+            assert!(matches!(
+                lifecycle.get_session("delegated-child").await,
+                Err(StateError::NotFound)
+            ));
+            let mut record = SessionRecord::new("Delegated child");
+            record.id = "delegated-child".into();
+            lifecycle.create_session(record).await?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        lifecycle
+            .get_session("delegated-child")
+            .await
+            .unwrap()
+            .title,
+        "Delegated child"
+    );
+}

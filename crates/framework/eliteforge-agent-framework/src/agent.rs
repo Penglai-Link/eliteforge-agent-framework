@@ -1232,6 +1232,7 @@ impl AgentGeneration {
                 "installed loop does not support durable resume".into(),
             ));
         }
+        validate_annotations(&request.annotations).map_err(AgentError::InvalidConfiguration)?;
         request.limits.validate()?;
         request.generation.validate()?;
         if request.scope().trim().is_empty()

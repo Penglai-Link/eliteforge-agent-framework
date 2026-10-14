@@ -4,6 +4,8 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentMessage {
+    #[serde(default)]
+    pub annotations: Vec<eliteforge_agent_core::MessageAnnotation>,
     pub role: String,
     pub parts: Vec<AgentMessagePart>,
 }
@@ -58,6 +60,7 @@ impl AgentMessage {
     pub fn new(role: impl Into<String>, parts: Vec<AgentMessagePart>) -> Self {
         Self {
             role: role.into(),
+            annotations: Vec::new(),
             parts,
         }
     }

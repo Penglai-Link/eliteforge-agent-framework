@@ -168,11 +168,12 @@ impl AgentLoop for ModelExecutionLoop {
                 checkpoint.transcript = previous.transcript.clone();
             }
             checkpoint.transcript.push(
-                Message::user(&request.input).with_provenance(request.message_provenance.clone()),
+                Message::user(&request.input).with_annotations(request.annotations.clone()).with_provenance(request.message_provenance.clone()),
             );
             if context.node_execution().is_none() {
                 checkpoint.history.messages.push(
                     HistoryMessage::user(context.run_id, &request.input)
+                        .with_annotations(request.annotations.clone())
                         .with_requested_skills(request.requested_skills.clone())
                         .with_provenance(request.message_provenance.clone()),
                 );
@@ -849,15 +850,18 @@ impl ModelExecutionRuntime<'_> {
                 selected.extend(&input.requested_skills)?;
                 self.state.request.requested_skills = selected.names();
             }
+            validate_annotations(&input.annotations).map_err(AgentError::InvalidConfiguration)?;
+            let annotations = input.annotations;
             let requested_skills = input.requested_skills;
             let input = input.content;
             self.checkpoint.history.messages.push(
                 HistoryMessage::user(self.context.run_id, &input)
+                    .with_annotations(annotations.clone())
                     .with_requested_skills(requested_skills)
                     .with_provenance(self.context.message_provenance()),
             );
             self.checkpoint.transcript.push(
-                Message::user(input.clone()).with_provenance(self.context.message_provenance()),
+                Message::user(input.clone()).with_annotations(annotations).with_provenance(self.context.message_provenance()),
             );
             // Persist the message and its journal event together before
             // publishing the live event, including at the final reply boundary.

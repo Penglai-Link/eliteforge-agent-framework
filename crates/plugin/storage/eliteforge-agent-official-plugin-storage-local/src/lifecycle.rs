@@ -376,7 +376,17 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
     }
     async fn get_session(&self, id: &str) -> Result<SessionRecord, StateError> {
         let id = id.to_owned();
-        self.execute(move |c| session(c, &id)).await.map_err(worker)
+        // Absence is a valid lookup outcome, not a failed SQL operation. Keep it
+        // outside the database callback so a lookup-then-create transaction is
+        // not marked rollback-only when the session has not been created yet.
+        self.execute(move |c| match session(c, &id) {
+            Ok(record) => Ok(Some(record)),
+            Err(StateError::NotFound) => Ok(None),
+            Err(error) => Err(error),
+        })
+        .await
+        .map_err(worker)?
+        .ok_or(StateError::NotFound)
     }
     async fn list_sessions(
         &self,
