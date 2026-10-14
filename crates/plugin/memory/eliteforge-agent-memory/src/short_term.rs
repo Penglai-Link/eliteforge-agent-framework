@@ -265,8 +265,8 @@ impl<T: Clone> ShortTermMemorySource<T> for MemorySnapshot<T> {
 }
 /// Count every semantic field rather than ignoring tool arguments or files.
 pub fn estimate_serialized_tokens<T: serde::Serialize>(entry: &T) -> u32 {
-    serde_json::to_vec(entry)
-        .map(|v| v.len().saturating_add(16).min(u32::MAX as usize) as u32)
+    serde_json::to_string(entry)
+        .map(|text| eliteforge_agent_core::estimate_unicode_text_tokens(&text).saturating_add(16).min(u32::MAX as usize) as u32)
         .unwrap_or(u32::MAX)
 }
 

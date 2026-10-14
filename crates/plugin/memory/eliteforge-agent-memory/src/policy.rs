@@ -104,9 +104,9 @@ impl ContextBlockBudgets {
 pub fn ratio_tokens(tokens: u32, ratio_bps: u32) -> u32 {
     ((u64::from(tokens) * u64::from(ratio_bps.min(10_000))) / 10_000) as u32
 }
-/// Conservative byte-based estimate includes serialized tool/attachment metadata.
+/// Same Unicode-aware text estimate used by host context admission.
 pub fn estimate_text_tokens(text: &str) -> u32 {
-    ((text.len().saturating_add(3) / 4).min(u32::MAX as usize) as u32).max(1)
+    (eliteforge_agent_core::estimate_unicode_text_tokens(text).min(u32::MAX as usize) as u32).max(1)
 }
 /// A hard character bound: even the marker fits in the available quota.
 pub fn bound_text(text: &str, max_chars: usize) -> String {
