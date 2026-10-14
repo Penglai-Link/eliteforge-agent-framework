@@ -19,6 +19,8 @@ pub struct ExternalCli {
     command_name: String,
     kind: SystemAgentCliKind,
     working_directory: Option<String>,
+    reasoning_effort: Option<String>,
+    fast_mode: Option<bool>,
 }
 
 impl ExternalCli {
@@ -31,7 +33,19 @@ impl ExternalCli {
             command_name: command_name.into(),
             kind,
             working_directory,
+            reasoning_effort: None,
+            fast_mode: None,
         }
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
+
+    pub fn with_fast_mode(mut self, enabled: bool) -> Self {
+        self.fast_mode = Some(enabled);
+        self
     }
 
     pub async fn invoke(
@@ -75,6 +89,16 @@ impl ExternalCli {
                 }
                 command.arg("--skip-git-repo-check");
                 command.arg("--json");
+                if let Some(fast_mode) = self.fast_mode {
+                    command.arg("--config");
+                    command.arg(if fast_mode { "service_tier=\"fast\"" } else { "service_tier=\"default\"" });
+                    command.arg("--config");
+                    command.arg(format!("features.fast_mode={fast_mode}"));
+                }
+                if let Some(effort) = &self.reasoning_effort {
+                    command.arg("--config");
+                    command.arg(format!("model_reasoning_effort={}", serde_json::to_string(effort).expect("string serialization")));
+                }
                 if let Some(model_name) =
                     normalized_value(Some(context.model.clone().unwrap_or_default()))
                 {
@@ -95,6 +119,10 @@ impl ExternalCli {
                 command.arg("--format");
                 command.arg("json");
                 command.arg("--thinking");
+                if let Some(effort) = &self.reasoning_effort {
+                    command.arg("--variant");
+                    command.arg(effort);
+                }
                 if let Some(session_id) = resume_session_id {
                     command.arg("--session");
                     command.arg(session_id);
