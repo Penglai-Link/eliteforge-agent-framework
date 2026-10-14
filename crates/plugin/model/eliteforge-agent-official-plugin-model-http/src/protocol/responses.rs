@@ -77,6 +77,8 @@ pub fn responses_request(config: &AgentModelConfig, request: &ModelRequest) -> V
             reasoning["effort"] = json!(reasoning_effort.provider_value());
         }
         payload["reasoning"] = reasoning;
+    } else if config.reasoning_effort == Some(crate::ReasoningEffort::None) {
+        payload["reasoning"] = json!({ "effort": "none" });
     }
     if !request.tools.is_empty() {
         payload["tools"] =

@@ -89,9 +89,13 @@ pub fn chat_completions_request(config: &AgentModelConfig, request: &ModelReques
     if let Some(top_p) = config.top_p {
         payload["top_p"] = json!(top_p);
     }
+    // Omitting these fields lets providers apply their own thinking default.
+    // Preserve the caller's explicit choice in both directions.
+    payload["enable_thinking"] = json!(config.thinking_enabled);
+    payload["thinking"] = json!({
+        "type": if config.thinking_enabled { "enabled" } else { "disabled" }
+    });
     if config.thinking_enabled {
-        payload["enable_thinking"] = json!(true);
-        payload["thinking"] = json!({ "type": "enabled" });
         if let Some(reasoning_effort) = config.reasoning_effort {
             payload["reasoning_effort"] = json!(reasoning_effort.provider_value());
         }
@@ -141,14 +145,7 @@ fn parse_chat_response(body: &Value) -> Option<ModelResponse> {
             response_id,
         ));
     }
-    if parts.is_empty()
-        && let Some(output) = message
-            .get("reasoning_content")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    {
-        parts.push(AgentMessagePart::Text { text: output });
-    }
+    // Raw reasoning is not an answer, even when the provider returns no content.
     (!parts.is_empty()).then(|| {
         ModelResponse::from_assistant(
             AgentMessage::new("assistant", parts),
