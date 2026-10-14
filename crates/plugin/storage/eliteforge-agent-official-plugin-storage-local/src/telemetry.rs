@@ -1,4 +1,6 @@
 //! Dedicated telemetry storage plugin using the shared SQLite runtime.
+#[path = "telemetry_rollups.rs"]
+mod rollups;
 mod query;
 use crate::SqliteDatabase;
 use async_trait::async_trait;
@@ -47,10 +49,18 @@ impl SqliteTelemetryStore {
         CREATE INDEX IF NOT EXISTS ef_telemetry_traces_workspace_time ON ef_telemetry_traces(json_extract(attributes,'$.\"tron.workspace.code\"'),started_at DESC,trace_id DESC);
         CREATE INDEX IF NOT EXISTS ef_telemetry_traces_retention ON ef_telemetry_traces(COALESCE(ended_at,started_at) DESC,trace_id DESC) WHERE ended_at IS NOT NULL;
         CREATE TABLE IF NOT EXISTS ef_telemetry_spans(trace_id TEXT NOT NULL REFERENCES ef_telemetry_traces(trace_id) ON DELETE CASCADE,span_id TEXT NOT NULL,ended_at INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(trace_id,span_id));
+        CREATE INDEX IF NOT EXISTS ef_telemetry_spans_parent ON ef_telemetry_spans(trace_id,json_extract(data,'$.parentSpanId'),span_id);
+        CREATE INDEX IF NOT EXISTS ef_telemetry_agent_roots_time ON ef_telemetry_spans(json_extract(data,'$.startedAt') DESC,trace_id,span_id) WHERE json_extract(data,'$.name') IN ('tron.session.run','tron.dude.execute');
+        CREATE INDEX IF NOT EXISTS ef_telemetry_agent_roots_workspace ON ef_telemetry_spans(json_extract(data,'$.attributes.\"tron.workspace.code\"'),json_extract(data,'$.startedAt') DESC,trace_id,span_id) WHERE json_extract(data,'$.name') IN ('tron.session.run','tron.dude.execute');
+        CREATE INDEX IF NOT EXISTS ef_telemetry_agent_roots_session ON ef_telemetry_spans(json_extract(data,'$.attributes.\"tron.session.code\"'),json_extract(data,'$.startedAt') DESC,trace_id,span_id) WHERE json_extract(data,'$.name') IN ('tron.session.run','tron.dude.execute');
+        CREATE INDEX IF NOT EXISTS ef_telemetry_page_roots_time ON ef_telemetry_traces(started_at DESC,trace_id) WHERE json_extract(attributes,'$.\"tron.trace.page\"')='true';
+        CREATE TABLE IF NOT EXISTS ef_telemetry_span_rollups(trace_id TEXT NOT NULL REFERENCES ef_telemetry_traces(trace_id) ON DELETE CASCADE,span_id TEXT NOT NULL,parent_id TEXT,own_span_count INTEGER NOT NULL DEFAULT 0,own_error_count INTEGER NOT NULL DEFAULT 0,own_model_count INTEGER NOT NULL DEFAULT 0,own_tool_count INTEGER NOT NULL DEFAULT 0,own_input_tokens INTEGER NOT NULL DEFAULT 0,own_cached_input_tokens INTEGER NOT NULL DEFAULT 0,own_output_tokens INTEGER NOT NULL DEFAULT 0,span_count INTEGER NOT NULL DEFAULT 0,error_count INTEGER NOT NULL DEFAULT 0,model_count INTEGER NOT NULL DEFAULT 0,tool_count INTEGER NOT NULL DEFAULT 0,input_tokens INTEGER NOT NULL DEFAULT 0,cached_input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(trace_id,span_id));
+        CREATE TABLE IF NOT EXISTS ef_telemetry_trace_rollups(trace_id TEXT PRIMARY KEY REFERENCES ef_telemetry_traces(trace_id) ON DELETE CASCADE,span_count INTEGER NOT NULL DEFAULT 0,error_count INTEGER NOT NULL DEFAULT 0,model_count INTEGER NOT NULL DEFAULT 0,tool_count INTEGER NOT NULL DEFAULT 0,input_tokens INTEGER NOT NULL DEFAULT 0,cached_input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS ef_telemetry_metric_points(point_id TEXT PRIMARY KEY,name TEXT NOT NULL,timestamp INTEGER NOT NULL,data TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS ef_telemetry_metric_time ON ef_telemetry_metric_points(timestamp DESC);
         CREATE INDEX IF NOT EXISTS ef_telemetry_metric_name ON ef_telemetry_metric_points(name,timestamp DESC);
         UPDATE ef_telemetry_traces SET abandoned=1,ended_at=COALESCE((SELECT MAX(ended_at) FROM ef_telemetry_spans s WHERE s.trace_id=ef_telemetry_traces.trace_id),started_at) WHERE ended_at IS NULL;")}).await.map_err(error)?;
+        database.call(rollups::backfill).await.map_err(error)?;
         let store = Self {
             database,
             retention,
@@ -99,6 +109,7 @@ impl TelemetryStore for SqliteTelemetryStore {
             for s in spans {
                 let root=s.parent_span_id.is_none();
                 tx.execute("INSERT INTO ef_telemetry_traces VALUES(?1,?2,?3,?4,?5,0) ON CONFLICT(trace_id) DO UPDATE SET started_at=MIN(started_at,excluded.started_at),ended_at=CASE WHEN ?6 THEN CASE WHEN ended_at IS NULL THEN excluded.ended_at ELSE MAX(ended_at,excluded.ended_at) END ELSE ended_at END,status_code=CASE WHEN ?6 THEN MAX(status_code,excluded.status_code) ELSE status_code END,attributes=CASE WHEN ?6 THEN json_patch(attributes,excluded.attributes) ELSE attributes END,abandoned=CASE WHEN ?6 THEN 0 ELSE abandoned END",params![s.trace_id,s.started_at,root.then_some(s.ended_at),s.status_code,serde_json::to_string(&s.attributes).map_err(|_|rusqlite::Error::InvalidQuery)?,root])?;
+                rollups::write(&tx,&s)?;
                 let json=serde_json::to_string(&s).map_err(|_|rusqlite::Error::InvalidQuery)?;
                 tx.execute("INSERT OR REPLACE INTO ef_telemetry_spans VALUES(?1,?2,?3,?4)",params![s.trace_id,s.span_id,s.ended_at,json])?;
             }
