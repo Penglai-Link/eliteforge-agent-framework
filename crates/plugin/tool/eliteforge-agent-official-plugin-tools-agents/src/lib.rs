@@ -25,6 +25,8 @@ struct SpawnInput {
     agent_code: Option<String>,
     task: String,
     #[serde(default)]
+    background: bool,
+    #[serde(default)]
     max_total_tokens: Option<u64>,
 }
 
@@ -241,15 +243,18 @@ impl AgentSpawnTool {
         ToolDescriptor::new(
             "agent.spawn",
             "agent_spawn",
-            "Delegate one focused task to a child agent and wait for its result. Step and tool-call limits are resolved by the host from the target Agent configuration; do not set them in the task unless the user explicitly requests a task constraint.",
+            "Delegate one focused task. By default, wait for the child result when it is needed before continuing. Set background=true when the task can run in parallel; the tool returns a thread identifier immediately so you can continue other work and call thread_wait later. Step and tool-call limits are resolved by the host from the target Agent configuration; do not set them in the task unless the user explicitly requests a task constraint.",
             json!({
                 "type":"object","additionalProperties":false,"required":["task"],"properties":{
                     "task":{"type":"string","minLength":1,"maxLength":16384},
                     "agentCode":{"type":"string","minLength":1,"maxLength":256,"description":"Target Agent code from the available Agent directory. Omit to use the current Agent. The host resolves configuration and checks authorization."},
+                    "background":{"type":"boolean","description":"Return immediately with a thread identifier so work can continue in parallel. Default: false."},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
-        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+        )
+            .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+            .with_timeout_scope(eliteforge_agent_core::ToolTimeoutScope::Run)
     }
 }
 
@@ -263,6 +268,11 @@ impl Tool for AgentSpawnTool {
         let runtime = runtime(context)?;
         let mut run = request(task, limits(None, input.max_total_tokens, context)?);
         run.agent_code = agent_code;
+        if input.background {
+            return Ok(thread_summary(
+                runtime.create_thread(run, None, context).await.map_err(failed)?,
+            ));
+        }
         let result = runtime.spawn_child(run, context).await.map_err(failed)?;
         Ok(spawn_result(result))
     }
@@ -276,7 +286,7 @@ impl ThreadCreateTool {
         ToolDescriptor::new(
             "thread.create",
             "thread_create",
-            "Start an independent, addressable agent thread. Returns immediately while it runs.",
+            "Start an independent, addressable agent thread for work that can run in parallel. Returns immediately; continue other work, then use thread_wait when its result is needed.",
             json!({
                 "type":"object","additionalProperties":false,"required":["task"],"properties":{
                     "task":{"type":"string","minLength":1,"maxLength":16384},
@@ -414,7 +424,9 @@ impl ThreadWaitTool {
                     "run_id":{"type":"string","format":"uuid"}
                 }
             }),
-        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+        )
+            .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+            .with_timeout_scope(eliteforge_agent_core::ToolTimeoutScope::Run)
     }
 }
 

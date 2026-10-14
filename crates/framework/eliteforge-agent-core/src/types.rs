@@ -215,6 +215,16 @@ pub enum ToolOperationKind {
     Command,
 }
 
+/// Selects the deadline for the tool body after admission. Tools that wait for
+/// another Agent use the enclosing run deadline instead of the ordinary tool
+/// timeout; user cancellation still interrupts the wait.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolTimeoutScope {
+    #[default]
+    Tool,
+    Run,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolDescriptor {
     /// Stable host/catalog identity; never inferred from the model call name.
@@ -226,6 +236,8 @@ pub struct ToolDescriptor {
     /// A declaration, not a guarantee that the executor cannot modify data.
     #[serde(default)]
     pub operation_kind: ToolOperationKind,
+    #[serde(default)]
+    pub timeout_scope: ToolTimeoutScope,
 }
 
 impl ToolDescriptor {
@@ -241,11 +253,17 @@ impl ToolDescriptor {
             description: description.into(),
             input_schema,
             operation_kind: ToolOperationKind::Unknown,
+            timeout_scope: ToolTimeoutScope::Tool,
         }
     }
 
     pub fn with_operation_kind(mut self, operation_kind: ToolOperationKind) -> Self {
         self.operation_kind = operation_kind;
+        self
+    }
+
+    pub fn with_timeout_scope(mut self, timeout_scope: ToolTimeoutScope) -> Self {
+        self.timeout_scope = timeout_scope;
         self
     }
 }
@@ -599,7 +617,7 @@ impl Default for RunLimits {
             max_context_tokens: 32_000,
             model_timeout: std::time::Duration::from_secs(120),
             tool_timeout: std::time::Duration::from_secs(60),
-            run_timeout: std::time::Duration::from_secs(3600),
+            run_timeout: std::time::Duration::from_secs(3 * 24 * 60 * 60),
             max_total_tokens: 1_000_000,
             max_model_output_tokens: 4096,
             cleanup_timeout: std::time::Duration::from_secs(5),

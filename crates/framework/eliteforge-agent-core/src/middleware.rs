@@ -736,6 +736,7 @@ impl ToolInvoker {
         context: &RunContext,
         timeout: std::time::Duration,
     ) -> Result<ToolOutput, ToolError> {
+        let run_scoped = binding.descriptor.timeout_scope == crate::ToolTimeoutScope::Run;
         if context.is_tool_revoked(&binding.descriptor.id) {
             return Err(ToolError::Failed("tool was revoked".into()));
         }
@@ -768,7 +769,10 @@ impl ToolInvoker {
         let _admission = tokio::select! {
             biased;
             _ = context.cancelled() => return Err(ToolError::Failed("tool cancelled before dispatch".into())),
-            result = tokio::time::timeout(timeout, admission) => result
+            result = tokio::time::timeout_at(
+                if run_scoped { context.deadline } else { tokio::time::Instant::now() + timeout },
+                admission,
+            ) => result
                 .map_err(|_| ToolError::Failed("tool admission timed out before dispatch".into()))??,
         };
         let invocation = ToolInvocationContext {
@@ -783,8 +787,16 @@ impl ToolInvoker {
             invocation: &invocation,
             binding,
             execution: &execution,
-            deadline: tokio::time::Instant::now() + timeout,
-            cleanup_timeout: timeout,
+            deadline: if run_scoped {
+                context.deadline
+            } else {
+                tokio::time::Instant::now() + timeout
+            },
+            cleanup_timeout: if run_scoped {
+                context.limits().cleanup_timeout
+            } else {
+                timeout
+            },
         }
         .run()
         .await;
