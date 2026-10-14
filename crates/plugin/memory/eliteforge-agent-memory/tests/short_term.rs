@@ -165,37 +165,56 @@ fn scoped_projection_write_restore_and_stale_results_never_cross_users_or_sessio
 
 #[test]
 fn block_bound_keeps_the_largest_feasible_target_including_json_framing() {
-    let scope = MemoryScope::new("workspace", "session").unwrap();
-    let mut budgets = ContextBlockBudgets::default();
-    budgets.current_session_checkpoint.max_tokens = Some(80);
-    budgets.current_session_checkpoint.max_ratio_bps = None;
-    let source = MemorySnapshot {
-        revision: MemoryRevision {
-            scope: scope.clone(),
-            generation: "source".into(),
-            revision: 1,
-        },
-        blocks: vec![MemoryBlock {
-            kind: MemoryBlockKind::CurrentSessionCheckpoint,
-            entries: vec!["x".repeat(200)],
-        }],
-    };
-    let assembled = ShortTermMemoryEngine::assemble(
-        &source,
-        &scope,
-        &budgets.plan(1_000, 100),
-        estimate_serialized_tokens,
-        |text, target| bound_text(&text, target as usize),
-    )
-    .unwrap();
-    let report = assembled
-        .reports
-        .iter()
-        .find(|r| r.kind == MemoryBlockKind::CurrentSessionCheckpoint)
+    for text in ["x".repeat(200), "文".repeat(200)] {
+        let scope = MemoryScope::new("workspace", "session").unwrap();
+        let mut budgets = ContextBlockBudgets::default();
+        budgets.current_session_checkpoint.max_tokens = Some(80);
+        budgets.current_session_checkpoint.max_ratio_bps = None;
+        let source = MemorySnapshot {
+            revision: MemoryRevision {
+                scope: scope.clone(),
+                generation: "source".into(),
+                revision: 1,
+            },
+            blocks: vec![MemoryBlock {
+                kind: MemoryBlockKind::CurrentSessionCheckpoint,
+                entries: vec![text.clone()],
+            }],
+        };
+        let assembled = ShortTermMemoryEngine::assemble(
+            &source,
+            &scope,
+            &budgets.plan(1_000, 100),
+            |text| {
+                estimate_serialized_tokens(&serde_json::json!({"metadata":"source","text":text}))
+            },
+            |text, target| bound_text(&text, target as usize),
+        )
         .unwrap();
-    assert_eq!(report.tokens, 80);
-    assert_eq!(report.entries, 1);
-    assert_eq!(source.blocks[0].entries[0].len(), 200);
+        let report = assembled
+            .reports
+            .iter()
+            .find(|r| r.kind == MemoryBlockKind::CurrentSessionCheckpoint)
+            .unwrap();
+        let estimate = |text: &str| {
+            estimate_serialized_tokens(&serde_json::json!({"metadata":"source","text":text}))
+        };
+        // Exhaustively verify the bound contract rather than assuming the text's
+        // character count equals its serialized Unicode-aware token estimate.
+        let (target, expected) = (0..=80)
+            .map(|target| (target, bound_text(&text, target)))
+            .filter(|(_, candidate)| estimate(candidate) <= 80)
+            .last()
+            .unwrap();
+        assert_eq!(assembled.messages, vec![expected.clone()]);
+        assert_eq!(report.tokens, estimate(&expected));
+        assert!(report.tokens <= 80);
+        if target < 80 {
+            assert!(estimate(&bound_text(&text, target + 1)) > 80);
+        }
+        assert_eq!(report.entries, 1);
+        assert_eq!(source.blocks[0].entries[0], text);
+    }
 }
 
 #[test]
