@@ -5,7 +5,7 @@ use eliteforge_agent_official_plugin_model_http::{
 use serde_json::json;
 
 #[test]
-fn chat_requests_explicitly_enable_or_disable_thinking() {
+fn chat_requests_only_override_thinking_when_enabled() {
     let request = ModelRequest {
         messages: vec![AgentMessage::user("Generate a title")],
         tools: vec![],
@@ -29,14 +29,13 @@ fn chat_requests_explicitly_enable_or_disable_thinking() {
                 .stream_request_body(&config, &request)
                 .unwrap(),
         ] {
-            assert_eq!(body["enable_thinking"], json!(enabled));
-            assert_eq!(
-                body["thinking"]["type"],
-                if enabled { "enabled" } else { "disabled" }
-            );
             if enabled {
+                assert_eq!(body["enable_thinking"], json!(true));
+                assert_eq!(body["thinking"]["type"], "enabled");
                 assert_eq!(body["reasoning_effort"], "high");
             } else {
+                assert!(body.get("enable_thinking").is_none());
+                assert!(body.get("thinking").is_none());
                 assert!(body.get("reasoning_effort").is_none());
             }
         }

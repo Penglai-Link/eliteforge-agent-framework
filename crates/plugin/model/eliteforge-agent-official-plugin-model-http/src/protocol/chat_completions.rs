@@ -89,13 +89,9 @@ pub fn chat_completions_request(config: &AgentModelConfig, request: &ModelReques
     if let Some(top_p) = config.top_p {
         payload["top_p"] = json!(top_p);
     }
-    // Omitting these fields lets providers apply their own thinking default.
-    // Preserve the caller's explicit choice in both directions.
-    payload["enable_thinking"] = json!(config.thinking_enabled);
-    payload["thinking"] = json!({
-        "type": if config.thinking_enabled { "enabled" } else { "disabled" }
-    });
     if config.thinking_enabled {
+        payload["enable_thinking"] = json!(true);
+        payload["thinking"] = json!({ "type": "enabled" });
         if let Some(reasoning_effort) = config.reasoning_effort {
             payload["reasoning_effort"] = json!(reasoning_effort.provider_value());
         }
