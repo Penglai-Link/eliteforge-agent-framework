@@ -55,24 +55,29 @@ fn raw_reasoning_is_never_promoted_to_answer_text() {
 }
 
 #[test]
-fn responses_can_explicitly_disable_reasoning_without_requesting_a_summary() {
-    let config: AgentModelConfig = serde_json::from_value(json!({
-        "modelCode":"fixture", "protocol":"RESPONSES",
-        "baseUrl":"https://unused.invalid", "apiKey":"", "modelName":"fixture",
-        "thinkingEnabled":false, "reasoningEffort":"None"
-    }))
-    .unwrap();
+fn responses_requests_only_override_thinking_when_enabled() {
     let request: ModelRequest = serde_json::from_value(json!({
-        "messages":[], "tools":[]
+        "messages":[{"role":"user","parts":[{"type":"text","text":"Generate a title"}]}], "tools":[]
     }))
     .unwrap();
-    for body in [
-        ResponsesAdapter.request_body(&config, &request).unwrap(),
-        ResponsesAdapter
-            .stream_request_body(&config, &request)
-            .unwrap(),
-    ] {
-        assert_eq!(body["reasoning"], json!({"effort":"none"}));
-        assert!(body.get("enable_thinking").is_none());
+    for (enabled, effort) in [(false, "None"), (true, "High")] {
+        let config: AgentModelConfig = serde_json::from_value(json!({
+            "modelCode":"fixture", "protocol":"RESPONSES",
+            "baseUrl":"https://unused.invalid", "apiKey":"", "modelName":"fixture",
+            "thinkingEnabled":enabled, "reasoningEffort":effort
+        }))
+        .unwrap();
+        for body in [
+            ResponsesAdapter.request_body(&config, &request).unwrap(),
+            ResponsesAdapter
+                .stream_request_body(&config, &request)
+                .unwrap(),
+        ] {
+            if enabled {
+                assert_eq!(body["reasoning"]["effort"], "high");
+            } else {
+                assert!(body.get("reasoning").is_none());
+            }
+        }
     }
 }
