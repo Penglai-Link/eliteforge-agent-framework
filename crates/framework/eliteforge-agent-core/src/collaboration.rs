@@ -156,6 +156,15 @@ pub struct ThreadView {
 /// authorization rules.
 #[async_trait]
 pub trait AgentCollaborationRuntime: Send + Sync {
+    /// Read one currently authorized target's configuration without starting it.
+    async fn agent_details(
+        &self,
+        _agent_code: &str,
+        _parent: &RunContext,
+    ) -> Result<serde_json::Value, AgentError> {
+        Err(AgentError::InvalidConfiguration("Agent details lookup is unavailable".into()))
+    }
+
     async fn spawn_child(
         &self,
         request: RunRequest,

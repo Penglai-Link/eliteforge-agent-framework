@@ -365,6 +365,94 @@ fn tools(count: Arc<AtomicUsize>, large: bool) -> ToolProviderPlugin {
         ToolDescriptor::new("work", "work", "Work", json!({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]})),
         Work { count, large }).parallel_safe()]))
 }
+
+struct GatedStepModel {
+    step: AtomicUsize,
+    releases: Vec<Arc<Notify>>,
+}
+#[async_trait]
+impl ChatModel for GatedStepModel {
+    async fn generate(
+        &self,
+        _: &str,
+        _: ChatRequest,
+        stream: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        let step = self.step.fetch_add(1, Ordering::SeqCst);
+        let summary = ["Checking files", "Checking dependencies", "Final answer"][step];
+        stream.text_delta(summary).await;
+        self.releases[step].notified().await;
+        let mut response = ChatResponse::text(summary);
+        if step < 2 {
+            response.tool_calls.push(ToolCall::new(
+                format!("step-{step}"),
+                "work",
+                json!({"value":"input"}),
+            ));
+        }
+        Ok(response)
+    }
+}
+
+#[tokio::test]
+async fn each_model_step_streams_a_distinct_message_before_final_completion() {
+    let releases = (0..3).map(|_| Arc::new(Notify::new())).collect::<Vec<_>>();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = TestBuilder::default()
+        .plugin(AgUiPlugin::default())
+        .plugin(ChatModelPlugin::new(GatedStepModel {
+            step: AtomicUsize::new(0),
+            releases: releases.clone(),
+        }))
+        .plugin(tools(calls.clone(), false))
+        .build()
+        .await
+        .unwrap();
+    let (handle, mut stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("step-timing", "task"))
+        .unwrap();
+    let mut events = Vec::new();
+    let mut message_ids = BTreeSet::new();
+    for (step, expected) in ["Checking files", "Checking dependencies", "Final answer"]
+        .iter()
+        .enumerate()
+    {
+        let id = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = stream
+                    .recv()
+                    .await
+                    .expect("stream ended at a held model step");
+                let found = match &event {
+                    Event::TextMessageContent(content) if content.delta == *expected => {
+                        Some(content.message_id.to_string())
+                    }
+                    _ => None,
+                };
+                events.push(event);
+                if let Some(id) = found {
+                    break id;
+                }
+            }
+        })
+        .await
+        .expect("a step's text must be delivered while its model is still running");
+        assert!(message_ids.insert(id));
+        assert_eq!(types(&events, EventType::TextMessageStart), step + 1);
+        assert_eq!(types(&events, EventType::TextMessageEnd), step);
+        assert_eq!(types(&events, EventType::RunFinished), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), step);
+        releases[step].notify_one();
+    }
+    let (result, tail) = complete(agent.clone(), handle, stream).await;
+    events.extend(tail);
+    assert_eq!(result.unwrap().output, "Final answer");
+    assert_eq!(types(&events, EventType::TextMessageStart), 3);
+    assert_eq!(types(&events, EventType::TextMessageEnd), 3);
+    validate_client(&events).await;
+    agent.framework().close().await;
+}
+
 #[tokio::test]
 async fn offloaded_tool_results_preserve_reference_and_tool_lifecycle() {
     use eliteforge_agent_context::ToolOutputOffloader;

@@ -129,6 +129,7 @@ impl Plugin for SkillsPlugin {
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
         let runtime = Arc::new(SkillsRuntime::new(self.selection.clone()));
         context.provide(SkillsRuntimeService(runtime.clone()))?;
+        context.provide(eliteforge_agent_core::ExplicitSkillSelectionSupport)?;
         if let Some(provider) = &self.provider {
             context.contribute_extension(provider.clone())?;
         }
@@ -1031,6 +1032,9 @@ struct SkillsEndpoint {
 
 #[async_trait]
 impl ContextContributor for SkillsEndpoint {
+    fn supports_requested_skills(&self) -> bool {
+        true
+    }
     fn kind(&self) -> ContextSourceKind {
         ContextSourceKind::Instruction
     }
@@ -1044,7 +1048,17 @@ impl ContextContributor for SkillsEndpoint {
         // the normal skill_load path again.
         self.runtime.finish_recovery(context);
         let snapshot = self.runtime.snapshot(context).await?;
-        if snapshot.skills.is_empty() {
+        let requested = context
+            .extensions
+            .get::<eliteforge_agent_core::RequestedSkills>()
+            .map(|selected| selected.names())
+            .unwrap_or_default();
+        let mut explicit = Vec::new();
+        for name in &requested {
+            // load rechecks the immutable permission snapshot and the current provider grants.
+            explicit.push(self.runtime.load(context, name).await?);
+        }
+        if snapshot.skills.is_empty() && explicit.is_empty() {
             return Ok(ContextBlock::instructions(self.block_id(), Vec::new()));
         }
         let skills = snapshot
@@ -1058,12 +1072,18 @@ impl ContextContributor for SkillsEndpoint {
             })
             .collect::<Vec<_>>();
         let metadata = serialize_catalog_for_context(&skills)?;
-        Ok(ContextBlock::instructions(
-            self.block_id(),
-            vec![Message::system(format!(
-                "Available skills are metadata only. Load a skill with `skill_load` before following its instructions. After loading it, use `skill_read_resource` for a listed file when needed. Loading a skill never executes scripts.\n<available_skills>{metadata}</available_skills>"
-            ))],
-        ))
+        let mut messages = vec![Message::system(format!(
+            "Available skills are metadata only. Load a skill with `skill_load` before following its instructions. After loading it, use `skill_read_resource` for a listed file when needed. Loading a skill never executes scripts.\n<available_skills>{metadata}</available_skills>"
+        ))];
+        if !explicit.is_empty() {
+            let explicit = serde_json::to_string(&explicit)
+                .map_err(|_| AgentError::Run("serialize requested skills failed".into()))?
+                .replace('&', "\\u0026")
+                .replace('<', "\\u003c")
+                .replace('>', "\\u003e");
+            messages.push(Message::system(format!("The user explicitly selected these skills for this run. Follow their loaded instructions and use skill_read_resource for listed resources. Selection never grants tool permissions or executes scripts.\n<requested_skills>{explicit}</requested_skills>")));
+        }
+        Ok(ContextBlock::instructions(self.block_id(), messages))
     }
 }
 
@@ -1106,7 +1126,39 @@ impl RunMiddleware for SkillsEndpoint {
                 .begin_recovery(context, next.services.state.as_deref())
                 .await?;
         }
-        let result = next.run().await;
+        let admission = async {
+            if request.resume.is_some() {
+                if let Some(state) = next.services.state.as_deref() {
+                    let saved = state.load(context.run_id).await?;
+                    if let Some(value) = saved.state.get("request") {
+                        let saved_request: eliteforge_agent_core::RunRequest =
+                            serde_json::from_value(value.clone()).map_err(|_| {
+                                AgentError::Run("invalid saved skill selection".into())
+                            })?;
+                        if let Some(selected) = context
+                            .extensions
+                            .get::<eliteforge_agent_core::RequestedSkills>()
+                        {
+                            selected.extend(&saved_request.requested_skills)?;
+                        }
+                    }
+                }
+            }
+            let names = context
+                .extensions
+                .get::<eliteforge_agent_core::RequestedSkills>()
+                .map(|selected| selected.names())
+                .unwrap_or_else(|| request.requested_skills.clone());
+            for name in names {
+                self.runtime.load(context, &name).await?;
+            }
+            Ok::<(), AgentError>(())
+        }
+        .await;
+        let result = match admission {
+            Ok(()) => next.run().await,
+            Err(error) => Err(error),
+        };
         self.runtime.finish_recovery(context);
         let retain_snapshot = result.as_ref().is_ok_and(|result| {
             matches!(

@@ -83,6 +83,8 @@ impl From<&Usage> for HistoryUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryMessage {
+    #[serde(default)]
+    pub requested_skills: Vec<String>,
     pub id: String,
     pub run_id: RunId,
     pub step_id: Option<String>,
@@ -99,6 +101,10 @@ impl HistoryMessage {
         self.provenance = provenance;
         self
     }
+    pub fn with_requested_skills(mut self, names: Vec<String>) -> Self {
+        self.requested_skills = names;
+        self
+    }
     pub fn user(run_id: RunId, content: &Content) -> Self {
         Self {
             id: RunId::new_v4().to_string(),
@@ -106,6 +112,7 @@ impl HistoryMessage {
             step_id: None,
             role: Role::User,
             provenance: None,
+            requested_skills: Vec::new(),
             content: history_content(content),
             structured: None,
             status: HistoryStatus::Completed,

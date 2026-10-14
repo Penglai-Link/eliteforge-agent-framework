@@ -23,6 +23,50 @@ impl SkillAccess {
     }
 }
 
+/// Installed skill runtime capability, supplied by an explicit-loading plugin.
+#[derive(Clone, Copy)]
+pub struct ExplicitSkillSelectionSupport;
+
+/// User intent for this logical run. This never grants permission to a skill.
+/// Shared only inside one execution; durable identity lives in RunRequest.
+#[derive(Clone, Default)]
+pub struct RequestedSkills(std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>);
+impl RequestedSkills {
+    pub fn names(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .cloned()
+            .collect()
+    }
+    pub fn extend(&self, names: &[String]) -> Result<(), AgentError> {
+        let mut selected = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = selected.clone();
+        for name in names {
+            if name.is_empty()
+                || name.chars().count() > 64
+                || name.trim() != name
+                || !name
+                    .chars()
+                    .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            {
+                return Err(AgentError::InvalidConfiguration(
+                    "invalid requested skill name".into(),
+                ));
+            }
+            next.insert(name.clone());
+        }
+        if next.len() > 32 {
+            return Err(AgentError::InvalidConfiguration(
+                "at most 32 explicit skills may be selected per run".into(),
+            ));
+        }
+        *selected = next;
+        Ok(())
+    }
+}
+
 /// Lightweight metadata exposed to a model before a skill is activated.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

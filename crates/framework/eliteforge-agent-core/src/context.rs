@@ -63,6 +63,11 @@ pub enum ContextSourceKind {
 #[crate::extension_point(adapter = crate::ContextContributorPlugin, contribute)]
 #[async_trait]
 pub trait ContextContributor: Send + Sync {
+    /// True when this source loads and contributes explicit user-selected skills.
+    fn supports_requested_skills(&self) -> bool {
+        false
+    }
+
     fn kind(&self) -> ContextSourceKind {
         ContextSourceKind::Data
     }

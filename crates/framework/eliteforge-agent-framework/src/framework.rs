@@ -29,6 +29,9 @@ pub struct AgentSelection {
     /// Optional tool-ID restriction within the selected providers.
     pub tools: Option<Vec<String>>,
     pub skills: Option<Vec<String>>,
+    /// Use a required, trusted SkillAccess supplied for every execution instead
+    /// of the static list. The provider still authorizes every load/resource read.
+    pub skills_from_host: bool,
     pub outputs: Option<Vec<String>>,
     pub context_sources: Option<Vec<String>>,
     pub workflow_nodes: Option<Vec<String>>,

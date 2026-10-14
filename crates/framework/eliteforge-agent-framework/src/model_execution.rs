@@ -173,6 +173,7 @@ impl AgentLoop for ModelExecutionLoop {
             if context.node_execution().is_none() {
                 checkpoint.history.messages.push(
                     HistoryMessage::user(context.run_id, &request.input)
+                        .with_requested_skills(request.requested_skills.clone())
                         .with_provenance(request.message_provenance.clone()),
                 );
             }
@@ -298,6 +299,13 @@ impl AgentLoop for ModelExecutionLoop {
                 ));
             }
             state.request.limits.validate()?;
+            if !state.request.requested_skills.is_empty() && context.extensions.get::<ExplicitSkillSelectionSupport>().is_none() {
+                return Err(AgentError::InvalidConfiguration("restored explicit skills require an installed skills runtime".into()));
+            }
+            if let Some(selected) = context.extensions.get::<RequestedSkills>() {
+                selected.extend(&state.request.requested_skills)?;
+                state.request.requested_skills = selected.names();
+            }
             if request.resume.is_some() && context.lineage.depth == 0 && context.node_execution.is_none()
                 && let Some(counter) = context.extensions.get::<ModelDispatchCounter>()
             {
@@ -824,10 +832,28 @@ impl ModelExecutionRuntime<'_> {
         }
         Ok(())
     }
-    async fn record_steering(&mut self, pending: Vec<Content>) -> Result<(), AgentError> {
+    async fn record_steering(&mut self, pending: Vec<LiveInput>) -> Result<(), AgentError> {
         for input in pending {
+            if !input.requested_skills.is_empty()
+                && self
+                    .context
+                    .extensions
+                    .get::<ExplicitSkillSelectionSupport>()
+                    .is_none()
+            {
+                return Err(AgentError::InvalidConfiguration(
+                    "live explicit skills require an installed skills runtime".into(),
+                ));
+            }
+            if let Some(selected) = self.context.extensions.get::<RequestedSkills>() {
+                selected.extend(&input.requested_skills)?;
+                self.state.request.requested_skills = selected.names();
+            }
+            let requested_skills = input.requested_skills;
+            let input = input.content;
             self.checkpoint.history.messages.push(
                 HistoryMessage::user(self.context.run_id, &input)
+                    .with_requested_skills(requested_skills)
                     .with_provenance(self.context.message_provenance()),
             );
             self.checkpoint.transcript.push(
@@ -895,9 +921,14 @@ impl ModelExecutionRuntime<'_> {
                             .stop(RunStatus::StepLimit, ExecutionStatus::Completed)
                             .await;
                     }
-                    let mut steering = self.context.take_steering_content();
+                    let mut steering: Vec<LiveInput> = self
+                        .context
+                        .take_steering_content()
+                        .into_iter()
+                        .map(LiveInput::from)
+                        .collect();
                     if let Some(source) = self.context.extensions.get::<LiveInputSourceService>() {
-                        steering.extend(source.0.drain(self.context, false).await?);
+                        steering.extend(source.0.drain_inputs(self.context, false).await?);
                     }
                     self.record_steering(steering).await?;
                     let stage = &self.state.definition.stages[self.state.stage];
@@ -990,16 +1021,29 @@ impl ModelExecutionRuntime<'_> {
                         }
                         self.checkpoint.transcript.push(assistant);
                         if self.state.stage + 1 == self.state.definition.stages.len() {
-                            let mut steering = self.context.take_steering_content();
+                            let mut steering: Vec<LiveInput> = self
+                                .context
+                                .take_steering_content()
+                                .into_iter()
+                                .map(LiveInput::from)
+                                .collect();
                             if let Some(source) =
                                 self.context.extensions.get::<LiveInputSourceService>()
                             {
                                 steering.extend(
-                                    source.0.drain(self.context, steering.is_empty()).await?,
+                                    source
+                                        .0
+                                        .drain_inputs(self.context, steering.is_empty())
+                                        .await?,
                                 );
                             }
                             if steering.is_empty() {
-                                steering = self.context.pending_content_or_seal();
+                                steering = self
+                                    .context
+                                    .pending_content_or_seal()
+                                    .into_iter()
+                                    .map(LiveInput::from)
+                                    .collect();
                             }
                             if steering.is_empty() {
                                 return self

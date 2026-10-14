@@ -1666,7 +1666,7 @@ async fn shared_framework_keeps_agent_skill_permissions_separate() {
         assert_eq!(first.values.len(), 1);
         assert!(first.errors.is_empty());
         assert_eq!(second.errors.len(), 1);
-        assert!(second.errors[0].contains("not enabled"));
+        assert!(second.errors[0].contains("not exposed"));
         assert!(second.values.is_empty());
         assert!(first.context.iter().any(|text| text.contains("allowed")));
         assert!(
@@ -1675,7 +1675,7 @@ async fn shared_framework_keeps_agent_skill_permissions_separate() {
                 .iter()
                 .all(|text| !text.contains("Other skill"))
         );
-        assert!(second.context.iter().any(|text| text.contains("other")));
+        assert!(second.context.iter().all(|text| !text.contains("other")));
         assert!(
             second
                 .context
@@ -1686,4 +1686,268 @@ async fn shared_framework_keeps_agent_skill_permissions_separate() {
     a.close().await;
     assert!(!b.is_closed());
     assert!(framework.close().await.is_success());
+}
+
+struct ExplicitSelectionModel(Arc<Mutex<Vec<ChatRequest>>>);
+#[async_trait]
+impl ChatModel for ExplicitSelectionModel {
+    async fn generate(
+        &self,
+        _: &str,
+        request: ChatRequest,
+        _: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        self.0.lock().unwrap().push(request);
+        Ok(ChatResponse::text("selected reply"))
+    }
+}
+
+#[tokio::test]
+async fn explicit_selection_loads_only_authorized_instructions_before_the_first_model_call() {
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join("local");
+    write_skill(
+        &local,
+        "代码审查",
+        "Review changes",
+        "EXPLICIT_INSTRUCTIONS",
+    );
+    write_skill(&local, "other", "Other metadata", "UNSELECTED_INSTRUCTIONS");
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let agent = TestBuilder::new()
+        .skills(["代码审查", "other"])
+        .default_models(false)
+        .plugin(ChatModelPlugin::new(ExplicitSelectionModel(
+            requests.clone(),
+        )))
+        .plugin(local_storage(directory.path().join("state.sqlite")))
+        .plugin(SkillsPlugin::filesystem(skills_config(
+            &directory.path().join("system"),
+            &local,
+        )))
+        .build()
+        .await
+        .unwrap();
+    let mut input = RunRequest::new("explicit", "$代码审查 review this");
+    input.requested_skills = vec!["代码审查".into(), "代码审查".into()];
+    let result = agent.run(input).await.unwrap();
+    assert_eq!(result.tool_calls, 0);
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 1);
+    let prompt = captured[0]
+        .messages
+        .iter()
+        .map(|m| m.content.text())
+        .collect::<String>();
+    assert!(prompt.contains("EXPLICIT_INSTRUCTIONS"));
+    assert!(!prompt.contains("UNSELECTED_INSTRUCTIONS"));
+    drop(captured);
+    let mut denied = RunRequest::new("denied", "try forged selection");
+    denied.requested_skills = vec!["other".into()];
+    denied.extensions.insert(SkillAccess {
+        names: BTreeSet::from(["代码审查".into()]),
+    });
+    assert!(
+        agent
+            .run(denied)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not enabled")
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert!(agent.framework().close().await.is_success());
+}
+
+struct OneLiveSelection(AtomicUsize);
+#[async_trait]
+impl LiveInputSource for OneLiveSelection {
+    async fn drain(&self, _: &RunContext, _: bool) -> Result<Vec<Content>, AgentError> {
+        Ok(Vec::new())
+    }
+    async fn drain_inputs(&self, _: &RunContext, _: bool) -> Result<Vec<LiveInput>, AgentError> {
+        Ok(if self.0.fetch_add(1, Ordering::SeqCst) == 1 {
+            vec![LiveInput {
+                content: "$release-notes update now".into(),
+                requested_skills: vec!["release-notes".into()],
+            }]
+        } else {
+            vec![]
+        })
+    }
+}
+#[tokio::test]
+async fn live_explicit_selection_is_loaded_on_the_next_model_turn() {
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join("local");
+    write_skill(
+        &local,
+        "release-notes",
+        "Metadata",
+        "LIVE_SELECTED_INSTRUCTIONS",
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let agent = TestBuilder::new()
+        .skills(["release-notes"])
+        .default_models(false)
+        .plugin(ChatModelPlugin::new(ExplicitSelectionModel(
+            requests.clone(),
+        )))
+        .plugin(local_storage(directory.path().join("state.sqlite")))
+        .plugin(SkillsPlugin::filesystem(skills_config(
+            &directory.path().join("system"),
+            &local,
+        )))
+        .build()
+        .await
+        .unwrap();
+    let mut request = RunRequest::new("live-explicit", "start normally");
+    request
+        .extensions
+        .insert(LiveInputSourceService(Arc::new(OneLiveSelection(
+            AtomicUsize::new(0),
+        ))));
+    agent.run(request).await.unwrap();
+    let captured = requests.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    assert!(
+        !captured[0]
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("LIVE_SELECTED_INSTRUCTIONS"))
+    );
+    assert!(
+        captured[1]
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("LIVE_SELECTED_INSTRUCTIONS"))
+    );
+    drop(captured);
+    assert!(agent.framework().close().await.is_success());
+}
+
+#[tokio::test]
+async fn explicit_selection_survives_rebuilt_resume_and_rechecks_revocation_before_resources() {
+    for revoked in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("agent.sqlite");
+        let system = directory.path().join("system");
+        let local = directory.path().join("local");
+        let root = write_skill(
+            &local,
+            "resume-test",
+            "Recovery skill",
+            "Read references/style.md.",
+        );
+        fs::create_dir_all(root.join("references")).unwrap();
+        fs::write(root.join("references/style.md"), "RESOURCE_OK").unwrap();
+        let agent = TestBuilder::new()
+            .skills(["resume-test"])
+            .default_models(false)
+            .plugin(ChatModelPlugin::new(ReadResourceWithoutLoadingModel))
+            .plugin(local_storage(&database))
+            .plugin(ToolPolicyPlugin::new(
+                "approval.skill.resource",
+                RequireSkillResourceApproval,
+            ))
+            .plugin(SkillsPlugin::filesystem(skills_config(&system, &local)))
+            .build()
+            .await
+            .unwrap();
+        let mut request = RunRequest::new("explicit-resume", "read resource");
+        request.requested_skills = vec!["resume-test".into()];
+        let waiting = agent.run(request).await.unwrap();
+        assert_eq!(waiting.status, RunStatus::AwaitingInput);
+        let interaction = waiting.interactions[0].clone();
+        assert!(agent.framework().close().await.is_success());
+        let agent = TestBuilder::new()
+            .skills(["resume-test"])
+            .default_models(false)
+            .plugin(ChatModelPlugin::new(ReadResourceWithoutLoadingModel))
+            .plugin(local_storage(&database))
+            .plugin(ToolPolicyPlugin::new(
+                "approval.skill.resource",
+                RequireSkillResourceApproval,
+            ))
+            .plugin(SkillsPlugin::filesystem(skills_config(&system, &local)))
+            .build()
+            .await
+            .unwrap();
+        let mut resume = agent
+            .answer("explicit-resume", interaction.id, json!(true))
+            .await
+            .unwrap();
+        if revoked {
+            resume.extensions.insert(SkillAccess {
+                names: BTreeSet::new(),
+            });
+        }
+        let result = agent.run(resume).await;
+        if revoked {
+            assert!(result.unwrap_err().to_string().contains("not enabled"));
+        } else {
+            assert_eq!(result.unwrap().output, "unexpected resource read");
+        }
+        assert!(agent.framework().close().await.is_success());
+    }
+}
+
+#[tokio::test]
+async fn dynamic_host_skill_access_requires_grants_instead_of_inheriting_empty_framework_defaults()
+{
+    use eliteforge_agent_framework::AgentSelection;
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join("local");
+    write_skill(
+        &local,
+        "allowed",
+        "Dynamic registry skill",
+        "DYNAMIC_HOST_INSTRUCTIONS",
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let agent = TestBuilder::new()
+        .skills(Vec::<String>::new())
+        .default_models(false)
+        .plugin(ChatModelPlugin::new(ExplicitSelectionModel(
+            requests.clone(),
+        )))
+        .plugin(local_storage(directory.path().join("state.sqlite")))
+        .plugin(SkillsPlugin::filesystem(skills_config(
+            &directory.path().join("system"),
+            &local,
+        )))
+        .build()
+        .await
+        .unwrap();
+    let dynamic = agent
+        .framework()
+        .agent(AgentSelection {
+            skills_from_host: true,
+            ..eliteforge_agent_test_support::fixture_selection(&agent.framework()).unwrap()
+        })
+        .build()
+        .await
+        .unwrap();
+    let mut request = RunRequest::new("dynamic-host", "use selected skill");
+    request.requested_skills = vec!["allowed".into()];
+    assert!(
+        dynamic
+            .run(request.clone())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("host SkillAccess")
+    );
+    request.extensions.insert(SkillAccess {
+        names: BTreeSet::from(["allowed".into()]),
+    });
+    dynamic.run(request).await.unwrap();
+    assert!(
+        requests.lock().unwrap()[0]
+            .messages
+            .iter()
+            .any(|m| m.content.text().contains("DYNAMIC_HOST_INSTRUCTIONS"))
+    );
+    dynamic.close().await;
+    assert!(agent.framework().close().await.is_success());
 }

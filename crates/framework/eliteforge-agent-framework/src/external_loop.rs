@@ -228,6 +228,7 @@ impl AgentLoop for ExternalAgentLoop {
                 finished_at_ms: None,
             });
             checkpoint.history.messages.push(HistoryMessage {
+                requested_skills: Vec::new(),
                 id: events.message_id.clone(),
                 run_id: context.run_id,
                 step_id: Some(events.message_id.clone()),

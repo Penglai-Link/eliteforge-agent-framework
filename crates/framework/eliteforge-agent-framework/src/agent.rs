@@ -300,9 +300,14 @@ impl AgentBuilder {
             }),
             framework,
             default_model: self.selection.model.clone(),
-            skill_access: self.selection.skills.as_ref().map(|names| SkillAccess {
-                names: names.iter().cloned().collect(),
-            }),
+            require_host_skill_access: self.selection.skills_from_host,
+            skill_access: if self.selection.skills_from_host {
+                None
+            } else {
+                self.selection.skills.as_ref().map(|names| SkillAccess {
+                    names: names.iter().cloned().collect(),
+                })
+            },
             registry,
             agent_loop,
             services,
@@ -347,6 +352,7 @@ pub(crate) struct AgentInner {
     id: RunId,
     framework: Framework,
     skill_access: Option<SkillAccess>,
+    require_host_skill_access: bool,
     default_model: Option<ModelRef>,
     registry: eliteforge_agent_plugin_core::ServiceRegistry,
     cleanup: Mutex<CleanupState>,
@@ -1259,8 +1265,19 @@ impl AgentGeneration {
         if request.model.is_none() {
             request.model = self.inner.default_model.clone();
         }
+        if self.inner.require_host_skill_access && request.extensions.get::<SkillAccess>().is_none()
+        {
+            return Err(AgentError::MissingService("host SkillAccess"));
+        }
         if let Some(access) = &self.inner.skill_access {
-            request.extensions.insert(access.clone());
+            let allowed = request
+                .extensions
+                .get::<SkillAccess>()
+                .map(|host| SkillAccess {
+                    names: access.names.intersection(&host.names).cloned().collect(),
+                })
+                .unwrap_or_else(|| access.clone());
+            request.extensions.insert(allowed);
         }
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| {
             AgentError::Run("AgentGeneration::start requires a Tokio runtime".into())
@@ -1299,6 +1316,29 @@ impl AgentGeneration {
         let execution_id = RunId::new_v4();
         let mut outputs = RunOutputs::default();
         let mut extensions = request.extensions.clone();
+        let skill_selection_supported = self
+            .inner
+            .registry
+            .get::<ExplicitSkillSelectionSupport>()
+            .is_some()
+            && self
+                .inner
+                .services
+                .context_sources
+                .iter()
+                .any(|source| source.supports_requested_skills());
+        if !request.requested_skills.is_empty() && !skill_selection_supported {
+            return Err(AgentError::InvalidConfiguration(
+                "explicit skill selection requires a selected skill context source".into(),
+            ));
+        }
+        if skill_selection_supported {
+            extensions.insert(ExplicitSkillSelectionSupport);
+        }
+        let requested_skills = RequestedSkills::default();
+        requested_skills.extend(&request.requested_skills)?;
+        request.requested_skills = requested_skills.names();
+        extensions.insert(requested_skills);
         extensions.insert(RunHostMetadataService(Arc::new(std::sync::RwLock::new(
             request.host_metadata(),
         ))));

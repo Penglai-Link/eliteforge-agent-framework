@@ -668,6 +668,9 @@ pub struct RunRequest {
     #[serde(default)]
     pub goal_id: Option<String>,
     pub input: crate::Content,
+    /// Explicit user selection, independent of the Agent permission set.
+    #[serde(default, rename = "requestedSkills")]
+    pub requested_skills: Vec<String>,
     pub generation: crate::GenerationOptions,
     pub limits: RunLimits,
     #[serde(skip)]
@@ -716,6 +719,7 @@ impl RunRequest {
             conversation_branch: None,
             goal_id: None,
             input: input.into(),
+            requested_skills: Vec::new(),
             generation: crate::GenerationOptions::default(),
             limits: RunLimits::default(),
             extensions: Extensions::default(),
@@ -1144,11 +1148,37 @@ pub struct RunContext {
 /// returning no inputs. Return full typed user content, never instructions.
 #[async_trait]
 pub trait LiveInputSource: Send + Sync {
+    /// Structured live messages retain explicit skill selection across durable boundaries.
+    async fn drain_inputs(
+        &self,
+        run: &RunContext,
+        seal_if_empty: bool,
+    ) -> Result<Vec<LiveInput>, AgentError> {
+        Ok(self
+            .drain(run, seal_if_empty)
+            .await?
+            .into_iter()
+            .map(LiveInput::from)
+            .collect())
+    }
     async fn drain(
         &self,
         run: &RunContext,
         seal_if_empty: bool,
     ) -> Result<Vec<crate::Content>, AgentError>;
+}
+#[derive(Debug, Clone)]
+pub struct LiveInput {
+    pub content: crate::Content,
+    pub requested_skills: Vec<String>,
+}
+impl From<crate::Content> for LiveInput {
+    fn from(content: crate::Content) -> Self {
+        Self {
+            content,
+            requested_skills: Vec::new(),
+        }
+    }
 }
 #[derive(Clone)]
 pub struct LiveInputSourceService(pub Arc<dyn LiveInputSource>);

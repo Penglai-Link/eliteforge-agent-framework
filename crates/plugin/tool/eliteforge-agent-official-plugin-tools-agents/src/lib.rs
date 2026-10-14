@@ -202,6 +202,37 @@ fn thread_summary(summary: ThreadSummary) -> ToolOutput {
     structured(serde_json::to_value(summary).expect("thread summary is serializable"))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentDetailsInput {
+    #[serde(rename = "agentCode")]
+    agent_code: String,
+}
+
+pub struct AgentGetTool;
+impl AgentGetTool {
+    pub fn descriptor() -> ToolDescriptor {
+        ToolDescriptor::new(
+            "agent.get", "agent_get",
+            "Read detailed configuration for one authorized Agent from the current directory. Query only; does not start an Agent or change its configuration.",
+            json!({"type":"object","additionalProperties":false,"required":["agentCode"],"properties":{
+                "agentCode":{"type":"string","minLength":1,"maxLength":256}
+            }}),
+        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    }
+}
+#[async_trait]
+impl Tool for AgentGetTool {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        context.check_cancelled().map_err(failed)?;
+        let input: AgentDetailsInput = serde_json::from_value(arguments)
+            .map_err(|_| ToolError::Failed("invalid agent_get arguments".into()))?;
+        let code = agent_code(Some(input.agent_code))?
+            .ok_or_else(|| ToolError::Failed("agentCode is required".into()))?;
+        Ok(structured(runtime(context)?.agent_details(&code, context).await.map_err(failed)?))
+    }
+}
+
 pub struct AgentSpawnTool;
 
 impl AgentSpawnTool {
@@ -523,6 +554,7 @@ impl Plugin for AgentToolsPlugin {
 
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
         let provider: Arc<dyn ToolProvider> = Arc::new(StaticToolProvider::new(vec![
+            ToolBinding::new(AgentGetTool::descriptor(), AgentGetTool),
             ToolBinding::new(AgentSpawnTool::descriptor(), AgentSpawnTool),
             ToolBinding::new(ThreadCreateTool::descriptor(), ThreadCreateTool),
             ToolBinding::new(ThreadSendTool::descriptor(), ThreadSendTool),
