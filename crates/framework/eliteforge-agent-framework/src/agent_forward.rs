@@ -225,6 +225,20 @@ impl Agent {
         child.handle.as_mut().expect("child handle").occupancy = Some(lease);
         Ok((child, output))
     }
+    /// Detached variant of [`start_child_owned`]: the child outlives the parent
+    /// run and is governed by the caller that owns the returned handle.
+    pub async fn start_child_detached_owned(&self, request: RunRequest, parent: &RunContext) -> Result<ChildRunHandle, AgentError> {
+        let (generation, lease) = self.admit("task", &request.session_id)?;
+        let mut child = generation.start_child_detached_owned(request, parent).await?;
+        child.handle.as_mut().expect("child handle").occupancy = Some(lease);
+        Ok(child)
+    }
+    pub async fn start_child_detached_with_output_owned<T: Send + 'static>(&self, request: RunRequest, parent: &RunContext) -> Result<(ChildRunHandle, T), AgentError> {
+        let (generation, lease) = self.admit("task", &request.session_id)?;
+        let (mut child, output) = generation.start_child_detached_with_output_owned(request, parent).await?;
+        child.handle.as_mut().expect("child handle").occupancy = Some(lease);
+        Ok((child, output))
+    }
     pub fn events(
         &self,
         handle: &mut RunHandle,

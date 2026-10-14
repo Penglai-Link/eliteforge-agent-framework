@@ -321,11 +321,13 @@ impl AgentBuilder {
             drained: Notify::new(),
             cleanup_done: Notify::new(),
             threads: Arc::new(ThreadRegistry::default()),
+            children: Arc::new(DetachedChildRegistry::default()),
         });
         inner.framework.register_generation(&inner)?;
         let collaboration = Arc::new(CollaborationRuntime {
             agent: Arc::downgrade(&inner),
             threads: inner.threads.clone(),
+            children: inner.children.clone(),
             operations: operations.clone(),
         });
         Ok(AgentGeneration {
@@ -364,6 +366,7 @@ pub(crate) struct AgentInner {
     drained: Notify,
     cleanup_done: Notify,
     threads: Arc<ThreadRegistry>,
+    children: Arc<DetachedChildRegistry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -742,6 +745,7 @@ impl AgentGeneration {
         let collaboration = Arc::new(CollaborationRuntime {
             agent: Arc::downgrade(&inner),
             threads: inner.threads.clone(),
+            children: inner.children.clone(),
             operations: operations.clone(),
         });
         Self {
@@ -755,6 +759,7 @@ impl AgentGeneration {
         let collaboration = Arc::new(CollaborationRuntime {
             agent: Arc::downgrade(&self.inner),
             threads: self.inner.threads.clone(),
+            children: self.inner.children.clone(),
             operations: operations.clone(),
         });
         Self {
@@ -1218,7 +1223,7 @@ impl AgentGeneration {
     /// Sessions are exclusive within this instance. Different sessions can run
     /// concurrently; a second active run on the same session returns SessionBusy.
     pub fn start(&self, request: RunRequest) -> Result<RunHandle, AgentError> {
-        self.start_inherited(request, None)
+        self.start_inherited(request, None, false)
     }
 
     fn validate_request(&self, request: &RunRequest) -> Result<(), AgentError> {
@@ -1257,6 +1262,7 @@ impl AgentGeneration {
         &self,
         mut request: RunRequest,
         parent: Option<&RunContext>,
+        detach_cancel: bool,
     ) -> Result<RunHandle, AgentError> {
         if request.host_context.is_none()
             && let Some(parent) = parent
@@ -1407,7 +1413,14 @@ impl AgentGeneration {
             request.conversation_branch = Some(request.scope().to_owned());
         }
         let occupancy_key = request.occupancy_key();
-        let cancellation = parent.map_or_else(CancellationToken::new, |p| p.children.child_token());
+        // A detached child owns its cancellation token: the parent run ending,
+        // failing or being cancelled never cascades into it. Only an attached
+        // child links its token to the parent run so user interruption stops
+        // both. Host-owned registries cancel detached children explicitly.
+        let cancellation = match (parent, detach_cancel) {
+            (Some(parent), false) => parent.children.child_token(),
+            _ => CancellationToken::new(),
+        };
         {
             let mut runs = self.inner.runs.lock().unwrap_or_else(|e| e.into_inner());
             if runs.closed || self.inner.framework.is_closed() {
@@ -1767,8 +1780,31 @@ impl AgentGeneration {
     /// its uncertain allowance until the parent's controlled cleanup completes.
     pub async fn start_child_owned(
         &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<ChildRunHandle, AgentError> {
+        self.start_child_mode(request, parent, false).await
+    }
+    /// Native owned detached child admission. Obtain outputs/events/control
+    /// before wait. The child inherits lineage, delegation depth and budget
+    /// reservation, but owns an independent cancellation token and deadline,
+    /// so it keeps running after the parent run completes or is cancelled.
+    /// The caller must own the returned handle (typically inside a registry
+    /// or background task) until `wait` finishes; the handle is never
+    /// registered on the parent run's resource scope, so the parent run
+    /// ending never cancels a detached child.
+    pub async fn start_child_detached_owned(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<ChildRunHandle, AgentError> {
+        self.start_child_mode(request, parent, true).await
+    }
+    async fn start_child_mode(
+        &self,
         mut request: RunRequest,
         parent: &RunContext,
+        detached: bool,
     ) -> Result<ChildRunHandle, AgentError> {
         parent.check_cancelled()?;
         if request.resume.is_some() {
@@ -1789,13 +1825,25 @@ impl AgentGeneration {
         if remaining.is_zero() {
             return Err(AgentError::Cancelled);
         }
-        request.limits.run_timeout = request.limits.run_timeout.min(remaining);
+        if !detached {
+            // An attached child must finish inside the parent run's deadline.
+            // A detached child owns its own run_timeout and outlives the parent.
+            request.limits.run_timeout = request.limits.run_timeout.min(remaining);
+        }
         let child_session_id = request.session_id.clone();
         let child_depth = parent.lineage.depth.saturating_add(1);
-        let (admission, allowance) =
-            ChildAdmission::reserve(parent, request.limits.max_total_tokens)?;
-        request.limits.max_total_tokens = allowance;
-        parent.persist_budget().await?;
+        let admission = if detached {
+            // Detached children keep the concurrency slot but reserve no
+            // parent allowance; their ceiling stays the requested limits,
+            // governed by session-level continuation constraints.
+            ChildAdmission::detached(parent)?
+        } else {
+            let (admission, allowance) =
+                ChildAdmission::reserve(parent, request.limits.max_total_tokens)?;
+            request.limits.max_total_tokens = allowance;
+            parent.persist_budget().await?;
+            admission
+        };
         let child_run_id = request.run_id.unwrap_or_else(RunId::new_v4);
         request.extensions.insert(ChildRunIdentity(child_run_id));
         if let Some(journal) = parent
@@ -1805,14 +1853,16 @@ impl AgentGeneration {
             journal.0.child_intent(parent, child_run_id).await?;
         }
         let started = parent.check_cancelled().and_then(|()| {
-            let remaining = parent
-                .deadline
-                .saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(AgentError::Cancelled);
+            if !detached {
+                let remaining = parent
+                    .deadline
+                    .saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(AgentError::Cancelled);
+                }
+                request.limits.run_timeout = request.limits.run_timeout.min(remaining);
             }
-            request.limits.run_timeout = request.limits.run_timeout.min(remaining);
-            self.start_inherited(request, Some(parent))
+            self.start_inherited(request, Some(parent), detached)
         });
         let handle = match started {
             Ok(handle) => handle,
@@ -1825,33 +1875,58 @@ impl AgentGeneration {
             }
         };
         parent
-            .emit(AgentEvent::Collaboration(Box::new(
+            .emit(AgentEvent::Collaboration(Box::new(if detached {
+                CollaborationEvent::ChildRunDetached {
+                    child_run_id,
+                    session_id: child_session_id,
+                    depth: child_depth,
+                }
+            } else {
                 CollaborationEvent::ChildRunStarted {
                     child_run_id,
                     session_id: child_session_id,
                     depth: child_depth,
-                },
-            )))
+                }
+            })))
             .await;
         let child_events = ChildEventGuard::new(parent.clone(), child_run_id);
         let permit = admission.dispatched();
-        let completion = handle.completion.clone();
-        let cancel = handle.control.cancellation.clone();
-        let fallback = cancel.clone();
-        let mut scope = eliteforge_agent_plugin_core::ResourceScope::default();
-        scope.on_cleanup(move || fallback.cancel());
-        scope.on_shutdown(move || async move {
-            cancel.cancel();
-            completion.wait().await;
-            Ok(())
-        });
-        parent.own_resources(scope);
+        if !detached {
+            let completion = handle.completion.clone();
+            let cancel = handle.control.cancellation.clone();
+            let fallback = cancel.clone();
+            let mut scope = eliteforge_agent_plugin_core::ResourceScope::default();
+            scope.on_cleanup(move || fallback.cancel());
+            scope.on_shutdown(move || async move {
+                cancel.cancel();
+                completion.wait().await;
+                Ok(())
+            });
+            parent.own_resources(scope);
+        }
         Ok(ChildRunHandle {
             handle: Some(handle),
             parent: parent.clone(),
-            permit: Some(permit),
+            permit,
             child_events,
         })
+    }
+    pub async fn start_child_detached_with_output_owned<T: Send + 'static>(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<(ChildRunHandle, T), AgentError> {
+        if !self
+            .inner
+            .outputs
+            .iter()
+            .any(|output| output.output_type() == std::any::TypeId::of::<T>())
+        {
+            return Err(AgentError::MissingService(std::any::type_name::<T>()));
+        }
+        let mut child = self.start_child_detached_owned(request, parent).await?;
+        let output = self.output(child.handle.as_mut().expect("child handle"))?;
+        Ok((child, output))
     }
     pub async fn start_child_with_output_owned<T: Send + 'static>(
         &self,
@@ -2022,9 +2097,28 @@ impl ChildAdmission {
         admission.permit = Some(permit);
         Ok((admission, allowance))
     }
-    fn dispatched(mut self) -> crate::budget::UsagePermit {
+    /// Detached children count against the parent's concurrent child slots
+    /// but never reserve the parent run's token allowance: they outlive the
+    /// parent run, so reserving it would starve the parent's remaining turns.
+    /// Their budget ceiling is governed by session-level continuation limits.
+    fn detached(parent: &RunContext) -> Result<Self, AgentError> {
+        parent
+            .child_runs
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |count| (count < parent.max_child_runs).then(|| count + 1),
+            )
+            .map_err(|_| AgentError::Run("child run count limit reached".into()))?;
+        Ok(Self {
+            child_runs: parent.child_runs.clone(),
+            permit: None,
+            dispatched: false,
+        })
+    }
+    fn dispatched(mut self) -> Option<crate::budget::UsagePermit> {
         self.dispatched = true;
-        self.permit.take().expect("child budget was reserved")
+        self.permit.take()
     }
 }
 impl Drop for ChildAdmission {
@@ -2136,13 +2230,15 @@ impl RunControl {
             .unwrap_or_else(|e| e.into_inner())
             .including_reservations()
     }
-    fn cancel(&self) {
+    /// Request cancellation of this run. Safe to call from any clone; hosts
+    /// use this to stop addressable child runs explicitly.
+    pub fn cancel(&self) {
         self.cancellation.cancel();
     }
     /// Queue text for the loop's next steering boundary. Success acknowledges
     /// in-memory admission, not persistence or model processing. Closed,
     /// cancelled and unsupported executions reject steering.
-    fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
+    pub fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
         self.steer_content(message.into().into())
     }
     fn steer_content(&self, content: Content) -> Result<(), AgentError> {
@@ -2184,16 +2280,18 @@ impl ChildRunHandle {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .including_reservations();
-        let settlement = self
-            .permit
-            .as_mut()
-            .expect("child permit")
-            .settle_child(&charged, self.parent.token_ceiling);
-        let result = finish_with_cleanup(result, settlement.map_err(Into::into));
-        let result = finish_with_cleanup(
-            result,
-            self.parent.persist_budget().await.map_err(Into::into),
-        );
+        let mut result = result;
+        // Detached children own their budget: session-level continuation
+        // limits govern them, so only attached children settle into the
+        // parent run's ledger.
+        if let Some(permit) = self.permit.as_mut() {
+            let settlement = permit.settle_child(&charged, self.parent.token_ceiling);
+            result = finish_with_cleanup(result, settlement.map_err(Into::into));
+            result = finish_with_cleanup(
+                result,
+                self.parent.persist_budget().await.map_err(Into::into),
+            );
+        }
         match &result {
             Ok(result) => self
                 .child_events
@@ -2379,6 +2477,109 @@ impl Drop for ThreadSlotReservation {
     }
 }
 
+const MAX_IN_PROCESS_DETACHED_CHILDREN: usize = 128;
+
+/// In-memory registry of detached child runs. Unlike threads, records are not
+/// durable: a detached child is a same-process delegation whose identity is
+/// meaningful only while this runtime owns it. Records are removed once their
+/// result has been delivered through `wait_child`.
+#[derive(Default)]
+struct DetachedChildRegistry {
+    state: Mutex<DetachedChildRegistryState>,
+}
+
+#[derive(Default)]
+struct DetachedChildRegistryState {
+    records: BTreeMap<RunId, Arc<DetachedChildRecord>>,
+}
+
+impl DetachedChildRegistry {
+    fn find(&self, child_run_id: RunId) -> Result<Arc<DetachedChildRecord>, AgentError> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .records
+            .get(&child_run_id)
+            .cloned()
+            .ok_or_else(|| AgentError::Run("child run not found".into()))
+    }
+    fn insert(&self, record: Arc<DetachedChildRecord>) -> Result<(), AgentError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.records.len() >= MAX_IN_PROCESS_DETACHED_CHILDREN {
+            return Err(AgentError::Run(
+                "in-process detached child capacity exceeded; collect finished children first"
+                    .into(),
+            ));
+        }
+        let previous = state.records.insert(record.child_run_id, record);
+        debug_assert!(previous.is_none(), "detached child run IDs are unique");
+        Ok(())
+    }
+    fn remove_if(&self, child_run_id: RunId, expected: &Arc<DetachedChildRecord>) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.records.get(&child_run_id) {
+            Some(current) if Arc::ptr_eq(current, expected) => {
+                state.records.remove(&child_run_id);
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+struct DetachedChildRecord {
+    child_run_id: RunId,
+    session_id: String,
+    transition: AsyncMutex<()>,
+    state: Mutex<DetachedChildState>,
+}
+
+struct DetachedChildState {
+    summary: DetachedChildSummary,
+    run: Option<Arc<DetachedChildRun>>,
+}
+
+struct DetachedChildRun {
+    run_id: RunId,
+    control: RunControl,
+    done: AtomicBool,
+    terminal: Mutex<Option<ChildRunStatus>>,
+    result: Mutex<Option<Result<ChildRunResult, String>>>,
+    notify: Notify,
+}
+
+impl DetachedChildRun {
+    fn new(run_id: RunId, control: RunControl) -> Self {
+        Self {
+            run_id,
+            control,
+            done: AtomicBool::new(false),
+            terminal: Mutex::new(None),
+            result: Mutex::new(None),
+            notify: Notify::new(),
+        }
+    }
+    fn is_running(&self) -> bool {
+        !self.done.load(std::sync::atomic::Ordering::Acquire)
+    }
+    async fn wait(&self) -> Result<ChildRunResult, AgentError> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                return result.map_err(AgentError::Run);
+            }
+            notified.await;
+        }
+    }
+}
+
 struct ThreadRecord {
     session_id: String,
     transition: AsyncMutex<()>,
@@ -2432,6 +2633,7 @@ impl ThreadRun {
 struct CollaborationRuntime {
     agent: Weak<AgentInner>,
     threads: Arc<ThreadRegistry>,
+    children: Arc<DetachedChildRegistry>,
     operations: Arc<dyn ModelOperations>,
 }
 
@@ -2441,6 +2643,7 @@ impl CollaborationRuntime {
         let collaboration = Arc::new(Self {
             agent: Arc::downgrade(&inner),
             threads: self.threads.clone(),
+            children: self.children.clone(),
             operations: self.operations.clone(),
         });
         Ok(AgentGeneration {
@@ -2549,6 +2752,77 @@ impl CollaborationRuntime {
         self.launch(agent, record, run, handle, parent.clone());
         Ok(summary)
     }
+
+    /// Own one detached child handle until completion, then publish the
+    /// terminal result through the registry. The parent run may already be
+    /// finished; `ChildEventGuard` on the handle publishes lifecycle events
+    /// live-only, which is safe after the parent run ends.
+    fn launch_detached(
+        &self,
+        record: Arc<DetachedChildRecord>,
+        run: Arc<DetachedChildRun>,
+        wait: impl std::future::Future<Output = Result<RunResult, AgentError>> + Send + 'static,
+    ) {
+        let child_run_id = record.child_run_id;
+        tokio::spawn(async move {
+            let result = wait.await;
+            let (status, stored) = match result {
+                Ok(result) => {
+                    let status = ChildRunStatus::from(&result.status);
+                    (
+                        status,
+                        Ok(ChildRunResult {
+                            run_id: child_run_id,
+                            result,
+                        }),
+                    )
+                }
+                Err(error) => {
+                    let status = if matches!(error.primary(), AgentError::Cancelled) {
+                        ChildRunStatus::Cancelled
+                    } else {
+                        ChildRunStatus::Failed
+                    };
+                    (status, Err(error.to_string()))
+                }
+            };
+            {
+                let mut state = record.state.lock().unwrap_or_else(|e| e.into_inner());
+                if state
+                    .run
+                    .as_ref()
+                    .is_some_and(|latest| latest.run_id == run.run_id)
+                {
+                    state.summary.status = status.clone();
+                }
+            }
+            *run.terminal.lock().unwrap_or_else(|e| e.into_inner()) = Some(status);
+            *run.result.lock().unwrap_or_else(|e| e.into_inner()) = Some(stored);
+            run.done.store(true, std::sync::atomic::Ordering::Release);
+            run.notify.notify_waiters();
+        });
+    }
+
+    /// Restart one detached child record for a resumed run (interaction
+    /// answers keep the original run identity; steering during a running
+    /// child never goes through here).
+    async fn start_detached_run(
+        &self,
+        agent: AgentGeneration,
+        record: Arc<DetachedChildRecord>,
+        request: RunRequest,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        let handle = agent.start(request)?;
+        let run = Arc::new(DetachedChildRun::new(handle.run_id, handle.control()));
+        let summary = {
+            let mut state = record.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.run = Some(run.clone());
+            state.summary.status = ChildRunStatus::Running;
+            state.summary.clone()
+        };
+        self.launch_detached(record, run, handle.wait());
+        Ok(summary)
+    }
 }
 
 fn thread_run_finished_event(
@@ -2579,6 +2853,189 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
         let request =
             Self::prepare_request(request, format!("tool-child-{}", RunId::new_v4()), parent);
         agent.run_child_with_id(request, parent).await
+    }
+
+    async fn spawn_child_detached(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        let agent = self.agent()?;
+        let session_id = format!("tool-child-{}", RunId::new_v4());
+        let agent_code = request.agent_code.clone();
+        let request = Self::prepare_request(request, session_id.clone(), parent);
+        let handle = agent.start_child_detached_owned(request, parent).await?;
+        let child_run_id = handle.run_id();
+        let control = handle.control();
+        let run = Arc::new(DetachedChildRun::new(child_run_id, control));
+        let record = Arc::new(DetachedChildRecord {
+            child_run_id,
+            session_id: session_id.clone(),
+            transition: AsyncMutex::new(()),
+            state: Mutex::new(DetachedChildState {
+                summary: DetachedChildSummary {
+                    child_run_id,
+                    session_id,
+                    agent_code,
+                    status: ChildRunStatus::Running,
+                },
+                run: Some(run.clone()),
+            }),
+        });
+        let summary = record
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .summary
+            .clone();
+        self.children.insert(record.clone())?;
+        self.launch_detached(record, run, handle.wait());
+        Ok(summary)
+    }
+
+    async fn wait_child(
+        &self,
+        child_run_id: RunId,
+        _parent: &RunContext,
+    ) -> Result<ChildRunResult, AgentError> {
+        let record = self.children.find(child_run_id)?;
+        let run = record
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .run
+            .clone()
+            .ok_or_else(|| AgentError::Run("child run has no execution".into()))?;
+        let result = run.wait().await;
+        // Delivery releases the registry slot: the result is now owned by the
+        // caller and durable history, not by the in-memory lifecycle.
+        self.children.remove_if(child_run_id, &record);
+        result
+    }
+
+    async fn send_child(
+        &self,
+        child_run_id: RunId,
+        message: String,
+        _parent: &RunContext,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        let record = self.children.find(child_run_id)?;
+        let run = record
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .run
+            .clone()
+            .ok_or_else(|| AgentError::Run("child run has no execution".into()))?;
+        if run.is_running() {
+            run.control.steer(message)?;
+        } else {
+            return Err(AgentError::Run(
+                "child run is not running; steering requires an active execution".into(),
+            ));
+        }
+        Ok(record
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .summary
+            .clone())
+    }
+
+    async fn answer_child(
+        &self,
+        child_run_id: RunId,
+        interaction_id: RunId,
+        value: serde_json::Value,
+        parent: &RunContext,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        let record = self.children.find(child_run_id)?;
+        let _transition = record.transition.lock().await;
+        {
+            let state = record.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.run.as_ref().is_some_and(|run| run.is_running()) {
+                return Err(AgentError::SessionBusy(record.session_id.clone()));
+            }
+            if state.summary.status != ChildRunStatus::AwaitingInput {
+                return Err(AgentError::Run("child run is not awaiting input".into()));
+            }
+        }
+        let agent = self.agent()?;
+        let request = agent
+            .answer(&record.session_id, interaction_id, value)
+            .await?;
+        let request = Self::prepare_request(request, record.session_id.clone(), parent);
+        drop(_transition);
+        self.start_detached_run(agent, record, request).await
+    }
+
+    async fn cancel_child(
+        &self,
+        child_run_id: RunId,
+        _parent: &RunContext,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        let record = self.children.find(child_run_id)?;
+        let run = record
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .run
+            .clone()
+            .ok_or_else(|| AgentError::Run("child run has no execution".into()))?;
+        run.control.cancel();
+        Ok(record
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .summary
+            .clone())
+    }
+
+    async fn read_child(
+        &self,
+        child_run_id: RunId,
+        limit: usize,
+    ) -> Result<ChildRunView, AgentError> {
+        let record = self.children.find(child_run_id)?;
+        let agent = self.agent()?;
+        let mut conversation = agent
+            .conversation(&ConversationKey::new(record.session_id.clone()))
+            .await?;
+        if conversation.messages.len() > limit {
+            let start = conversation.messages.len() - limit;
+            conversation.messages = conversation.messages.split_off(start);
+        }
+        Ok(ChildRunView {
+            summary: record
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .summary
+                .clone(),
+            conversation,
+        })
+    }
+
+    async fn list_children(
+        &self,
+        _parent: &RunContext,
+    ) -> Result<Vec<DetachedChildSummary>, AgentError> {
+        Ok(self
+            .children
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .records
+            .values()
+            .map(|record| {
+                record
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .summary
+                    .clone()
+            })
+            .collect())
     }
 
     async fn create_thread(

@@ -30,6 +30,53 @@ pub enum ThreadRunCause {
     InteractionResponse,
 }
 
+/// Lifecycle of one addressable detached child run.
+///
+/// A detached child is an in-tree delegation that outlives the parent run:
+/// it keeps the parent's lineage and budget reservation, but owns its own
+/// cancellation token and deadline. Unlike a thread it is an in-memory,
+/// single-run lifecycle governed by the owning host registry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChildRunStatus {
+    Running,
+    Completed,
+    AwaitingInput,
+    StepLimit,
+    ToolCallLimit,
+    Failed,
+    Cancelled,
+}
+
+impl From<&RunStatus> for ChildRunStatus {
+    fn from(status: &RunStatus) -> Self {
+        match status {
+            RunStatus::Completed => Self::Completed,
+            RunStatus::AwaitingInput => Self::AwaitingInput,
+            RunStatus::StepLimit => Self::StepLimit,
+            RunStatus::ToolCallLimit => Self::ToolCallLimit,
+        }
+    }
+}
+
+/// Addressable snapshot of one detached child run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetachedChildSummary {
+    /// Identity used by every child operation.
+    pub child_run_id: RunId,
+    /// The native session backing the child run.
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_code: Option<String>,
+    pub status: ChildRunStatus,
+}
+
+/// Status plus recent conversation of one detached child run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChildRunView {
+    pub summary: DetachedChildSummary,
+    pub conversation: ConversationSnapshot,
+}
+
 /// Observable collaboration lifecycle published on the run that initiated it.
 ///
 /// Task text, thread messages and interaction answers are deliberately absent.
@@ -53,6 +100,11 @@ pub enum CollaborationEvent {
         child_run_id: RunId,
         cancelled: bool,
         message: String,
+    },
+    ChildRunDetached {
+        child_run_id: RunId,
+        session_id: String,
+        depth: usize,
     },
     ThreadCreated {
         summary: ThreadSummary,
@@ -150,10 +202,13 @@ pub struct ThreadView {
 /// threads must retain their target binding for all subsequent operations.
 ///
 /// `spawn_child` is an in-tree delegation: it inherits the parent run's
-/// cancellation, deadline, lineage and reserved allowance. Thread operations
-/// intentionally do not inherit those properties; they address independent
-/// sessions and are expected to be governed by the implementation's quota and
-/// authorization rules.
+/// cancellation, deadline, lineage and reserved allowance. `spawn_child_detached`
+/// keeps lineage, depth and budget reservation but owns an independent
+/// cancellation token and deadline, so the child keeps running after the parent
+/// run ends; the caller owns the returned handle and governs its lifecycle.
+/// Thread operations intentionally do not inherit those properties; they
+/// address independent, durable sessions and are expected to be governed by
+/// the implementation's quota and authorization rules.
 #[async_trait]
 pub trait AgentCollaborationRuntime: Send + Sync {
     /// Read one currently authorized target's configuration without starting it.
@@ -162,7 +217,9 @@ pub trait AgentCollaborationRuntime: Send + Sync {
         _agent_code: &str,
         _parent: &RunContext,
     ) -> Result<serde_json::Value, AgentError> {
-        Err(AgentError::InvalidConfiguration("Agent details lookup is unavailable".into()))
+        Err(AgentError::InvalidConfiguration(
+            "Agent details lookup is unavailable".into(),
+        ))
     }
 
     async fn spawn_child(
@@ -170,6 +227,86 @@ pub trait AgentCollaborationRuntime: Send + Sync {
         request: RunRequest,
         parent: &RunContext,
     ) -> Result<ChildRunResult, AgentError>;
+
+    /// Dispatch one detached child run and return immediately. The child is
+    /// addressable by `child_run_id` through the other child operations.
+    async fn spawn_child_detached(
+        &self,
+        _request: RunRequest,
+        _parent: &RunContext,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        Err(AgentError::InvalidConfiguration(
+            "detached child runs are unavailable".into(),
+        ))
+    }
+
+    /// Wait for one detached child run and return its final result.
+    async fn wait_child(
+        &self,
+        _child_run_id: RunId,
+        _parent: &RunContext,
+    ) -> Result<ChildRunResult, AgentError> {
+        Err(AgentError::InvalidConfiguration(
+            "detached child runs are unavailable".into(),
+        ))
+    }
+
+    /// Queue one steering message for a running detached child.
+    async fn send_child(
+        &self,
+        _child_run_id: RunId,
+        _message: String,
+        _parent: &RunContext,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        Err(AgentError::InvalidConfiguration(
+            "detached child runs are unavailable".into(),
+        ))
+    }
+
+    /// Answer one pending interaction and resume the detached child run.
+    async fn answer_child(
+        &self,
+        _child_run_id: RunId,
+        _interaction_id: RunId,
+        _value: serde_json::Value,
+        _parent: &RunContext,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        Err(AgentError::InvalidConfiguration(
+            "detached child runs are unavailable".into(),
+        ))
+    }
+
+    /// Request cancellation of one detached child run.
+    async fn cancel_child(
+        &self,
+        _child_run_id: RunId,
+        _parent: &RunContext,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        Err(AgentError::InvalidConfiguration(
+            "detached child runs are unavailable".into(),
+        ))
+    }
+
+    /// Read the summary and recent conversation of one detached child run.
+    async fn read_child(
+        &self,
+        _child_run_id: RunId,
+        _limit: usize,
+    ) -> Result<ChildRunView, AgentError> {
+        Err(AgentError::InvalidConfiguration(
+            "detached child runs are unavailable".into(),
+        ))
+    }
+
+    /// List detached child runs visible to the caller.
+    async fn list_children(
+        &self,
+        _parent: &RunContext,
+    ) -> Result<Vec<DetachedChildSummary>, AgentError> {
+        Err(AgentError::InvalidConfiguration(
+            "detached child runs are unavailable".into(),
+        ))
+    }
 
     async fn create_thread(
         &self,

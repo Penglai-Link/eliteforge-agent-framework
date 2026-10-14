@@ -5,8 +5,8 @@
 //! default in-process implementation with an authenticated remote coordinator.
 use async_trait::async_trait;
 use eliteforge_agent_core::{
-    AgentCollaborationRuntime, AgentCollaborationService, AgentError, ChildRunResult, Content,
-    Plugin, PluginContext, PluginError, RunContext, RunId, RunLimits, RunRequest,
+    AgentCollaborationRuntime, AgentCollaborationService, AgentError, ChildRunResult, ChildRunView,
+    Content, Plugin, PluginContext, PluginError, RunContext, RunId, RunLimits, RunRequest,
     StaticToolProvider, ThreadSummary, ThreadView, Tool, ToolBinding, ToolDescriptor, ToolError,
     ToolOutput, ToolProvider, ToolProviderService,
 };
@@ -231,7 +231,12 @@ impl Tool for AgentGetTool {
             .map_err(|_| ToolError::Failed("invalid agent_get arguments".into()))?;
         let code = agent_code(Some(input.agent_code))?
             .ok_or_else(|| ToolError::Failed("agentCode is required".into()))?;
-        Ok(structured(runtime(context)?.agent_details(&code, context).await.map_err(failed)?))
+        Ok(structured(
+            runtime(context)?
+                .agent_details(&code, context)
+                .await
+                .map_err(failed)?,
+        ))
     }
 }
 
@@ -243,12 +248,12 @@ impl AgentSpawnTool {
         ToolDescriptor::new(
             "agent.spawn",
             "agent_spawn",
-            "Delegate one focused task. By default, wait for the child result when it is needed before continuing. Set background=true when the task can run in parallel; the tool returns a thread identifier immediately so you can continue other work and call thread_wait later. Step and tool-call limits are resolved by the host from the target Agent configuration; do not set them in the task unless the user explicitly requests a task constraint.",
+            "Delegate one focused task to a child run. Default (background=false) waits inline for the child result; the child inherits your run's cancellation and deadline. Set background=true when the task can run in parallel: the child runs detached with its own deadline, the tool returns a child_run_id immediately, and you continue other work. Collect a detached result with child_wait when needed; its completion is also notified to you, so do not poll. Step and tool-call limits are resolved by the host from the target Agent configuration; do not set them in the task unless the user explicitly requests a task constraint. Work that must survive the current turn, cross sessions or wait for user decisions belongs in thread_create, not a background spawn.",
             json!({
                 "type":"object","additionalProperties":false,"required":["task"],"properties":{
                     "task":{"type":"string","minLength":1,"maxLength":16384},
                     "agentCode":{"type":"string","minLength":1,"maxLength":256,"description":"Target Agent code from the available Agent directory. Omit to use the current Agent. The host resolves configuration and checks authorization."},
-                    "background":{"type":"boolean","description":"Return immediately with a thread identifier so work can continue in parallel. Default: false."},
+                    "background":{"type":"boolean","description":"Run the child detached and return a child_run_id immediately so work can continue in parallel; collect the result with child_wait. Default: false."},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
@@ -269,8 +274,12 @@ impl Tool for AgentSpawnTool {
         let mut run = request(task, limits(None, input.max_total_tokens, context)?);
         run.agent_code = agent_code;
         if input.background {
-            return Ok(thread_summary(
-                runtime.create_thread(run, None, context).await.map_err(failed)?,
+            let summary = runtime
+                .spawn_child_detached(run, context)
+                .await
+                .map_err(failed)?;
+            return Ok(structured(
+                serde_json::to_value(&summary).expect("child summary is serializable"),
             ));
         }
         let result = runtime.spawn_child(run, context).await.map_err(failed)?;
@@ -286,7 +295,7 @@ impl ThreadCreateTool {
         ToolDescriptor::new(
             "thread.create",
             "thread_create",
-            "Start an independent, addressable agent thread for work that can run in parallel. Returns immediately; continue other work, then use thread_wait when its result is needed.",
+            "Start an independent, durable agent thread for work that must outlive the current turn, keep its own conversation across messages, or wait for user decisions and notifications. Returns immediately; continue other work, then use thread_wait when its result is needed. For same-session parallel delegation use agent_spawn with background=true instead.",
             json!({
                 "type":"object","additionalProperties":false,"required":["task"],"properties":{
                     "task":{"type":"string","minLength":1,"maxLength":16384},
@@ -549,6 +558,260 @@ impl Tool for ThreadCloseTool {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WaitChildInput {
+    child_run_id: RunId,
+}
+
+pub struct ChildWaitTool;
+
+impl ChildWaitTool {
+    pub fn descriptor() -> ToolDescriptor {
+        ToolDescriptor::new(
+            "child.wait",
+            "child_wait",
+            "Wait for one detached child run started by agent_spawn with background=true and return its final result. Completion is normally notified to you, so call this only when you need the result to proceed.",
+            json!({
+                "type":"object","additionalProperties":false,"required":["child_run_id"],"properties":{
+                    "child_run_id":{"type":"string","format":"uuid"}
+                }
+            }),
+        )
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+        .with_timeout_scope(eliteforge_agent_core::ToolTimeoutScope::Run)
+    }
+}
+
+#[async_trait]
+impl Tool for ChildWaitTool {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        let input: WaitChildInput = serde_json::from_value(arguments)
+            .map_err(|_| ToolError::Failed("invalid child_wait arguments".into()))?;
+        let result = runtime(context)?
+            .wait_child(input.child_run_id, context)
+            .await
+            .map_err(failed)?;
+        Ok(spawn_result(result))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendChildInput {
+    child_run_id: RunId,
+    message: String,
+}
+
+pub struct ChildSendTool;
+
+impl ChildSendTool {
+    pub fn descriptor() -> ToolDescriptor {
+        ToolDescriptor::new(
+            "child.send",
+            "child_send",
+            "Queue one steering message for a running detached child run. The child receives it at its next steering boundary; no result is returned here.",
+            json!({
+                "type":"object","additionalProperties":false,"required":["child_run_id","message"],"properties":{
+                    "child_run_id":{"type":"string","format":"uuid"},
+                    "message":{"type":"string","minLength":1,"maxLength":16384}
+                }
+            }),
+        )
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    }
+}
+
+#[async_trait]
+impl Tool for ChildSendTool {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        let input: SendChildInput = serde_json::from_value(arguments)
+            .map_err(|_| ToolError::Failed("invalid child_send arguments".into()))?;
+        let summary = runtime(context)?
+            .send_child(input.child_run_id, task(input.message)?, context)
+            .await
+            .map_err(failed)?;
+        Ok(structured(
+            serde_json::to_value(&summary).expect("child summary is serializable"),
+        ))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AnswerChildInput {
+    child_run_id: RunId,
+    interaction_id: RunId,
+    answer: Value,
+}
+
+pub struct ChildAnswerTool;
+
+impl ChildAnswerTool {
+    pub fn descriptor() -> ToolDescriptor {
+        ToolDescriptor::new(
+            "child.answer",
+            "child_answer",
+            "Answer a pending interaction of a detached child run and resume it. The child keeps its child_run_id and conversation.",
+            json!({
+                "type":"object","additionalProperties":false,
+                "required":["child_run_id","interaction_id","answer"],"properties":{
+                    "child_run_id":{"type":"string","format":"uuid"},
+                    "interaction_id":{"type":"string","format":"uuid"},
+                    "answer":{}
+                }
+            }),
+        )
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    }
+}
+
+#[async_trait]
+impl Tool for ChildAnswerTool {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        let input: AnswerChildInput = serde_json::from_value(arguments)
+            .map_err(|_| ToolError::Failed("invalid child_answer arguments".into()))?;
+        let summary = runtime(context)?
+            .answer_child(
+                input.child_run_id,
+                input.interaction_id,
+                input.answer,
+                context,
+            )
+            .await
+            .map_err(failed)?;
+        Ok(structured(
+            serde_json::to_value(&summary).expect("child summary is serializable"),
+        ))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelChildInput {
+    child_run_id: RunId,
+}
+
+pub struct ChildCancelTool;
+
+impl ChildCancelTool {
+    pub fn descriptor() -> ToolDescriptor {
+        ToolDescriptor::new(
+            "child.cancel",
+            "child_cancel",
+            "Request cancellation of one detached child run. Collect its terminal status with child_wait afterwards.",
+            json!({
+                "type":"object","additionalProperties":false,"required":["child_run_id"],"properties":{
+                    "child_run_id":{"type":"string","format":"uuid"}
+                }
+            }),
+        )
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    }
+}
+
+#[async_trait]
+impl Tool for ChildCancelTool {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        let input: CancelChildInput = serde_json::from_value(arguments)
+            .map_err(|_| ToolError::Failed("invalid child_cancel arguments".into()))?;
+        let summary = runtime(context)?
+            .cancel_child(input.child_run_id, context)
+            .await
+            .map_err(failed)?;
+        Ok(structured(
+            serde_json::to_value(&summary).expect("child summary is serializable"),
+        ))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadChildInput {
+    child_run_id: RunId,
+    #[serde(default = "default_read_limit")]
+    limit: usize,
+}
+
+pub struct ChildReadTool;
+
+impl ChildReadTool {
+    pub fn descriptor() -> ToolDescriptor {
+        ToolDescriptor::new(
+            "child.read",
+            "child_read",
+            "Read the summary and recent messages of one detached child run.",
+            json!({
+                "type":"object","additionalProperties":false,"required":["child_run_id"],"properties":{
+                    "child_run_id":{"type":"string","format":"uuid"},
+                    "limit":{"type":"integer","minimum":1,"maximum":100}
+                }
+            }),
+        )
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    }
+}
+
+#[async_trait]
+impl Tool for ChildReadTool {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        let input: ReadChildInput = serde_json::from_value(arguments)
+            .map_err(|_| ToolError::Failed("invalid child_read arguments".into()))?;
+        if input.limit == 0 || input.limit > MAX_READ_MESSAGES {
+            return Err(ToolError::Failed("limit must be between 1 and 100".into()));
+        }
+        let view: ChildRunView = runtime(context)?
+            .read_child(input.child_run_id, input.limit)
+            .await
+            .map_err(failed)?;
+        Ok(structured(
+            serde_json::to_value(&view).expect("child view is serializable"),
+        ))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListChildrenInput {
+    #[serde(default = "default_list_limit")]
+    limit: usize,
+}
+
+pub struct ChildListTool;
+
+impl ChildListTool {
+    pub fn descriptor() -> ToolDescriptor {
+        ToolDescriptor::new(
+            "child.list",
+            "child_list",
+            "List detached child runs started by the current agent identity that are still addressable, including finished ones whose result has not been collected.",
+            json!({
+                "type":"object","additionalProperties":false,"properties":{
+                    "limit":{"type":"integer","minimum":1,"maximum":100}
+                }
+            }),
+        )
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    }
+}
+
+#[async_trait]
+impl Tool for ChildListTool {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        let input: ListChildrenInput = serde_json::from_value(arguments)
+            .map_err(|_| ToolError::Failed("invalid child_list arguments".into()))?;
+        if input.limit == 0 || input.limit > MAX_READ_MESSAGES {
+            return Err(ToolError::Failed("limit must be between 1 and 100".into()));
+        }
+        let mut children = runtime(context)?
+            .list_children(context)
+            .await
+            .map_err(failed)?;
+        children.truncate(input.limit);
+        Ok(structured(json!({"children": children})))
+    }
+}
+
 /// Official collaboration tool provider.
 pub struct AgentToolsPlugin;
 
@@ -568,6 +831,12 @@ impl Plugin for AgentToolsPlugin {
         let provider: Arc<dyn ToolProvider> = Arc::new(StaticToolProvider::new(vec![
             ToolBinding::new(AgentGetTool::descriptor(), AgentGetTool),
             ToolBinding::new(AgentSpawnTool::descriptor(), AgentSpawnTool),
+            ToolBinding::new(ChildWaitTool::descriptor(), ChildWaitTool),
+            ToolBinding::new(ChildSendTool::descriptor(), ChildSendTool),
+            ToolBinding::new(ChildAnswerTool::descriptor(), ChildAnswerTool),
+            ToolBinding::new(ChildCancelTool::descriptor(), ChildCancelTool),
+            ToolBinding::new(ChildReadTool::descriptor(), ChildReadTool),
+            ToolBinding::new(ChildListTool::descriptor(), ChildListTool),
             ToolBinding::new(ThreadCreateTool::descriptor(), ThreadCreateTool),
             ToolBinding::new(ThreadSendTool::descriptor(), ThreadSendTool),
             ToolBinding::new(ThreadAnswerTool::descriptor(), ThreadAnswerTool),

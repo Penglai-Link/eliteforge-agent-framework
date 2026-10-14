@@ -33,6 +33,189 @@ fn last_tool_value(request: &ChatRequest) -> Option<Value> {
         .and_then(|message| serde_json::from_str(&message.content.text()).ok())
 }
 
+fn tool_values(request: &ChatRequest) -> Vec<Value> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .filter(|message| message.role == Role::Tool)
+        .filter_map(|message| serde_json::from_str(&message.content.text()).ok())
+        .collect()
+}
+
+fn any_child_run_id(values: &[Value]) -> Option<String> {
+    values.iter().find_map(|value| {
+        value
+            .get("child_run_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+}
+
+/// Scripted flows for detached child runs (`agent_spawn background=true` plus
+/// the child_* tool suite).
+fn detached_script(request: &ChatRequest, input: &str, has_tool: bool) -> Option<ChatResponse> {
+    let spawn = |task: &str| {
+        ChatResponse::tool_calls(vec![ToolCall::new(
+            "detached-spawn",
+            "agent_spawn",
+            json!({"task":task, "background": true}),
+        )])
+    };
+    let sent_child_send = request.messages.iter().any(|message| {
+        message.role == Role::Assistant
+            && message
+                .tool_calls
+                .iter()
+                .any(|call| call.call_name == "child_send")
+    });
+    match input {
+        "use detached child" => {
+            if !has_tool {
+                return Some(spawn("child task"));
+            }
+            let values = tool_values(request);
+            let latest = values.first().expect("tool output is JSON");
+            if let Some(child_run_id) = latest.get("child_run_id").and_then(Value::as_str) {
+                return Some(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "detached-wait",
+                    "child_wait",
+                    json!({"child_run_id": child_run_id}),
+                )]));
+            }
+            assert_eq!(
+                latest.get("output").and_then(Value::as_str),
+                Some("child result")
+            );
+            Some(ChatResponse::text("parent received detached child"))
+        }
+        "cancel detached child" => {
+            if !has_tool {
+                return Some(spawn("slow child task"));
+            }
+            let values = tool_values(request);
+            let child_run_id = any_child_run_id(&values).expect("spawn returns a child run ID");
+            let sent_child_cancel = request.messages.iter().any(|message| {
+                message.role == Role::Assistant
+                    && message
+                        .tool_calls
+                        .iter()
+                        .any(|call| call.call_name == "child_cancel")
+            });
+            let sent_child_wait = request.messages.iter().any(|message| {
+                message.role == Role::Assistant
+                    && message
+                        .tool_calls
+                        .iter()
+                        .any(|call| call.call_name == "child_wait")
+            });
+            if !sent_child_cancel {
+                return Some(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "detached-cancel",
+                    "child_cancel",
+                    json!({"child_run_id": child_run_id}),
+                )]));
+            }
+            if !sent_child_wait {
+                return Some(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "detached-cancel-wait",
+                    "child_wait",
+                    json!({"child_run_id": child_run_id}),
+                )]));
+            }
+            let cancelled_by_result = values.iter().any(|value| {
+                value.get("run_id").is_some()
+                    && value.get("status").and_then(Value::as_str) == Some("cancelled")
+            });
+            let cancelled_by_error = request
+                .messages
+                .iter()
+                .rev()
+                .find(|message| message.role == Role::Tool)
+                .map(|message| message.content.text().to_lowercase())
+                .is_some_and(|text| text.contains("cancel"));
+            assert!(
+                cancelled_by_result || cancelled_by_error,
+                "cancelled child surfaces a terminal status, got {values:?}"
+            );
+            Some(ChatResponse::text("parent cancelled detached child"))
+        }
+        "spawn orphan child" => {
+            if !has_tool {
+                return Some(spawn("child task"));
+            }
+            Some(ChatResponse::text("orphan spawned"))
+        }
+        "collect orphan child" => {
+            let values = tool_values(request);
+            let child_run_id = any_child_run_id(&values).expect("history keeps the child run ID");
+            let latest = values.first().expect("tool output is JSON");
+            if latest.get("child_run_id").is_some() {
+                return Some(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "orphan-wait",
+                    "child_wait",
+                    json!({"child_run_id": child_run_id}),
+                )]));
+            }
+            assert_eq!(
+                latest.get("output").and_then(Value::as_str),
+                Some("child result")
+            );
+            Some(ChatResponse::text("orphan collected"))
+        }
+        "inspect detached child" => {
+            if !has_tool {
+                return Some(spawn("child task"));
+            }
+            let values = tool_values(request);
+            let child_run_id = any_child_run_id(&values).expect("spawn returns a child run ID");
+            let latest = values.first().expect("tool output is JSON");
+            if latest.get("conversation").is_some() {
+                return Some(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "inspect-list",
+                    "child_list",
+                    json!({"limit": 20}),
+                )]));
+            }
+            if latest.get("children").is_some() {
+                return Some(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "inspect-wait",
+                    "child_wait",
+                    json!({"child_run_id": child_run_id}),
+                )]));
+            }
+            if latest.get("output").is_none() {
+                return Some(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "inspect-read",
+                    "child_read",
+                    json!({"child_run_id": child_run_id, "limit": 20}),
+                )]));
+            }
+            assert_eq!(
+                latest.get("output").and_then(Value::as_str),
+                Some("child result")
+            );
+            Some(ChatResponse::text("parent inspected detached child"))
+        }
+        "steer finished child" => {
+            if !has_tool {
+                return Some(spawn("child task"));
+            }
+            let values = tool_values(request);
+            let child_run_id = any_child_run_id(&values).expect("spawn returns a child run ID");
+            if !sent_child_send {
+                return Some(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "steer-send",
+                    "child_send",
+                    json!({"child_run_id": child_run_id, "message": "reconsider"}),
+                )]));
+            }
+            Some(ChatResponse::text("parent saw steering rejected"))
+        }
+        _ => None,
+    }
+}
+
 #[async_trait]
 impl ChatModel for CollaborationModel {
     async fn generate(
@@ -78,6 +261,14 @@ impl ChatModel for CollaborationModel {
                 "thread task" => "thread result",
                 _ => "thread followup result",
             }));
+        }
+        if input == "slow child task" {
+            // Give the parent time to cancel before the child finishes.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            return Ok(ChatResponse::text("child result"));
+        }
+        if let Some(command) = detached_script(&request, &input, has_tool) {
+            return Ok(command);
         }
         if input == "named child" || input == "named thread" {
             return Ok(if !has_tool {
@@ -350,6 +541,67 @@ async fn agent_spawn_tool_runs_a_real_child_and_returns_its_result() {
         .await
         .unwrap();
     assert_eq!(result.output, "parent received child");
+    assert!(agent.framework().close().await.is_success());
+}
+
+#[tokio::test]
+async fn background_spawn_returns_a_child_run_and_wait_collects_it() {
+    let agent = agent().await;
+    let result = agent
+        .run(RunRequest::new("parent-detached", "use detached child"))
+        .await
+        .unwrap();
+    assert_eq!(result.output, "parent received detached child");
+    assert!(agent.framework().close().await.is_success());
+}
+
+#[tokio::test]
+async fn detached_child_survives_its_parent_run_and_collects_later() {
+    let agent = agent().await;
+    let session = "orphan-session";
+    let spawned = agent
+        .run(RunRequest::new(session, "spawn orphan child"))
+        .await
+        .unwrap();
+    assert_eq!(spawned.output, "orphan spawned");
+    let collected = agent
+        .run(RunRequest::new(session, "collect orphan child"))
+        .await
+        .unwrap();
+    assert_eq!(collected.output, "orphan collected");
+    assert!(agent.framework().close().await.is_success());
+}
+
+#[tokio::test]
+async fn child_cancel_stops_a_detached_child_run() {
+    let agent = agent().await;
+    let result = agent
+        .run(RunRequest::new("parent-cancel", "cancel detached child"))
+        .await
+        .unwrap();
+    assert_eq!(result.output, "parent cancelled detached child");
+    assert!(agent.framework().close().await.is_success());
+}
+
+#[tokio::test]
+async fn child_read_list_and_wait_expose_detached_lifecycle() {
+    let agent = agent().await;
+    let result = agent
+        .run(RunRequest::new("parent-inspect", "inspect detached child"))
+        .await
+        .unwrap();
+    assert_eq!(result.output, "parent inspected detached child");
+    assert!(agent.framework().close().await.is_success());
+}
+
+#[tokio::test]
+async fn child_send_rejects_a_finished_child_run() {
+    let agent = agent().await;
+    let result = agent
+        .run(RunRequest::new("parent-steer", "steer finished child"))
+        .await
+        .unwrap();
+    assert_eq!(result.output, "parent saw steering rejected");
     assert!(agent.framework().close().await.is_success());
 }
 

@@ -166,6 +166,20 @@ impl Adapter {
                         .into(),
                 );
             }
+            CollaborationEvent::ChildRunDetached {
+                child_run_id,
+                session_id: _,
+                depth: _,
+            } => {
+                if child_run_id.is_nil() || !self.subagents.insert(child_run_id) {
+                    return Err("AGUI_SUBAGENT_ORDER");
+                }
+                out.push(
+                    ag_ui::SubagentStartedEvent::new(child_run_id.to_string(), "agent_spawn")
+                        .with_description("Detached background child agent")
+                        .into(),
+                );
+            }
             CollaborationEvent::ChildRunFinished {
                 child_run_id,
                 status,
