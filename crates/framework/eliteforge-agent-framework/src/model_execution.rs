@@ -853,15 +853,16 @@ impl ModelExecutionRuntime<'_> {
             validate_annotations(&input.annotations).map_err(AgentError::InvalidConfiguration)?;
             let annotations = input.annotations;
             let requested_skills = input.requested_skills;
+            let provenance = input.provenance.or_else(|| self.context.message_provenance());
             let input = input.content;
             self.checkpoint.history.messages.push(
                 HistoryMessage::user(self.context.run_id, &input)
                     .with_annotations(annotations.clone())
                     .with_requested_skills(requested_skills)
-                    .with_provenance(self.context.message_provenance()),
+                    .with_provenance(provenance.clone()),
             );
             self.checkpoint.transcript.push(
-                Message::user(input.clone()).with_annotations(annotations).with_provenance(self.context.message_provenance()),
+                Message::user(input.clone()).with_annotations(annotations).with_provenance(provenance),
             );
             // Persist the message and its journal event together before
             // publishing the live event, including at the final reply boundary.
@@ -927,10 +928,7 @@ impl ModelExecutionRuntime<'_> {
                     }
                     let mut steering: Vec<LiveInput> = self
                         .context
-                        .take_steering_content()
-                        .into_iter()
-                        .map(LiveInput::from)
-                        .collect();
+                        .take_steering_inputs();
                     if let Some(source) = self.context.extensions.get::<LiveInputSourceService>() {
                         steering.extend(source.0.drain_inputs(self.context, false).await?);
                     }
@@ -1027,10 +1025,7 @@ impl ModelExecutionRuntime<'_> {
                         if self.state.stage + 1 == self.state.definition.stages.len() {
                             let mut steering: Vec<LiveInput> = self
                                 .context
-                                .take_steering_content()
-                                .into_iter()
-                                .map(LiveInput::from)
-                                .collect();
+                                .take_steering_inputs();
                             if let Some(source) =
                                 self.context.extensions.get::<LiveInputSourceService>()
                             {
@@ -1044,10 +1039,7 @@ impl ModelExecutionRuntime<'_> {
                             if steering.is_empty() {
                                 steering = self
                                     .context
-                                    .pending_content_or_seal()
-                                    .into_iter()
-                                    .map(LiveInput::from)
-                                    .collect();
+                                    .pending_inputs_or_seal();
                             }
                             if steering.is_empty() {
                                 return self

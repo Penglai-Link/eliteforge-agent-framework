@@ -2,7 +2,7 @@
 
 use eliteforge_agent_test_support::*;
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Duration;
@@ -20,6 +20,7 @@ struct GatedModel {
     entered: Arc<Notify>,
     release: Arc<Notify>,
     calls: Arc<AtomicUsize>,
+    observed_messages: Arc<Mutex<Vec<Message>>>,
 }
 
 #[async_trait]
@@ -35,6 +36,7 @@ impl ChatModel for GatedModel {
             self.release.notified().await;
             return Ok(ChatResponse::text("first draft"));
         }
+        *self.observed_messages.lock().unwrap() = request.messages.clone();
         let user_input = request
             .messages
             .iter()
@@ -44,6 +46,33 @@ impl ChatModel for GatedModel {
             .join(" | ");
         Ok(ChatResponse::text(user_input))
     }
+}
+
+#[tokio::test]
+async fn host_notification_reaches_model_with_system_provenance() {
+    let model = GatedModel::default();
+    let agent = TestBuilder::default()
+        .plugin(ChatModelPlugin::new(model.clone()))
+        .build().await.unwrap();
+    let handle = agent.start(RunRequest::new("session", "original task")).unwrap();
+    let control = agent.control(&handle).unwrap();
+    let waiting = tokio::spawn({
+        let agent = agent.clone();
+        async move { agent.wait(handle).await }
+    });
+    timeout(DEADLINE, model.entered.notified()).await.unwrap();
+    control.notify("child finished", MessageProvenance {
+        sender: MessageSender { kind: "SYSTEM".into(), display_name: Some("System notice".into()), ..Default::default() },
+        source: Some("ChildRunCompletion".into()),
+        correlation: None,
+    }).unwrap();
+    model.release.notify_one();
+    let result = timeout(DEADLINE, waiting).await.unwrap().unwrap().unwrap();
+    assert!(result.output.contains("child finished"));
+    let messages = model.observed_messages.lock().unwrap();
+    let notification = messages.iter().find(|message| message.content.text() == "child finished").unwrap();
+    assert_eq!(notification.provenance.as_ref().unwrap().sender.kind, "SYSTEM");
+    assert_eq!(notification.provenance.as_ref().unwrap().source.as_deref(), Some("ChildRunCompletion"));
 }
 
 struct RunResources(Arc<AtomicUsize>);

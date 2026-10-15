@@ -2239,16 +2239,25 @@ impl RunControl {
     /// in-memory admission, not persistence or model processing. Closed,
     /// cancelled and unsupported executions reject steering.
     pub fn steer(&self, message: impl Into<String>) -> Result<(), AgentError> {
-        self.steer_content(message.into().into())
+        self.steer_input(Content::from(message.into()).into())
     }
     fn steer_content(&self, content: Content) -> Result<(), AgentError> {
+        self.steer_input(content.into())
+    }
+    /// Deliver host-owned context without attributing it to the human sender.
+    pub fn notify(&self, message: impl Into<String>, provenance: MessageProvenance) -> Result<(), AgentError> {
+        let mut input = LiveInput::from(Content::from(message.into()));
+        input.provenance = Some(provenance);
+        self.steer_input(input)
+    }
+    fn steer_input(&self, input: LiveInput) -> Result<(), AgentError> {
         let mut state = self.steering.lock().unwrap_or_else(|e| e.into_inner());
         if state.closed || self.cancellation.is_cancelled() {
             return Err(AgentError::Run(
                 "run does not accept unaddressed live steering".into(),
             ));
         }
-        state.pending.push_back(content);
+        state.pending.push_back(input);
         Ok(())
     }
 }

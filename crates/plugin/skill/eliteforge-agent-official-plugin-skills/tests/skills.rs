@@ -1771,6 +1771,7 @@ impl LiveInputSource for OneLiveSelection {
                 annotations: Vec::new(),
                 content: "$release-notes update now".into(),
                 requested_skills: vec!["release-notes".into()],
+                provenance: None,
             }]
         } else {
             vec![]

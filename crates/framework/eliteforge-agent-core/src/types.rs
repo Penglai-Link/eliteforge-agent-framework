@@ -1201,6 +1201,7 @@ pub struct LiveInput {
     pub annotations: Vec<crate::MessageAnnotation>,
     pub content: crate::Content,
     pub requested_skills: Vec<String>,
+    pub provenance: Option<MessageProvenance>,
 }
 impl From<crate::Content> for LiveInput {
     fn from(content: crate::Content) -> Self {
@@ -1208,6 +1209,7 @@ impl From<crate::Content> for LiveInput {
             content,
             annotations: Vec::new(),
             requested_skills: Vec::new(),
+            provenance: None,
         }
     }
 }
@@ -1217,7 +1219,7 @@ pub struct LiveInputSourceService(pub Arc<dyn LiveInputSource>);
 #[derive(Default)]
 #[doc(hidden)]
 pub struct SteeringState {
-    pub pending: VecDeque<crate::Content>,
+    pub pending: VecDeque<LiveInput>,
     pub closed: bool,
 }
 
@@ -1321,6 +1323,12 @@ impl RunContext {
             .collect()
     }
     pub fn take_steering_content(&self) -> Vec<crate::Content> {
+        self.take_steering_inputs()
+            .into_iter()
+            .map(|input| input.content)
+            .collect()
+    }
+    pub fn take_steering_inputs(&self) -> Vec<LiveInput> {
         self.steering
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1337,6 +1345,12 @@ impl RunContext {
     }
     #[doc(hidden)]
     pub fn pending_content_or_seal(&self) -> Vec<crate::Content> {
+        self.pending_inputs_or_seal()
+            .into_iter()
+            .map(|input| input.content)
+            .collect()
+    }
+    pub fn pending_inputs_or_seal(&self) -> Vec<LiveInput> {
         let mut state = self.steering.lock().unwrap_or_else(|e| e.into_inner());
         if state.pending.is_empty() {
             state.closed = true;
