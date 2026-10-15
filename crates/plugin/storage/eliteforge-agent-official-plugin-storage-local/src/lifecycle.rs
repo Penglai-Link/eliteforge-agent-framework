@@ -49,6 +49,7 @@ pub(crate) fn initialize(c: &rusqlite::Connection) -> Result<(), StateError> {
         CREATE INDEX IF NOT EXISTS ef_runs_session ON ef_runs(session_id,scope,status,lease_until);
         CREATE INDEX IF NOT EXISTS ef_runs_owner ON ef_runs(owner_session_id,status,lease_until);
         CREATE TABLE IF NOT EXISTS ef_events(id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES ef_sessions(id), run_id TEXT, goal_id TEXT, sequence INTEGER NOT NULL, kind TEXT NOT NULL, record TEXT NOT NULL, UNIQUE(session_id,sequence));
+        CREATE INDEX IF NOT EXISTS ef_events_kind ON ef_events(session_id, kind, sequence);
         CREATE UNIQUE INDEX IF NOT EXISTS ef_goal_run_judged ON ef_events(goal_id,run_id) WHERE kind='GOAL_JUDGED';
         CREATE TABLE IF NOT EXISTS ef_session_artifact_refs(session_id TEXT NOT NULL REFERENCES ef_sessions(id), artifact_id TEXT NOT NULL, PRIMARY KEY(session_id,artifact_id));
         CREATE TABLE IF NOT EXISTS ef_artifact_ownership(artifact_id TEXT PRIMARY KEY);
@@ -637,6 +638,20 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
         let id = session.to_owned();
         self.execute(move |c| { let mut q=c.prepare("SELECT record FROM ef_events WHERE session_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3").map_err(sql)?;
             q.query_map(params![id,after,limit],|r|r.get::<_,String>(0)).map_err(sql)?.map(|r|decode(r.map_err(sql)?)).collect()
+        }).await.map_err(worker)
+    }
+    async fn list_events_by_kind(
+        &self,
+        session: &str,
+        kind: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<SessionEvent>, StateError> {
+        let limit = bounded(limit)?;
+        let id = session.to_owned();
+        let kind = kind.to_owned();
+        self.execute(move |c| { let mut q=c.prepare("SELECT record FROM ef_events WHERE session_id=?1 AND kind=?2 AND sequence>?3 ORDER BY sequence LIMIT ?4").map_err(sql)?;
+            q.query_map(params![id,kind,after,limit],|r|r.get::<_,String>(0)).map_err(sql)?.map(|r|decode(r.map_err(sql)?)).collect()
         }).await.map_err(worker)
     }
     async fn recover_expired_runs(&self) -> Result<usize, StateError> {

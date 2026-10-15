@@ -238,6 +238,30 @@ pub trait SessionLifecycleStore: Send + Sync {
         after: u64,
         limit: usize,
     ) -> Result<Vec<SessionEvent>, StateError>;
+    /// Kind-filtered listing. Storage adapters with a filterable event index
+    /// should push the filter into SQL; the default pages `list_events` and
+    /// filters in memory.
+    async fn list_events_by_kind(
+        &self,
+        session: &str,
+        kind: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<SessionEvent>, StateError> {
+        let mut result = Vec::new();
+        let mut cursor = after;
+        loop {
+            let page = self.list_events(session, cursor, limit).await?;
+            let last = page.last().map(|event| event.sequence);
+            let complete = page.len() < limit;
+            result.extend(page.into_iter().filter(|event| event.kind == kind));
+            match last {
+                Some(sequence) if !complete => cursor = sequence,
+                _ => break,
+            }
+        }
+        Ok(result)
+    }
     async fn recover_expired_runs(&self) -> Result<usize, StateError>;
     async fn read_context(
         &self,
@@ -521,5 +545,14 @@ impl EventQueryService {
         limit: usize,
     ) -> Result<Vec<SessionEvent>, StateError> {
         self.0.list_events(session, after, limit).await
+    }
+    pub async fn list_by_kind(
+        &self,
+        session: &str,
+        kind: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<SessionEvent>, StateError> {
+        self.0.list_events_by_kind(session, kind, after, limit).await
     }
 }

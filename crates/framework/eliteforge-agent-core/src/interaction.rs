@@ -38,6 +38,20 @@ pub trait InteractionStore: Send + Sync {
     /// Idempotent publication. Reusing an ID with different ownership or payload must fail.
     async fn publish(&self, record: &InteractionRecord) -> Result<(), StateError>;
     async fn get(&self, session_id: &str, id: RunId) -> Result<InteractionRecord, StateError>;
+    /// Batched lookup in one storage round trip. Records must come back in the
+    /// requested order; a missing id is an error, matching `get`. The default
+    /// loops `get` for stores without batch support.
+    async fn get_many(
+        &self,
+        session_id: &str,
+        ids: &[RunId],
+    ) -> Result<Vec<InteractionRecord>, StateError> {
+        let mut records = Vec::with_capacity(ids.len());
+        for id in ids {
+            records.push(self.get(session_id, *id).await?);
+        }
+        Ok(records)
+    }
     /// Pending includes expired requests; the host can display their expiry.
     async fn pending(&self, session_id: &str) -> Result<Vec<InteractionRecord>, StateError>;
     /// Validate and save atomically. Identical answers are idempotent; conflicting ones fail.

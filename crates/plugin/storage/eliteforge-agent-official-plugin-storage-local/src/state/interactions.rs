@@ -92,6 +92,56 @@ impl InteractionStore for SqliteStateStore {
         self.execute(move |c| read_record(c, &session, id, max))
             .await
     }
+    async fn get_many(
+        &self,
+        session: &str,
+        ids: &[RunId],
+    ) -> Result<Vec<InteractionRecord>, StateError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let session = session.to_owned();
+        let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        let max = self.max_checkpoint_bytes;
+        self.execute(move |c| {
+            let mut found = std::collections::HashMap::new();
+            for chunk in ids.chunks(400) {
+                let placeholders = std::iter::repeat("?")
+                    .take(chunk.len())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT id, record FROM ef_interactions WHERE session_id=? AND id IN ({placeholders})"
+                );
+                let mut parameters: Vec<&str> = Vec::with_capacity(chunk.len() + 1);
+                parameters.push(session.as_str());
+                parameters.extend(chunk.iter().map(String::as_str));
+                let mut query = c.prepare(&sql).map_err(database_error)?;
+                let rows = query
+                    .query_map(rusqlite::params_from_iter(parameters), |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(database_error)?;
+                for row in rows {
+                    let (id, encoded) = row.map_err(database_error)?;
+                    // Same oversized-record guard as single reads.
+                    if encoded.len() <= max {
+                        found.insert(id, encoded);
+                    }
+                }
+            }
+            ids.iter()
+                .map(|id| {
+                    let encoded = found
+                        .get(id)
+                        .ok_or(StateError::NotFound)?;
+                    serde_json::from_str(encoded)
+                        .map_err(|_| StateError::Invalid("invalid interaction record".into()))
+                })
+                .collect()
+        })
+        .await
+    }
     async fn pending(&self, session: &str) -> Result<Vec<InteractionRecord>, StateError> {
         let session = session.to_owned();
         let max = self.max_checkpoint_bytes;
