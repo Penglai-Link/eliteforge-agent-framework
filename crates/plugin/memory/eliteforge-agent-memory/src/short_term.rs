@@ -91,7 +91,6 @@ impl MemoryRevision {
 pub enum MemoryBlockKind {
     SeedPromptPrefix,
     CurrentSessionCheckpoint,
-    SessionFamilyContext,
     CurrentSessionWorkingState,
     CurrentSessionHistory,
 }
@@ -100,7 +99,6 @@ impl MemoryBlockKind {
         match self {
             Self::SeedPromptPrefix => "seed_prompt_prefix",
             Self::CurrentSessionCheckpoint => "current_session_checkpoint",
-            Self::SessionFamilyContext => "session_family_context",
             Self::CurrentSessionWorkingState => "current_session_working_state",
             Self::CurrentSessionHistory => "current_session_history",
         }
@@ -166,7 +164,6 @@ impl ShortTermMemoryEngine {
         let order = [
             MemoryBlockKind::SeedPromptPrefix,
             MemoryBlockKind::CurrentSessionCheckpoint,
-            MemoryBlockKind::SessionFamilyContext,
             MemoryBlockKind::CurrentSessionWorkingState,
             MemoryBlockKind::CurrentSessionHistory,
         ];
@@ -178,7 +175,6 @@ impl ShortTermMemoryEngine {
                 MemoryBlockKind::CurrentSessionCheckpoint => {
                     &plan.block_budgets.current_session_checkpoint
                 }
-                MemoryBlockKind::SessionFamilyContext => &plan.block_budgets.session_family_context,
                 MemoryBlockKind::CurrentSessionWorkingState => {
                     &plan.block_budgets.current_session_working_state
                 }
@@ -203,7 +199,6 @@ impl ShortTermMemoryEngine {
                     if matches!(
                         kind,
                         MemoryBlockKind::CurrentSessionCheckpoint
-                            | MemoryBlockKind::SessionFamilyContext
                             | MemoryBlockKind::CurrentSessionWorkingState
                     ) {
                         let remaining = config.effective_limit_tokens.saturating_sub(tokens);

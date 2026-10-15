@@ -14,7 +14,7 @@ scope, generation and revision atomically with writes. A projection is derived
 memory and never replaces the source transcript.
 
 `ContextBlockBudgets::plan` reserves model output before allocating independent
-caps for seed instructions, checkpoint, related-session context, working state
+caps for seed instructions, checkpoint, working state
 and tools; history uses the actual remainder. `assess_request`,
 `remaining_history_budget` and `ratio_tokens` provide consistent control
 accounting. `estimate_serialized_tokens` conservatively counts all serialized

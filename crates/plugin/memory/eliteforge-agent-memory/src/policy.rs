@@ -9,7 +9,6 @@ pub struct ContextBlockBudgetConfig {
 pub struct ContextBlockBudgets {
     pub seed_prompt_prefix: ContextBlockBudgetConfig,
     pub current_session_checkpoint: ContextBlockBudgetConfig,
-    pub session_family_context: ContextBlockBudgetConfig,
     pub current_session_working_state: ContextBlockBudgetConfig,
     pub tool_schema: ContextBlockBudgetConfig,
 }
@@ -24,7 +23,6 @@ pub struct ModelContextBudgetPlan {
 pub struct ContextBlockBudgetPlans {
     pub seed_prompt_prefix: ContextBlockBudgetPlan,
     pub current_session_checkpoint: ContextBlockBudgetPlan,
-    pub session_family_context: ContextBlockBudgetPlan,
     pub current_session_working_state: ContextBlockBudgetPlan,
     pub tool_schema: ContextBlockBudgetPlan,
     pub current_session_history: ContextBlockBudgetPlan,
@@ -49,7 +47,6 @@ impl Default for ContextBlockBudgets {
             // small (32k) windows still admit the full system prompt set.
             seed_prompt_prefix: cap(8_000, Some(16_000)),
             current_session_checkpoint: cap(2_000, Some(6_000)),
-            session_family_context: cap(1_000, Some(12_000)),
             current_session_working_state: cap(1_000, Some(2_000)),
             tool_schema: cap(10_000, None),
         }
@@ -83,10 +80,6 @@ impl ContextBlockBudgets {
                 current_session_checkpoint: block(
                     "current_session_checkpoint",
                     &self.current_session_checkpoint,
-                ),
-                session_family_context: block(
-                    "session_family_context",
-                    &self.session_family_context,
                 ),
                 current_session_working_state: block(
                     "current_session_working_state",
