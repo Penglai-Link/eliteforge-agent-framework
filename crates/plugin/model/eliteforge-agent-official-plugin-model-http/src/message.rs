@@ -162,6 +162,7 @@ impl AgentMessage {
         self.parts
             .iter()
             .filter_map(AgentMessagePart::render_text)
+            .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
     }
@@ -170,6 +171,7 @@ impl AgentMessage {
         self.parts
             .iter()
             .filter_map(AgentMessagePart::render_plain_text)
+            .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
     }
@@ -179,6 +181,7 @@ impl AgentMessage {
             .parts
             .iter()
             .filter_map(AgentMessagePart::render_output_text)
+            .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n");
         if text.is_empty() {

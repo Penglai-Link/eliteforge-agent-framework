@@ -96,7 +96,10 @@ impl fw::ChatModel for ProtocolChatModel {
 async fn emit(stream: &dyn fw::ChatStream, event: ModelStreamEvent) {
     match event.kind {
         ModelStreamEventKind::Text => stream.text_delta(&event.delta).await,
-        _ => stream.reasoning_delta(&event.delta).await,
+        // The summary is the presentable reasoning surface; raw chain-of-thought
+        // stays internal evidence and is never forwarded to public streams.
+        ModelStreamEventKind::ReasoningSummary => stream.reasoning_delta(&event.delta).await,
+        ModelStreamEventKind::Reasoning => {}
     }
 }
 #[derive(Clone)]
