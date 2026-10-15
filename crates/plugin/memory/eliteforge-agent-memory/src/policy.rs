@@ -44,7 +44,10 @@ impl Default for ContextBlockBudgets {
             max_tokens: tokens,
         };
         Self {
-            seed_prompt_prefix: cap(5_000, Some(16_000)),
+            // Protected instructions plus application data share the seed
+            // pool. The ratio must dominate the post-tool-schema remainder so
+            // small (32k) windows still admit the full system prompt set.
+            seed_prompt_prefix: cap(8_000, Some(16_000)),
             current_session_checkpoint: cap(2_000, Some(6_000)),
             session_family_context: cap(1_000, Some(12_000)),
             current_session_working_state: cap(1_000, Some(2_000)),
