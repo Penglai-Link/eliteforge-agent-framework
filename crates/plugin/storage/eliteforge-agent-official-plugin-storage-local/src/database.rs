@@ -7,17 +7,21 @@ use std::{
     path::Path,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio_rusqlite::{Connection, rusqlite};
+
+const READER_POOL_SIZE: usize = 4;
 
 #[derive(Clone)]
 pub struct SqliteDatabase(Arc<DatabaseInner>);
 struct DatabaseInner {
     connection: Connection,
     gate: Arc<Mutex<()>>,
+    readers: std::sync::RwLock<Vec<Connection>>,
+    reader_next: AtomicUsize,
 }
 #[derive(Clone)]
 struct Binding {
@@ -29,20 +33,58 @@ tokio::task_local! { static TRANSACTION: Binding; }
 
 impl SqliteDatabase {
     pub async fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
+        let path = path.as_ref();
         let connection = Connection::open(path).await?;
         connection
             .call(|c| -> rusqlite::Result<()> {
                 c.busy_timeout(std::time::Duration::from_secs(5))?;
+                // WAL keeps transactions durable across process crashes at
+                // synchronous=NORMAL; only an OS-level power loss can lose the
+                // latest commits. FULL would fsync every commit for no
+                // practical gain in this embedded single-writer deployment.
                 c.execute_batch(
-                    "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
+                    "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
                 )
             })
             .await
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let readers = open_readers(path).await;
         Ok(Self(Arc::new(DatabaseInner {
             connection,
             gate: Arc::new(Mutex::new(())),
+            readers: std::sync::RwLock::new(readers),
+            reader_next: AtomicUsize::new(0),
         })))
+    }
+
+    /// WAL allows one writer plus any number of readers. Read-only pool
+    /// connections let host repository reads run concurrently instead of
+    /// queueing behind the serialized write connection.
+    pub async fn call_read<F, T, E>(&self, operation: F) -> Result<T, tokio_rusqlite::Error<E>>
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        // A read inside an active transaction must observe its own writes and
+        // keep the savepoint ordering, so it joins the write connection.
+        if TRANSACTION.try_with(|_| ()).is_ok() {
+            return self.call(operation).await;
+        }
+        let reader = self.0
+            .readers
+            .read()
+            .ok()
+            .and_then(|readers| {
+                let count = readers.len();
+                (count > 0).then(|| {
+                    readers[self.0.reader_next.fetch_add(1, Ordering::Relaxed) % count].clone()
+                })
+            });
+        match reader {
+            Some(reader) => reader.call(operation).await,
+            None => self.call(operation).await,
+        }
     }
 
     /// Host repositories use this same handle, rather than opening connections.
@@ -92,18 +134,38 @@ impl SqliteDatabase {
         T: Send + 'static,
         E: Send + 'static,
     {
+        Self::block_on_call(|| Box::pin(self.call(operation)))
+    }
+
+    /// Synchronous host read on the WAL reader pool. Join the write connection
+    /// when a transaction is active on this thread.
+    pub fn call_read_blocking<F, T, E>(&self, operation: F) -> Result<T, tokio_rusqlite::Error<E>>
+    where
+        F: FnOnce(&mut rusqlite::Connection) -> Result<T, E> + Send + 'static,
+        T: Send + 'static,
+        E: Send + 'static,
+    {
+        Self::block_on_call(|| Box::pin(self.call_read(operation)))
+    }
+
+    fn block_on_call<T, E, Fut>(
+        call: impl FnOnce() -> Fut,
+    ) -> Result<T, tokio_rusqlite::Error<E>>
+    where
+        Fut: Future<Output = Result<T, tokio_rusqlite::Error<E>>>,
+    {
         // Synchronous callers cannot yield back to Tokio to replenish its task
         // budget. Keep the current task-local transaction while polling without
         // cooperative scheduling; the SQL still executes on the SQLite worker.
-        let call = || futures::executor::block_on(tokio::task::unconstrained(self.call(operation)));
+        let run = || futures::executor::block_on(tokio::task::unconstrained(call()));
         if tokio::runtime::Handle::try_current().is_ok_and(|handle| {
             handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
         }) {
             // Free the runtime worker while waiting for a native transaction.
             // The closure stays on this thread and retains its task-local binding.
-            tokio::task::block_in_place(call)
+            tokio::task::block_in_place(run)
         } else {
-            call()
+            run()
         }
     }
 
@@ -196,8 +258,42 @@ impl SqliteDatabase {
             return Err(tokio_rusqlite::Error::ConnectionClosed);
         }
         let _gate = self.0.gate.clone().lock_owned().await;
+        let readers = self
+            .0
+            .readers
+            .write()
+            .ok()
+            .map(|mut readers| std::mem::take(&mut *readers))
+            .unwrap_or_default();
+        for reader in readers {
+            let _ = reader.close().await;
+        }
         self.0.connection.clone().close().await
     }
+}
+
+async fn open_readers(path: &Path) -> Vec<Connection> {
+    let is_memory = path.as_os_str() == ":memory:" || path.to_string_lossy().starts_with("file::memory:");
+    if is_memory {
+        return Vec::new();
+    }
+    let mut readers = Vec::with_capacity(READER_POOL_SIZE);
+    for _ in 0..READER_POOL_SIZE {
+        let Ok(reader) = Connection::open(path).await else {
+            break;
+        };
+        let configured = reader
+            .call(|c| -> rusqlite::Result<()> {
+                c.busy_timeout(std::time::Duration::from_secs(5))?;
+                c.execute_batch("PRAGMA query_only=ON;")
+            })
+            .await
+            .is_ok();
+        if configured {
+            readers.push(reader);
+        }
+    }
+    readers
 }
 
 fn worker(_: impl std::fmt::Display) -> StateError {

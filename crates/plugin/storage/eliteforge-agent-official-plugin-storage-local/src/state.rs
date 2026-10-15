@@ -61,7 +61,7 @@ impl SqliteStateStore {
         let timeout = options.busy_timeout;
         connection.call(move |connection| -> Result<(), StateError> {
             connection.busy_timeout(timeout).map_err(database_error)?;
-            connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;").map_err(database_error)?;
+            connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;").map_err(database_error)?;
             let tx = crate::database::begin(connection).map_err(database_error)?;
             tx.execute_batch("CREATE TABLE IF NOT EXISTS ef_core_metadata (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
                 INSERT OR IGNORE INTO ef_core_metadata VALUES ('schema_version', 1);
