@@ -44,7 +44,7 @@ impl WorkflowDefinition {
                 ));
             }
             if stage.instructions.iter().any(|m| {
-                !matches!(m.role, Role::System | Role::Developer)
+                m.role != Role::System
                     || !m.tool_calls.is_empty()
                     || m.tool_call_id.is_some()
                     || m.tool_result.is_some()

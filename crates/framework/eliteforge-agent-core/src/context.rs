@@ -379,6 +379,10 @@ pub struct ContextBlockReport {
     pub position: usize,
     pub source_version: Option<String>,
     pub original_tokens: Option<usize>,
+    /// Resolved plugin query ceiling for this request, before shared-pool allocation.
+    /// Absent in reports persisted before this field was introduced.
+    #[serde(default)]
+    pub configured_tokens: Option<usize>,
     pub allocated_tokens: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reduction_budget_tokens: Option<usize>,
@@ -775,6 +779,7 @@ impl DefaultContextAssembler {
                 position,
                 source_version: None,
                 original_tokens: None,
+                configured_tokens: Some(query_budget.max_tokens),
                 allocated_tokens: query_budget.max_tokens,
                 reduction_budget_tokens: None,
                 final_tokens: 0,
@@ -1246,7 +1251,7 @@ fn validate_contribution(
     }
     if block.messages.iter().any(|m| {
         (if block.trust == ContextTrust::Instruction {
-            !matches!(m.role, Role::System | Role::Developer)
+            m.role != Role::System
         } else {
             m.role != Role::User
         }) || !m.tool_calls.is_empty()
@@ -1263,11 +1268,11 @@ fn validate_contribution(
 fn validate_history_projection(source: &[Message], output: &[Message]) -> Result<(), AgentError> {
     let fixed: Vec<_> = source
         .iter()
-        .filter(|m| matches!(m.role, Role::System | Role::Developer))
+        .filter(|m| m.role == Role::System)
         .collect();
     let projected: Vec<_> = output
         .iter()
-        .filter(|m| matches!(m.role, Role::System | Role::Developer))
+        .filter(|m| m.role == Role::System)
         .collect();
     if fixed != projected {
         return Err(AgentError::InvalidConfiguration(
@@ -1374,8 +1379,7 @@ pub fn remove_oldest_turn(messages: &mut Vec<Message>) -> bool {
     let range = user_indices[0]..user_indices[1];
     let mut index = 0;
     messages.retain(|message| {
-        let retain =
-            !range.contains(&index) || matches!(message.role, Role::System | Role::Developer);
+        let retain = !range.contains(&index) || message.role == Role::System;
         index += 1;
         retain
     });

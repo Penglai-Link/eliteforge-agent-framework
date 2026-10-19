@@ -936,7 +936,7 @@ impl ModelExecutionRuntime<'_> {
                     let stage = &self.state.definition.stages[self.state.stage];
                     let instructions = stage.instructions.clone();
                     if instructions.iter().any(|m| {
-                        !matches!(m.role, Role::System | Role::Developer)
+                        m.role != Role::System
                             || !m.tool_calls.is_empty()
                             || m.tool_call_id.is_some()
                             || m.tool_result.is_some()

@@ -11,6 +11,8 @@ media = ["dep:eliteforge-agent-official-plugin-tools-media", "eliteforge-agent-c
 discovery = ["dep:eliteforge-agent-official-plugin-tools-discovery", "eliteforge-agent-capability-tools/discovery"]
 
 [dependencies]
+eliteforge-agent-capability-chunking = { path = "../eliteforge-agent-capability-chunking", version = "0.1.0" }
+eliteforge-agent-capability-auto-routing = { path = "../eliteforge-agent-capability-auto-routing", version = "0.1.0" }
 eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core" }
 eliteforge-agent-capability-tools = { path = "../eliteforge-agent-capability-tools" }
 eliteforge-agent-official-plugin-model-genai = { path = "../../plugin/model/eliteforge-agent-official-plugin-model-genai" }

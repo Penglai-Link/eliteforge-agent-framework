@@ -38,7 +38,6 @@ impl fmt::Debug for Extensions {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Role {
     System,
-    Developer,
     User,
     Assistant,
     Tool,

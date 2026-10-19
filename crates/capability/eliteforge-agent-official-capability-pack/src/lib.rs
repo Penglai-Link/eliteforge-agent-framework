@@ -8,6 +8,8 @@
 use eliteforge_agent_core::{CapabilityConfig, CapabilityPack, ConfiguredPluginFactory, Plugin};
 use std::{path::PathBuf, sync::Arc};
 
+pub use eliteforge_agent_capability_auto_routing as auto_routing;
+pub use eliteforge_agent_capability_chunking as chunking;
 pub use eliteforge_agent_capability_tools as tools;
 pub use eliteforge_agent_official_plugin_agui as agui;
 pub use eliteforge_agent_official_plugin_model_genai as model;
@@ -30,6 +32,7 @@ pub use eliteforge_agent_official_plugin_tools_web as web;
 /// Configure replacements on the pack itself. Adding a plugin with an existing
 /// ID through FrameworkBuilder::plugin is an error, not an override.
 pub struct EliteForgeOfficialCapabilityPack {
+    chunking: Option<eliteforge_agent_core::ChunkStrategies>,
     model: Option<Arc<dyn Plugin>>,
     storage: Arc<storage::LocalStoragePlugin>,
     model_factory: Option<ConfiguredPluginFactory>,
@@ -55,6 +58,7 @@ impl EliteForgeOfficialCapabilityPack {
     /// reads the host's global providers during installation.
     pub fn new(database: impl Into<PathBuf>, artifact_root: impl Into<PathBuf>) -> Self {
         Self {
+            chunking: Some(chunking::built_in_chunk_strategies()),
             model: None,
             model_factory: Some(ConfiguredPluginFactory::from_config(
                 model::GenaiPlugin::default(),
@@ -76,6 +80,15 @@ impl EliteForgeOfficialCapabilityPack {
             #[cfg(feature = "discovery")]
             discovery: None,
         }
+    }
+
+    pub fn chunking(mut self, strategies: eliteforge_agent_core::ChunkStrategies) -> Self {
+        self.chunking = Some(strategies);
+        self
+    }
+    pub fn without_chunking(mut self) -> Self {
+        self.chunking = None;
+        self
     }
 
     /// Replace the default Genai plugin with configured Genai or a custom model plugin.
@@ -202,6 +215,11 @@ impl CapabilityPack for EliteForgeOfficialCapabilityPack {
     }
     fn included_packs(&self) -> Vec<Arc<dyn CapabilityPack>> {
         let mut packs: Vec<Arc<dyn CapabilityPack>> = Vec::new();
+        if let Some(strategies) = &self.chunking {
+            packs.push(Arc::new(chunking::ChunkingCapabilityPack(
+                strategies.clone(),
+            )));
+        }
         let mut local = tools::LocalToolsConfig::default();
         let mut has_local = false;
         if let Some(config) = &self.read_only_filesystem {

@@ -4,6 +4,10 @@ extern crate self as eliteforge_agent_core;
 pub mod annotations;
 pub use annotations::*;
 pub mod budget;
+pub mod chunking;
+pub use chunking::*;
+pub mod retrieval_evaluation;
+pub use retrieval_evaluation::*;
 pub mod capability_packs;
 pub mod collaboration;
 pub mod content;
@@ -82,3 +86,6 @@ pub use capabilities::*;
 
 mod configured_factory;
 pub use configured_factory::*;
+
+mod auto_routing;
+pub use auto_routing::*;

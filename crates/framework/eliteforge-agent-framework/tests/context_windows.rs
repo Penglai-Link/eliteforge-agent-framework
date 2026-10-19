@@ -209,6 +209,7 @@ async fn layout_order_is_independent_of_registration_order_and_reports_explain_o
     );
     let reports = reports.0.lock().unwrap();
     let report = &reports[0];
+    assert_eq!(report.blocks.iter().map(|block| block.configured_tokens).collect::<Vec<_>>(), vec![Some(40), Some(30), Some(30), Some(100)]);
     assert_eq!(
         report
             .blocks

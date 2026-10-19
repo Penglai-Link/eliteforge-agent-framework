@@ -299,9 +299,7 @@ fn convert_request(
             names.insert(call.id.clone(), call.call_name.clone());
         }
         let converted = match message.role {
-            Role::System | Role::Developer => {
-                ChatMessage::system(to_native_content(message.content)?)
-            }
+            Role::System => ChatMessage::system(to_native_content(message.content)?),
             Role::User => ChatMessage::user(to_native_content(message.content)?),
             Role::Tool => {
                 if message.content.has_media() {

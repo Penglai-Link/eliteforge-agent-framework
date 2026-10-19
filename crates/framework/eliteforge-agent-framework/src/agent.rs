@@ -58,6 +58,19 @@ impl AgentBuilder {
                 .map(|service| service.0.clone())
                 .or_else(|| {
                     registry
+                        .get::<AutoRouters>()
+                        .filter(|routers| routers.chat.is_some())
+                        .map(|routers| {
+                            Arc::new(ChatAutoRoutingStrategy {
+                                routers: (*routers).clone(),
+                                routing: registry
+                                    .get::<ModelRouting>()
+                                    .map_or_else(ModelRouting::default, |r| (*r).clone()),
+                            }) as Arc<dyn ModelSelectionStrategy>
+                        })
+                })
+                .or_else(|| {
+                    registry
                         .get::<ModelRouting>()
                         .filter(|r| {
                             r.defaults.contains_key(&ModelOperation::Chat)
@@ -170,9 +183,14 @@ impl AgentBuilder {
                         .iter()
                         .map(|s| s.0.clone()),
                 )),
-                operations: Arc::new(crate::capability_execution::ModelClient::from_runtime(
-                    model_runtime.clone(),
-                )),
+                operations: Arc::new(
+                    crate::capability_execution::ModelClient::from_runtime(model_runtime.clone())
+                        .with_auto_routers(
+                            registry
+                                .get::<AutoRouters>()
+                                .map_or_else(AutoRouters::default, |r| (*r).clone()),
+                        ),
+                ),
                 interactions: registry
                     .get::<InteractionStoreService>()
                     .map(|s| InteractionManager(s.0.clone())),
@@ -2245,7 +2263,11 @@ impl RunControl {
         self.steer_input(content.into())
     }
     /// Deliver host-owned context without attributing it to the human sender.
-    pub fn notify(&self, message: impl Into<String>, provenance: MessageProvenance) -> Result<(), AgentError> {
+    pub fn notify(
+        &self,
+        message: impl Into<String>,
+        provenance: MessageProvenance,
+    ) -> Result<(), AgentError> {
         let mut input = LiveInput::from(Content::from(message.into()));
         input.provenance = Some(provenance);
         self.steer_input(input)

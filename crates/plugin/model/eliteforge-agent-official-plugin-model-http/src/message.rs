@@ -69,10 +69,6 @@ impl AgentMessage {
         Self::text("system", content)
     }
 
-    pub fn developer(content: impl Into<String>) -> Self {
-        Self::text("developer", content)
-    }
-
     pub fn user(content: impl Into<String>) -> Self {
         Self::text("user", content)
     }

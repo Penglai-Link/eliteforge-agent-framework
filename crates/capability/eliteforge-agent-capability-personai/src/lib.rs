@@ -2,18 +2,26 @@
 
 #[cfg(test)]
 use eliteforge_agent_test_support::TestBuilder;
+mod auto_routing;
 mod connection;
 mod context;
+mod document_parsing;
+mod embedding_candidates;
 mod models;
 mod realtime;
 mod services;
 mod sync;
 mod tools;
+pub use auto_routing::*;
+pub use document_parsing::{PersonAiDocumentParsingIntent, personai_document_parse_mode};
+pub use embedding_candidates::{
+    PersonAiEmbeddingKind, PersonAiEmbeddingModel, personai_embedding_candidates, personai_embedding_batch_limit,
+};
 
 pub use connection::PersonAiConnection;
 pub use context::{AccountContext, PersonAiContextHandle, PersonAiContextProvider};
 pub use crab_serverapi as sdk;
-pub use models::PersonAiModels;
+pub use models::{PersonAiModels, personai_embedding_request_body, personai_generation_request_body};
 pub use services::{PersonAiServices, detect_device_id, validate_device_id};
 pub use sync::{PersonAiModelSync, PersonAiSyncStatus, SyncDomainStatus};
 pub use tools::{PersonAiToolProvider, personai_tool_catalog};
@@ -35,8 +43,11 @@ pub struct PersonAiConfig {
     pub sync_interval: Duration,
     /// Responses-only models are absent from PersonAI's Chat model-list endpoint.
     pub responses_only_models: Vec<String>,
-    /// Embedding models have no discovery endpoint and must be configured explicitly.
+    /// Text embedding bindings are explicitly supplied by the host.
     pub embedding_models: Vec<String>,
+    /// Host-verified models that accept text and images in the same embedding space.
+    /// The public media catalog does not declare input modalities; never infer them from names.
+    pub multimodal_embedding_models: Vec<String>,
 }
 
 impl PersonAiConfig {
@@ -47,6 +58,7 @@ impl PersonAiConfig {
             sync_interval: Duration::from_secs(300),
             responses_only_models: Vec::new(),
             embedding_models: Vec::new(),
+            multimodal_embedding_models: Vec::new(),
         }
     }
 }
@@ -55,6 +67,7 @@ impl PersonAiConfig {
 pub struct PersonAiCapabilityPack {
     connection: Arc<PersonAiConnection>,
     register_tools: bool,
+    auto_routers: Option<eliteforge_agent_core::AutoRouters>,
 }
 
 impl PersonAiCapabilityPack {
@@ -62,6 +75,7 @@ impl PersonAiCapabilityPack {
         Self {
             connection,
             register_tools: true,
+            auto_routers: None,
         }
     }
 
@@ -75,6 +89,11 @@ impl PersonAiCapabilityPack {
     /// through its own shared discovery catalog or other ToolProvider composition.
     pub fn without_tools(mut self) -> Self {
         self.register_tools = false;
+        self
+    }
+    /// Install selected routing implementations with the host's data source.
+    pub fn with_auto_routers(mut self, routers: eliteforge_agent_core::AutoRouters) -> Self {
+        self.auto_routers = Some(routers);
         self
     }
 
@@ -100,6 +119,11 @@ impl CapabilityPack for PersonAiCapabilityPack {
             runtime: ModelRuntime::new(ModelRuntimeUpdate::new("", 0, vec![]))
                 .expect("empty model runtime is valid"),
         })];
+        if let Some(routers) = &self.auto_routers {
+            plugins.push(Arc::new(eliteforge_agent_core::AutoRoutersPlugin(
+                routers.clone(),
+            )));
+        }
         if self.register_tools {
             plugins.push(Arc::new(
                 eliteforge_agent_official_plugin_tools_discovery::ToolDiscoveryPlugin::new()
@@ -232,7 +256,10 @@ mod tests {
             .build()
             .await
             .unwrap();
-        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 8);
+        assert_eq!(
+            server.requests.load(std::sync::atomic::Ordering::SeqCst),
+            10
+        );
         // A shared publication must reach every attached Agent even when their
         // default/stage routing references models removed by discovery.
         *server.video.lock().unwrap() = "[]".into();
@@ -330,7 +357,10 @@ mod tests {
             PersonAiConnection::connect(PersonAiConfig::new(&server.url), context, None)
                 .await
                 .unwrap();
-        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 8);
+        assert_eq!(
+            server.requests.load(std::sync::atomic::Ordering::SeqCst),
+            10
+        );
         let pack = PersonAiCapabilityPack::new(connection.clone());
         let host_services = pack.services();
         let host_sync = pack.sync();
@@ -351,7 +381,10 @@ mod tests {
         assert!(!Arc::ptr_eq(&first_runtime, &second_runtime));
         assert_eq!(first_runtime.snapshot().chat.models().len(), 1);
         assert_eq!(second_runtime.snapshot().chat.models().len(), 1);
-        assert_eq!(server.requests.load(std::sync::atomic::Ordering::SeqCst), 8);
+        assert_eq!(
+            server.requests.load(std::sync::atomic::Ordering::SeqCst),
+            10
+        );
         assert!(Arc::ptr_eq(
             &host_services,
             container

@@ -851,6 +851,13 @@ impl<T: ?Sized> Clone for CapabilityCatalog<T> {
     }
 }
 impl<T: ?Sized> CapabilityCatalog<T> {
+    pub fn configured_model<'a>(&'a self, choice: &'a ModelChoice) -> Option<&'a ModelRef> {
+        choice
+            .model
+            .as_ref()
+            .or_else(|| self.stages.get(&choice.stage))
+            .or(self.default.as_ref())
+    }
     pub fn new(bindings: Vec<ModelRegistration<T>>) -> Result<Self, AgentError> {
         let mut catalog = Self {
             bindings: BTreeMap::new(),

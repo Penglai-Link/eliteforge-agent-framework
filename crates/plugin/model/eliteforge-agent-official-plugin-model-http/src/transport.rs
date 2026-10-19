@@ -238,7 +238,22 @@ impl ModelTransport for PersonAiModelTransport {
 fn person_ai_error(mut error: ModelError) -> ModelError {
     if let ModelError::Provider(ref mut details) = error {
         details.provider = "personai".into();
-        if details.http_status == Some(429) || details.business_code == Some(429) {
+        // Upstream rate limits (for example 1302) are temporary. Only the
+        // PersonAI business/gateway quota response has quota semantics.
+        let message = details.message.to_ascii_lowercase();
+        let rate_limited = matches!(
+            details.error_type.as_deref(),
+            Some("1302" | "rate_limit_exceeded" | "rate_limit_error")
+        ) || message.contains("速率限制")
+            || message.contains("请求频率")
+            || message.contains("rate limit");
+        if (details.http_status == Some(429) || details.business_code == Some(429)) && rate_limited
+        {
+            details.category = ProviderErrorCategory::Transient;
+        } else if details.business_code == Some(429)
+            || (details.http_status == Some(429)
+                && details.error_type.as_deref() == Some("gateway_error"))
+        {
             details.category = ProviderErrorCategory::Quota;
         } else if details.http_status == Some(404) {
             details.category = ProviderErrorCategory::Unavailable;

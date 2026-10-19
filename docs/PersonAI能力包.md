@@ -5,6 +5,7 @@
 | SDK 能力 | Framework 接入方式 |
 | --- | --- |
 | Chat Completions、Responses | `ChatModel`；Responses-only 模型因列表接口不可发现，须显式配置 |
+| Rerank | `RerankModel`；通过 SDK 原生 `RerankClient` 调用 `/api/v1/rerank`，保留相关性分数和可选用量 |
 | Embeddings | `EmbeddingModel`；模型 ID 由宿主显式配置 |
 | 图片、视频 | 独立生成模型接口及任务查询；SDK 无远端取消接口时明确返回不支持 |
 | 文件语音转写、实时转写 | 语音识别与实时会话接口；服务端选模型，对外只公布 `speech-auto`，不伪造指定模型路由 |
@@ -22,9 +23,65 @@
 
 通过 `connection.services()` 取得业务客户端；通过 `connection.sync().request_refresh()` 请求后台刷新，或等待 `refresh_now().await` 完成手动刷新。并发刷新共享同一轮请求。`sync().status().await` 返回各域同步状态。
 
+## 自动路由
+
+Framework 在 Core 中定义五类可替换接口，显示名称统一如下：
+
+| 接口 | 名称 | 输入范围 |
+| --- | --- | --- |
+| `ChatAutoRouter` | 对话自动路由 | Agent 对话；由宿主提供候选，选中后校验调用兼容性 |
+| `TextGenerationAutoRouter` | 文本生成自动路由 | 标题、摘要等直接 LLM 调用，独立于对话路由 |
+| `TextEmbeddingAutoRouter` | 向量自动路由 | 纯文本向量输入 |
+| `MultimodalEmbeddingAutoRouter` | 多模态向量自动路由 | 宿主或能力包提供可处理图文等内容的候选 |
+| `RerankAutoRouter` | 重排自动路由 | 查询与候选文档 |
+
+宿主通过 `AutoRouteDataSource` 提供已授权候选的快照和策略元数据，也可以自行实现任一接口。数据源只能限制或补充当前运行时模型的信息；Framework 拒绝未注册的候选以及候选范围以外的选择。凭据、数据库访问、账号切换和会话分配记录仍由宿主管理。
+
+```mermaid
+flowchart LR
+    H[Tron 宿主：目录、授权、会话状态] --> S[AutoRouteDataSource]
+    S --> R[五类自动路由接口]
+    G[通用能力包：顺序选择、稳定分配] -. 实现 .-> R
+    P[PersonAI 能力包：质量筛选、协议偏好] -. 实现 .-> R
+    C[宿主自定义实现] -. 实现 .-> R
+    R --> V[Framework：接口调度与所选绑定校验]
+    V --> E[模型执行、超时、取消、预算、重试]
+```
+
+`eliteforge-agent-capability-auto-routing` 提供 `OrderedAutoRouter`、`StableAutoRouter` 和 `RunScopedFailoverAutoRouter`。顺序实现遵循候选顺序，稳定分配实现根据宿主作用域分配并保留仍可用的会话模型；运行级对话实现记录本轮失败候选，后续步骤继续使用成功模型，上下文恢复不会再次消耗候选。`AutoRoutingCapabilityPack` 可将选定实现安装到 Agent；官方能力包通过 `auto_routing` 模块导出这些实现。
+
+PersonAI 能力包提供 `PersonAiAutoRouter`，可选择顺序或稳定分配，配置 `high_quality_only` 和 `prefer_responses`。启用质量筛选后，PersonAI 候选必须明确声明 `personai.quality = "High"` 或在 `personai.quality_tiers` 中包含 high；缺失质量信息不视为高质量。`personai.provider` 标记候选是否来自 PersonAI，宿主本地模型保留自身的授权规则。质量筛选默认关闭，由宿主明确启用。
+
+```rust,ignore
+let policy = Arc::new(PersonAiAutoRouter {
+    high_quality_only: true,
+    prefer_responses: true,
+    ..Default::default()
+});
+let routers = AutoRouters {
+    source: Some(tron_model_source), // 宿主实现 Arc<dyn AutoRouteDataSource>
+    chat: Some(policy),
+    text_generation: Some(Arc::new(PersonAiTextGenerationAutoRouter)),
+    embedding: Some(Arc::new(PersonAiAutoRouter::default())),
+    multimodal_embedding: Some(Arc::new(PersonAiAutoRouter::default())),
+    rerank: Some(Arc::new(PersonAiAutoRouter::default())),
+};
+let pack = PersonAiCapabilityPack::new(connection).with_auto_routers(routers);
+```
+
+`ModelClient::text_generation(request, limits, stage)` 使用独立的文本生成路由，复用模型执行、预算、超时和取消能力，不创建 Agent 或会话。宿主也可先调用 `AutoRouters::select_text_generation`，再通过已有模型客户端执行选中的绑定。
+
+`PersonAiTextGenerationAutoRouter` 与 `personai_text_generation_candidates` 只接收明确标为 `Middle` 或 `Low` 的 PersonAI 候选，优先中质量；高质量及质量未知的模型不进入该候选集。Tron 的标题生成等临时调用默认使用此路由；正式对话自动路由仅接收高质量候选。质量规则属于 PersonAI 能力包和 Tron，Framework 不解释这些档位。思考参数由各调用场景显式设置。
+
+对话中的显式模型和已有选模策略，以及向量、重排操作的阶段规则和默认模型优先于对应自动路由。向量、重排观察调用在首次选定后固定运行时快照，再执行重试，因此目录更新不会使重试转到另一个账号的适配器。向量索引仍需保存完整 `EmbeddingSpace`，查询必须匹配模型、版本、维度和预处理规则；自动路由不能替换已有索引的向量空间。纯文本请求使用向量自动路由，包含媒体的请求使用独立的多模态向量自动路由；候选由宿主直接提供，供应商标签和候选筛选由对应能力包处理。Framework 核心不解释供应商标签、不按模态改写候选，仅在选中模型后校验调用契约。显式模型和索引空间仍遵循原有模型能力契约。宿主也可调用 `AutoRouters::select_multimodal_embedding` 为多模态索引的纯文本查询选择初始绑定，随后保存 `EmbeddingSpace`。
+
+PersonAI 适配器通过 SDK 的 `EmbeddingsRequest` 支持文本、图片 URL、图片 Base64，以及同一条输入中的图片和说明文字；每条输入最多一张图片，不支持的块直接报错。宿主将已确认支持图文的模型填入 `PersonAiConfig.multimodal_embedding_models`，适配器才会注册 Text/Image 能力。模型列表返回生效 `tags` 与 `dimension`：`text_embedding` 对应文本向量，`multimodal_embedding` 对应图文向量。缺失标签不授予向量能力；宿主也可显式声明绑定。型号名称不参与能力判断。
+
+Tron 的对话路由通过本地目录构造数据源，注入 PersonAI 策略，并保存会话选择；`with_auto_router` 可以替换该策略。向量和重排路由从宿主提供的可用目录中选择具体绑定。向量索引在首批调用前确定具体模型，后续批次、断点恢复和检索沿用同一模型；重排自动路由选择原生 rerank 模型，经 SDK 加密传输调用 `/api/v1/rerank`，保留上游相关性分数。
+
 ## 模型同步
 
-PersonAI API 是模型列表真源。首次连接必须联网；任一必需域失败就返回初始化错误，缓存不能替代这次联网验证。初始化成功后默认每 5 分钟刷新一次。Chat 列表分别请求 low、middle、high 三档，保留完整 `provider_code/model_code`；图片、视频、语音和两类 AIGC 检测按域独立同步。已运行连接的某域返回真正的空列表时移除该域模型；请求失败或缺失、`null` 数据则保留该域上次成功结果，并标记过期。同步使用 SDK 公开的类型化对象接口区分空列表和无数据，不改 SDK 源码。
+PersonAI API 是模型列表真源。首次连接必须联网；任一必需域失败就返回初始化错误，缓存不能替代这次联网验证。初始化成功后默认每 5 分钟刷新一次。Chat 列表分别请求 low、middle、high 三档，保留完整 `provider_code/model_code`；图片、视频、语音、向量、原生重排和两类 AIGC 检测按域独立同步。已运行连接的某域返回真正的空列表时移除该域模型；请求失败或缺失、`null` 数据则保留该域上次成功结果，并标记过期。同步使用 SDK 公开的类型化对象接口区分空列表和无数据，模型标签和维度由 SDK 的公开模型类型传递。
 
 每次更新只替换 PersonAI 自己的模型连接，不清除同一 Agent 的 Genai 等其他连接。模型描述、协议、适配器和当前授权上下文作为一份运行时快照发布；已开始的调用持有旧快照直到结束。下架模型拒绝新调用，已提交的视频任务在同一进程内仍用提交时的绑定查询；重启后若旧授权适配器无法重建，会明确返回不可用。账号切换时先撤下旧账号目录，旧账号迟到的同步结果不得覆盖新目录。
 
@@ -55,7 +112,7 @@ ModelRecoveryPlugin(ModelRecoveryPolicy {
 
 恢复不会重新执行整个 `run` 或已经完成的工具。图片、视频提交不使用聊天恢复策略，结果不确定时不自动再次提交。已取得任务 ID 的查询使用提交时绑定，因此模型下架后仍可查询；宿主关闭整个连接后停止查询。
 
-`PersonAiServices` 暴露登录、账户、签到、Chat、Responses、Embedding、搜索、多媒体、语音、Skills、角色、仓库、站点、皮肤、文件、版权、通知、广告、反馈、版本和转发等 SDK 客户端。能取得客户端不等于 Agent 获得了调用权限；宿主自行决定哪些业务调用可以对用户或 Agent 开放，并继续执行鉴权、限流和审计。
+`PersonAiServices` 暴露登录、账户、签到、Chat、Responses、Embedding、Rerank、搜索、多媒体、语音、Skills、角色、仓库、站点、皮肤、文件、版权、通知、广告、反馈、版本和转发等 SDK 客户端。能取得客户端不等于 Agent 获得了调用权限；宿主自行决定哪些业务调用可以对用户或 Agent 开放，并继续执行鉴权、限流和审计。
 
 
 ## Agent 工具与 Discovery

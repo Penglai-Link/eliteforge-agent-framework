@@ -398,7 +398,7 @@ fn add_optional_tokens(left: Option<u32>, right: Option<u32>) -> Option<u32> {
 
 pub(crate) fn responses_input_item_json(message: &AgentMessage) -> Value {
     match message.role.as_str() {
-        "system" | "developer" => json!({
+        "system" => json!({
             "type": "message",
             "role": message.role.as_str(),
             "content": message.plain_text_content(),

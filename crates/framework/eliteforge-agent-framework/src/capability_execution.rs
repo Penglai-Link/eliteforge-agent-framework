@@ -21,6 +21,7 @@ pub struct ModelClient {
     catalogs: Arc<Catalogs>,
     pub(crate) options: ModelInvocationOptions,
     pub(crate) admitted: bool,
+    pub(crate) auto_routers: AutoRouters,
 }
 impl Default for ModelClient {
     fn default() -> Self {
@@ -38,10 +39,89 @@ impl ModelClient {
             }),
             options: ModelInvocationOptions::default(),
             admitted: false,
+            auto_routers: AutoRouters::default(),
         }
     }
     pub fn new(update: ModelRuntimeUpdate) -> Result<Self, AgentError> {
         Ok(Self::from_runtime(ModelRuntime::new(update)?))
+    }
+    pub fn with_auto_routers(mut self, routers: AutoRouters) -> Self {
+        self.auto_routers = routers;
+        self
+    }
+    pub(crate) fn route_choice<T: ?Sized>(
+        &self,
+        operation: ModelOperation,
+        catalog: &CapabilityCatalog<T>,
+        choice: &ModelChoice,
+        inputs: &[Content],
+    ) -> Result<ModelChoice, AgentError> {
+        let multimodal =
+            operation == ModelOperation::Embedding && inputs.iter().any(Content::has_media);
+        let enabled = match operation {
+            ModelOperation::Embedding if multimodal => {
+                self.auto_routers.multimodal_embedding.is_some()
+            }
+            ModelOperation::Embedding => self.auto_routers.embedding.is_some(),
+            ModelOperation::Rerank => self.auto_routers.rerank.is_some(),
+            _ => false,
+        };
+        if catalog.configured_model(choice).is_some() {
+            return Ok(choice.clone());
+        }
+        if operation == ModelOperation::Embedding
+            && self.auto_routers.embedding.is_some()
+            && multimodal
+            && !enabled
+        {
+            return Err(AgentError::MissingService("MultimodalEmbeddingAutoRouter"));
+        }
+        if !enabled {
+            return Ok(choice.clone());
+        }
+        if operation == ModelOperation::Embedding
+            && !multimodal
+            && inputs.iter().any(|content| {
+                content
+                    .0
+                    .iter()
+                    .any(|block| !matches!(block, ContentBlock::Text { .. }))
+            })
+        {
+            return Err(invalid("向量自动路由 requires plain text inputs"));
+        }
+        let candidates = catalog
+            .models()
+            .filter_map(|model| {
+                let binding = catalog.get(model)?;
+                let mut candidate = AutoRouteCandidate::new(model.clone());
+                candidate.input_modalities = binding.capabilities.input.clone();
+                candidate.protocol = binding.protocol.clone();
+                Some(candidate)
+            })
+            .collect::<Vec<_>>();
+        let context = AutoRouteContext {
+            operation,
+            stage: &choice.stage,
+            affinity: self
+                .options
+                .run
+                .as_ref()
+                .map_or("", |run| run.session_id.as_str()),
+            call_key: &choice.stage,
+            previous: None,
+            transient_failures: 0,
+        };
+        let model = if multimodal {
+            self.auto_routers
+                .select_multimodal_embedding(&context, &candidates)?
+        } else {
+            self.auto_routers.select(&context, &candidates)?
+        };
+        Ok(ModelChoice {
+            model: Some(model),
+            stage: choice.stage.clone(),
+        })
     }
     /// A fixed binding view with the same cancellation and drain owner.
     pub fn with_runtime(&self, runtime: Arc<ModelRuntime>) -> Self {
@@ -50,6 +130,7 @@ impl ModelClient {
             catalogs: self.catalogs.clone(),
             options: self.options.clone(),
             admitted: self.admitted,
+            auto_routers: self.auto_routers.clone(),
         }
     }
     pub fn with_options(&self, options: ModelInvocationOptions) -> Self {
@@ -58,6 +139,7 @@ impl ModelClient {
             catalogs: self.catalogs.clone(),
             options,
             admitted: self.admitted,
+            auto_routers: self.auto_routers.clone(),
         }
     }
     pub async fn close_observed(&self) -> eliteforge_agent_plugin_core::ShutdownReport {
@@ -258,6 +340,7 @@ impl ModelOperations for ModelClient {
             catalogs: self.catalogs.clone(),
             options,
             admitted: self.admitted,
+            auto_routers: self.auto_routers.clone(),
         })
     }
     fn models(&self, operation: ModelOperation) -> Vec<ModelRef> {
@@ -280,6 +363,12 @@ impl ModelOperations for ModelClient {
         if request.dimensions == Some(0) {
             return Err(invalid("embedding dimensions must be positive"));
         }
+        request.choice = self.route_choice(
+            ModelOperation::Embedding,
+            &snapshot.embedding,
+            &request.choice,
+            &request.inputs,
+        )?;
         let binding = snapshot
             .embedding
             .select(&request.choice, &request.inputs)?;
@@ -368,6 +457,12 @@ impl ModelOperations for ModelClient {
             return Err(invalid("invalid rerank top_n or document count"));
         }
         let max = request.top_n.unwrap_or(count);
+        request.choice = self.route_choice(
+            ModelOperation::Rerank,
+            &snapshot.rerank,
+            &request.choice,
+            &inputs,
+        )?;
         let binding = snapshot.rerank.select(&request.choice, &inputs)?;
         request.choice.model = Some(binding.model.clone());
         let estimate = binding.implementation.input_token_estimate(&request);

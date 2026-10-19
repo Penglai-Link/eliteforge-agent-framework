@@ -654,6 +654,13 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
             q.query_map(params![id,kind,after,limit],|r|r.get::<_,String>(0)).map_err(sql)?.map(|r|decode(r.map_err(sql)?)).collect()
         }).await.map_err(worker)
     }
+    async fn latest_event_by_kind(&self, session: &str, kind: &str) -> Result<Option<SessionEvent>, StateError> {
+        let (session, kind) = (session.to_owned(), kind.to_owned());
+        self.execute(move |c| {
+            let raw: Option<String> = c.query_row("SELECT record FROM ef_events WHERE session_id=?1 AND kind=?2 ORDER BY sequence DESC LIMIT 1", params![session,kind], |r| r.get(0)).optional().map_err(sql)?;
+            raw.map(decode).transpose()
+        }).await.map_err(worker)
+    }
     async fn recover_expired_runs(&self) -> Result<usize, StateError> {
         self.execute(|c| {
             let tx = begin(c).map_err(sql)?;

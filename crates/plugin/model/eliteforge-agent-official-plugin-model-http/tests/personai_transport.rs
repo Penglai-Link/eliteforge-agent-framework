@@ -106,6 +106,19 @@ async fn personai_encrypted_model_transport_preserves_product_header_and_provide
         ProviderErrorCategory::Quota,
     )
     .await;
+    for body in [
+        r#"{"error":{"type":"1302","message":"您的账户已达到速率限制，请您控制请求频率"}}"#,
+        r#"{"error":{"type":"gateway_error","message":"upstream rate limit exceeded"}}"#,
+        r#"{"error":{"type":"rate_limit_exceeded","message":"Too many requests"}}"#,
+    ] {
+        check_personai_error(429, body, ProviderErrorCategory::Transient).await;
+    }
+    check_personai_error(
+        429,
+        r#"{"error":{"type":"insufficient_quota","message":"quota exhausted"}}"#,
+        ProviderErrorCategory::Quota,
+    )
+    .await;
     check_personai_error(
         404,
         r#"{"message":"no available model"}"#,

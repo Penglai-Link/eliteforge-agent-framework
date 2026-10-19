@@ -595,7 +595,7 @@ dependencies = [
 [[package]]
 name = "crab-serverapi"
 version = "0.3.0"
-source = "git+https://gitee.com/person-ai/person-ai-index-rust-sdk.git?rev=d36495205418c1925f32a09267c68401ec4d24b5#d36495205418c1925f32a09267c68401ec4d24b5"
+source = "git+https://gitee.com/person-ai/person-ai-index-rust-sdk.git?rev=b1e63a5e0199d09f000ad1d23b7e5559ee95710c#b1e63a5e0199d09f000ad1d23b7e5559ee95710c"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -966,6 +966,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
+name = "eliteforge-agent-capability-auto-routing"
+version = "0.1.0"
+dependencies = [
+ "eliteforge-agent-core",
+ "serde_json",
+]
+
+[[package]]
+name = "eliteforge-agent-capability-chunking"
+version = "0.1.0"
+dependencies = [
+ "eliteforge-agent-core",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "eliteforge-agent-capability-dev-host"
 version = "0.1.0"
 dependencies = [
@@ -1018,6 +1035,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "crab-serverapi",
+ "eliteforge-agent-capability-auto-routing",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
  "eliteforge-agent-official-plugin-tools-discovery",
@@ -1205,6 +1223,8 @@ name = "eliteforge-agent-official-capability-pack"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "eliteforge-agent-capability-auto-routing",
+ "eliteforge-agent-capability-chunking",
  "eliteforge-agent-capability-tools",
  "eliteforge-agent-core",
  "eliteforge-agent-framework",

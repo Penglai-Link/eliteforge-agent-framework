@@ -262,6 +262,17 @@ pub trait SessionLifecycleStore: Send + Sync {
         }
         Ok(result)
     }
+    /// Latest snapshot of one kind. Indexed stores should override this fallback.
+    async fn latest_event_by_kind(&self, session: &str, kind: &str) -> Result<Option<SessionEvent>, StateError> {
+        let mut cursor = 0;
+        let mut latest = None;
+        loop {
+            let page = self.list_events_by_kind(session, kind, cursor, 100).await?;
+            let Some(last) = page.last() else { return Ok(latest) };
+            cursor = last.sequence;
+            latest = page.into_iter().max_by_key(|event| event.sequence);
+        }
+    }
     async fn recover_expired_runs(&self) -> Result<usize, StateError>;
     async fn read_context(
         &self,
@@ -538,6 +549,10 @@ impl RunQueryService {
 #[derive(Clone)]
 pub struct EventQueryService(pub Arc<dyn SessionLifecycleStore>);
 impl EventQueryService {
+    pub async fn latest_by_kind(&self, session: &str, kind: &str) -> Result<Option<SessionEvent>, StateError> {
+        self.0.latest_event_by_kind(session, kind).await
+    }
+
     pub async fn list(
         &self,
         session: &str,

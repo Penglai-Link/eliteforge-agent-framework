@@ -3,6 +3,10 @@
 EliteForge Agent Framework 是一个可扩展的 Rust Agent 框架。
 Framework 负责装配、执行和生命周期管理。能力包提供模型、工具、存储和可观测能力；上层应用提供 Harness，并负责认证、权限和业务流程。
 
+自动路由提供对话自动路由、向量自动路由、多模态向量自动路由、重排自动路由四类接口。宿主提供候选并安装路由实现；Framework 原样传递候选，不解释供应商标签或执行供应商筛选规则。供应商规则由对应能力包处理，宿主也可以自行实现路由。Framework 校验选中模型属于候选范围，并在调用时校验模型能力。
+
+切片由 `ChunkStrategy` 抽象与 `ChunkStrategies` 注册表装配。宿主提供标准块、表格行和原文位置；`eliteforge-agent-capability-chunking` 提供自动、结构、标题和固定长度策略，也支持宿主注册自己的策略。`RetrievalEvaluationRunner` 使用稳定的原文范围评测召回效果；评测题、授权、优化预算和索引发布由宿主负责。
+
 能力包可携带 Skills、MCP、新插件、已有插件的扩展、工具等：
 
 ```rust
@@ -133,6 +137,7 @@ crates/
 | `eliteforge-agent-core` | 公共类型、能力接口、CapabilityPack API 和 Plugin 契约 |
 | `eliteforge-agent-capability-tools` | 按领域选择本地、Web、媒体、MCP、人机交互和 Agent 协作工具 |
 | `eliteforge-agent-capability-external` | 装配独立的外部 Agent 执行循环与 CLI/JSON 服务桥 |
+| `eliteforge-agent-capability-auto-routing` | 提供供应商无关的按候选顺序、稳定分配和对话故障切换路由实现 |
 | `eliteforge-agent-capability-personai` | 接入 PersonAI 模型、搜索／图片生成／AIGC 工具及宿主 SDK 服务 |
 | `eliteforge-agent-official-plugin-tools-local` | 进程内文件、命令和 PTY 实现；命令超过 10 秒返回 ID，提供读取与停止工具 |
 | `eliteforge-agent-official-plugin-agent-external` | Codex/OpenCode CLI 与 JSON 服务桥的执行、事件转换和原生会话引用 |

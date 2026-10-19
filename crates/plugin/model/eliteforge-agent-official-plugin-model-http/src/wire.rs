@@ -5,6 +5,18 @@ use std::sync::Arc;
 
 #[async_trait]
 pub trait ModelTransportFactory: Send + Sync {
+    /// Verified provider metadata, independent of the particular request payload.
+    fn embedding_input_modalities(&self, _: &AgentModelConfig) -> Result<Vec<fw::Modality>, fw::ModelError> {
+        Ok(vec![fw::Modality::Text])
+    }
+    /// Protocol-specific encoding belongs to the supplied adapter. The default
+    /// HTTP embedding protocol accepts text; capability packs may encode media.
+    fn embedding_body(&self, config: &AgentModelConfig, request: &fw::EmbeddingRequest) -> Result<serde_json::Value, fw::ModelError> {
+        if request.inputs.iter().any(|content| content.0.iter().any(|block| !matches!(block, fw::ContentBlock::Text { .. }))) {
+            return Err(fw::ModelError::Fatal("HTTP embedding requires a media-capable adapter".into()));
+        }
+        Ok(crate::operations::embedding_body(config, request))
+    }
     fn on_failure(&self, _: &AgentModelConfig, _: &fw::ModelError) {}
     /// Opaque account identity, excluding rotating credentials.
     fn authorization_scope(&self, _: &AgentModelConfig) -> Result<Option<String>, fw::ModelError> {
@@ -280,6 +292,14 @@ impl ScopedModelTransportFactory {
 }
 #[async_trait]
 impl ModelTransportFactory for ScopedModelTransportFactory {
+    fn embedding_input_modalities(&self, config: &AgentModelConfig) -> Result<Vec<fw::Modality>, fw::ModelError> {
+        self.ensure(config)?;
+        self.inner.embedding_input_modalities(config)
+    }
+    fn embedding_body(&self, config: &AgentModelConfig, request: &fw::EmbeddingRequest) -> Result<serde_json::Value, fw::ModelError> {
+        self.ensure(config)?;
+        self.inner.embedding_body(config, request)
+    }
     fn authorization_scope(
         &self,
         config: &AgentModelConfig,

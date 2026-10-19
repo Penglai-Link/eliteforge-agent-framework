@@ -76,6 +76,10 @@ pub struct DiscoveredMediaModel {
     pub model_code: String,
     pub model_name: Option<String>,
     pub media_type: i32,
+    #[serde(default)]
+    pub dimension: Option<usize>,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl From<MultimediaModelInfo> for DiscoveredMediaModel {
@@ -85,6 +89,8 @@ impl From<MultimediaModelInfo> for DiscoveredMediaModel {
             model_code: value.model_code,
             model_name: value.model_name,
             media_type: value.media_type,
+            dimension: value.dimension,
+            tags: value.tags,
         }
     }
 }
@@ -481,6 +487,8 @@ impl PersonAiModelSync {
             Err(error) => mark_error(&mut status, "chat", error),
         }
         for media_type in [
+            MediaType::EMBEDDING,
+            crate::models::PERSONAI_RERANK_MEDIA_TYPE,
             MediaType::IMAGE,
             MediaType::VIDEO,
             MediaType::SPEECH,
@@ -1111,7 +1119,9 @@ pub(crate) mod tests {
                 .await
                 .is_err()
         );
-        assert_eq!(server.requests.load(Ordering::SeqCst), 16);
+        // Initial discovery plus one joined refresh: three chat tiers and
+        // seven media domains (including embedding and native rerank).
+        assert_eq!(server.requests.load(Ordering::SeqCst), 20);
         connection.close().await.unwrap();
     }
 
@@ -1141,7 +1151,7 @@ pub(crate) mod tests {
             },
         );
         assert!(results.0.is_ok() && results.1.is_ok() && results.2.is_ok());
-        assert_eq!(server.requests.load(Ordering::SeqCst), 16);
+        assert_eq!(server.requests.load(Ordering::SeqCst), 20);
         connection.close().await.unwrap();
     }
 

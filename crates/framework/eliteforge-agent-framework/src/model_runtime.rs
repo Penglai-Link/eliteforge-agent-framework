@@ -128,6 +128,16 @@ pub struct ModelRuntime {
     image_jobs: Mutex<BTreeMap<RunId, (ModelRef, String, String, ImageGenerationModelService)>>,
 }
 impl ModelRuntime {
+    /// A direct operation keeps its selected bindings and authorization across
+    /// retries. No discovery writer is attached to this private runtime view.
+    pub(crate) fn frozen(snapshot: Arc<ModelRuntimeSnapshot>) -> Arc<Self> {
+        Arc::new(Self {
+            current: RwLock::new(snapshot),
+            partitions: Mutex::default(),
+            video_jobs: Mutex::default(),
+            image_jobs: Mutex::default(),
+        })
+    }
     pub fn new(update: ModelRuntimeUpdate) -> Result<Arc<Self>, AgentError> {
         let snapshot = Arc::new(ModelRuntimeSnapshot::build(update.clone())?);
         Ok(Arc::new(Self {

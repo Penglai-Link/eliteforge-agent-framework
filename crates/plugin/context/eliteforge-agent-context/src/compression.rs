@@ -135,7 +135,7 @@ impl ModelCompressor {
             newest.ok_or_else(|| budget_error("history has no removable completed user turn"))?;
         let mut preserved: Vec<Message> = messages[..newest]
             .iter()
-            .filter(|m| matches!(m.role, Role::System | Role::Developer))
+            .filter(|m| m.role == Role::System)
             .cloned()
             .collect();
         let prefix_len = preserved.len();
@@ -349,7 +349,7 @@ fn history_turns(messages: &[Message]) -> Vec<Value> {
     let mut turns = Vec::new();
     let mut turn = Vec::new();
     for message in messages {
-        if matches!(message.role, Role::System | Role::Developer) {
+        if message.role == Role::System {
             continue;
         }
         if message.role == Role::User && !turn.is_empty() {

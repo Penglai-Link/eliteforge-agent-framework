@@ -80,7 +80,7 @@ async fn six_logical_sources_share_one_read_contract_and_protected_roles() {
                 id: "instructions",
                 kind: ContextSourceKind::Instruction,
                 calls: instruction_calls.clone(),
-                messages: vec![Message::new(Role::Developer, "trusted host rule")],
+                messages: vec![Message::system("trusted host rule")],
             },
         ));
     let mut calls = Vec::new();
@@ -120,7 +120,7 @@ async fn six_logical_sources_share_one_read_contract_and_protected_roles() {
     assert!(calls.iter().all(|count| count.load(Ordering::SeqCst) == 1));
     let requests = capture.0.lock().unwrap();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages[0].role, Role::Developer);
+    assert_eq!(requests[0].messages[0].role, Role::System);
     assert_eq!(
         requests[0]
             .messages

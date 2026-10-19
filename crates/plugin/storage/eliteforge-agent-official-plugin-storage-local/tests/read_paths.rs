@@ -146,4 +146,8 @@ async fn events_filter_by_kind_in_sql() {
         .unwrap();
     assert_eq!(after_first.len(), 1);
     assert_ne!(after_first[0].id, paged[0].id);
+    let latest = store.latest_by_kind("kind-session", "alpha").await.unwrap().unwrap();
+    assert_eq!(latest.id, after_first[0].id);
+    assert!(store.latest_by_kind("kind-session", "missing").await.unwrap().is_none());
+    assert!(store.latest_by_kind("another-session", "alpha").await.unwrap().is_none());
 }

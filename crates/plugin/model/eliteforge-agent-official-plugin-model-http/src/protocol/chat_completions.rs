@@ -39,7 +39,7 @@ impl ModelProtocolAdapter for ChatCompletionsAdapter {
     }
 
     fn parse_response(&self, body: &Value) -> Result<ModelResponse, String> {
-        parse_chat_response(body).ok_or_else(|| "model response was unsupported".into())
+        parse_chat_response(body).ok_or_else(|| unsupported_response(body))
     }
 
     fn parse_stream_event(&self, body: &Value) -> Result<Option<ModelStreamEvent>, String> {
@@ -70,13 +70,54 @@ impl ModelProtocolAdapter for ChatCompletionsAdapter {
     }
 }
 
+/// Only protocol shape and numeric usage enter diagnostics. Provider content,
+/// reasoning, identifiers and arbitrary finish/error strings may contain secrets.
+fn unsupported_response(body: &Value) -> String {
+    let choice = body.pointer("/choices/0");
+    let message = choice.and_then(|value| value.get("message"));
+    let finish = match choice
+        .and_then(|value| value.get("finish_reason"))
+        .and_then(Value::as_str)
+    {
+        Some("length") => "Length",
+        Some("stop") => "Stop",
+        Some("tool_calls") => "ToolCalls",
+        Some("function_call") => "FunctionCall",
+        Some("content_filter") => "ContentFilter",
+        Some(_) => "Other",
+        None => "Missing",
+    };
+    let content = match message.and_then(|value| value.get("content")) {
+        Some(Value::String(text)) if text.is_empty() => "EmptyString",
+        Some(Value::String(_)) => "String",
+        Some(Value::Array(_)) => "Array",
+        Some(Value::Null) => "Null",
+        Some(_) => "Other",
+        None => "Missing",
+    };
+    let reasoning = message.is_some_and(|value| {
+        ["reasoning_content", "reasoning"]
+            .iter()
+            .any(|key| value.get(key).is_some_and(|part| !part.is_null()))
+    });
+    let choices = body.get("choices").and_then(Value::as_array).map(Vec::len);
+    let completion = body
+        .pointer("/usage/completion_tokens")
+        .and_then(Value::as_u64);
+    let reasoning_tokens = body
+        .pointer("/usage/completion_tokens_details/reasoning_tokens")
+        .and_then(Value::as_u64);
+    format!(
+        "model response was unsupported (finish={finish}; choices={choices:?}; content={content}; reasoning={reasoning}; completionTokens={completion:?}; reasoningTokens={reasoning_tokens:?})"
+    )
+}
+
 pub fn chat_completions_request(config: &AgentModelConfig, request: &ModelRequest) -> Value {
     let mut payload = json!({
         "messages": request.messages.iter().map(chat_message_json).collect::<Vec<_>>(),
     });
-    // A Person-AI ProviderRoute deliberately has no physical model. Leaving
-    // `model` out is what tells the encrypted gateway to keep the session on
-    // its high-quality automatic route.
+    // Routes without a physical model let the provider select one. Omit the
+    // model field for those routes instead of sending an empty model name.
     if !config.model_name.trim().is_empty() {
         payload["model"] = json!(config.model_name);
     }
@@ -100,6 +141,9 @@ pub fn chat_completions_request(config: &AgentModelConfig, request: &ModelReques
         payload["tools"] =
             crate::request_tool_schema_payload(AgentModelProtocol::ChatCompletions, request);
         payload["parallel_tool_calls"] = json!(true);
+    } else {
+        // Plain generation must not inherit provider-side/default tools.
+        payload["tool_choice"] = json!("none");
     }
     payload
 }

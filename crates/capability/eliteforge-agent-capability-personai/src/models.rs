@@ -16,7 +16,8 @@ use eliteforge_agent_core::{
     ImageGenerationResponse, ImageJob, MediaContent, MediaSource, Modality, ModelCatalogEntry,
     ModelCatalogSnapshot, ModelConnection, ModelDescriptor, ModelError, ModelJobStatus,
     ModelOperation, ModelRef, ModelRegistration, OperationCapabilities, ProviderErrorCategory,
-    ProviderModelError, RealtimeModel, ResourceReference, Role, SpeechRecognitionModel,
+    ProviderModelError, RankedDocument, RealtimeModel, RerankModel, RerankModelOutput,
+    RerankRequest, RerankResponse, ResourceReference, Role, SpeechRecognitionModel,
     SpeechRecognitionRequest, SpeechRecognitionResponse, ToolCall, Usage, VideoGenerationModel,
     VideoGenerationRequest, VideoJob,
 };
@@ -120,15 +121,65 @@ impl PersonAiModels {
             connections,
         );
         for id in &config.embedding_models {
+            if config.multimodal_embedding_models.contains(id) {
+                continue;
+            }
+            let implementation: Arc<dyn EmbeddingModel> = binding.clone();
+            let registration =
+                ModelRegistration::<dyn EmbeddingModel>::new(binding.model_ref(id), implementation)
+                    .protocol("personai.embeddings");
+            update.embedding.push(registration);
+        }
+        for id in &config.multimodal_embedding_models {
             let implementation: Arc<dyn EmbeddingModel> = binding.clone();
             update.embedding.push(
                 ModelRegistration::<dyn EmbeddingModel>::new(binding.model_ref(id), implementation)
-                    .protocol("personai.embeddings"),
+                    .protocol("personai.embeddings")
+                    .capabilities(OperationCapabilities {
+                        input: vec![Modality::Text, Modality::Image],
+                        ..Default::default()
+                    }),
             );
         }
         for (media_type, models) in &snapshot.media {
             for model in models {
                 match *media_type {
+                    multimedia::MediaType::EMBEDDING => {
+                        // Configured host bindings take precedence; discovered capability comes only from tags.
+                        if config.embedding_models.contains(&model.model_code)
+                            || config
+                                .multimodal_embedding_models
+                                .contains(&model.model_code)
+                        {
+                            continue;
+                        }
+                        let input = embedding_modalities(&model.tags);
+                        if input.is_empty() {
+                            continue;
+                        }
+                        let implementation: Arc<dyn EmbeddingModel> = binding.clone();
+                        update.embedding.push(
+                            ModelRegistration::<dyn EmbeddingModel>::new(
+                                binding.model_ref(&model.id),
+                                implementation,
+                            )
+                            .protocol("personai.embeddings")
+                            .capabilities(OperationCapabilities {
+                                input,
+                                ..Default::default()
+                            }),
+                        );
+                    }
+                    PERSONAI_RERANK_MEDIA_TYPE => {
+                        let implementation: Arc<dyn RerankModel> = binding.clone();
+                        update.rerank.push(
+                            ModelRegistration::<dyn RerankModel>::new(
+                                binding.model_ref(&model.id),
+                                implementation,
+                            )
+                            .protocol("personai.rerank"),
+                        );
+                    }
                     multimedia::MediaType::IMAGE => {
                         let implementation: Arc<dyn ImageGenerationModel> = binding.clone();
                         update.image.push(
@@ -234,11 +285,30 @@ impl PersonAiModels {
                 continue;
             };
             for model in models {
+                if operation == ModelOperation::Embedding
+                    && embedding_modalities(&model.tags).is_empty()
+                {
+                    continue;
+                }
                 entries.push(ModelCatalogEntry {
                     operation,
                     model: ModelRef::new(&config.connection_id, &model.id),
-                    protocol: "personai.multimedia".into(),
-                    capabilities: OperationCapabilities::default(),
+                    protocol: if operation == ModelOperation::Rerank {
+                        "personai.rerank"
+                    } else if operation == ModelOperation::Embedding {
+                        "personai.embeddings"
+                    } else {
+                        "personai.multimedia"
+                    }
+                    .into(),
+                    capabilities: if operation == ModelOperation::Embedding {
+                        OperationCapabilities {
+                            input: embedding_modalities(&model.tags),
+                            ..Default::default()
+                        }
+                    } else {
+                        OperationCapabilities::default()
+                    },
                     descriptor: None,
                     metadata: BTreeMap::from([(
                         "personai.media".into(),
@@ -281,8 +351,22 @@ pub fn restore_discovery(cached: &ModelCatalogSnapshot) -> Option<PersonAiDiscov
     Some(restored)
 }
 
+pub(crate) const PERSONAI_RERANK_MEDIA_TYPE: i32 = multimedia::MediaType::RERANK;
+
+fn embedding_modalities(tags: &[String]) -> Vec<Modality> {
+    if tags.iter().any(|tag| tag == "multimodal_embedding") {
+        vec![Modality::Text, Modality::Image]
+    } else if tags.iter().any(|tag| tag == "text_embedding") {
+        vec![Modality::Text]
+    } else {
+        vec![]
+    }
+}
+
 fn media_operation(media_type: i32) -> Option<ModelOperation> {
     match media_type {
+        multimedia::MediaType::EMBEDDING => Some(ModelOperation::Embedding),
+        PERSONAI_RERANK_MEDIA_TYPE => Some(ModelOperation::Rerank),
         multimedia::MediaType::IMAGE => Some(ModelOperation::ImageGeneration),
         multimedia::MediaType::VIDEO => Some(ModelOperation::VideoGeneration),
         multimedia::MediaType::SPEECH => Some(ModelOperation::SpeechRecognition),
@@ -294,6 +378,9 @@ fn media_operation(media_type: i32) -> Option<ModelOperation> {
 
 fn chat_descriptor(model: &DiscoveredChatModel) -> ModelDescriptor {
     let mut descriptor = ModelDescriptor::new(&model.id);
+    descriptor
+        .metadata
+        .insert(crate::PERSONAI_PROVIDER.into(), true.into());
     descriptor.context_window_tokens = model
         .context_length
         .and_then(|count| usize::try_from(count).ok());
@@ -685,6 +772,81 @@ impl StreamAccumulator {
 }
 
 #[async_trait]
+impl RerankModel for BoundPersonAiModels {
+    async fn rerank(
+        &self,
+        model: &str,
+        request: RerankRequest,
+    ) -> Result<RerankResponse, ModelError> {
+        Ok(self.rerank_with_usage(model, request, None).await?.response)
+    }
+
+    async fn rerank_with_usage(
+        &self,
+        model: &str,
+        request: RerankRequest,
+        _: Option<u32>,
+    ) -> Result<RerankModelOutput, ModelError> {
+        self.ensure_current()?;
+        if std::iter::once(&request.query)
+            .chain(request.documents.iter())
+            .any(|content| {
+                content
+                    .0
+                    .iter()
+                    .any(|block| !matches!(block, ContentBlock::Text { .. }))
+            })
+        {
+            return Err(ModelError::Fatal(
+                "PersonAI rerank accepts text only".into(),
+            ));
+        }
+        let response = self
+            .services
+            .rerank
+            .rerank_typed(
+                &self.account.authorization,
+                &crab_serverapi::gateway::RerankRequest {
+                    model: None,
+                    model_id: Some(model.to_owned()),
+                    query: request.query.text(),
+                    documents: request
+                        .documents
+                        .iter()
+                        .map(|content| {
+                            crab_serverapi::gateway::RerankDocument::Text(content.text())
+                        })
+                        .collect(),
+                    top_n: request.top_n,
+                    return_documents: Some(false),
+                },
+            )
+            .await
+            .map_err(|error| self.provider_error(error, model))?;
+        Ok(RerankModelOutput {
+            response: RerankResponse {
+                model: self.model_ref(model),
+                results: response
+                    .results
+                    .into_iter()
+                    .map(|result| RankedDocument {
+                        index: result.index,
+                        score: result.relevance_score,
+                    })
+                    .collect(),
+            },
+            usage: response
+                .usage
+                .and_then(|usage| usage.total_tokens)
+                .map(|input_tokens| Usage {
+                    input_tokens,
+                    output_tokens: 0,
+                }),
+        })
+    }
+}
+
+#[async_trait]
 impl EmbeddingModel for BoundPersonAiModels {
     async fn embed(
         &self,
@@ -692,20 +854,16 @@ impl EmbeddingModel for BoundPersonAiModels {
         request: EmbeddingRequest,
     ) -> Result<EmbeddingResponse, ModelError> {
         self.ensure_current()?;
-        let inputs: Vec<String> = request
+        let inputs: Vec<crab_serverapi::gateway::EmbeddingInput> = request
             .inputs
             .iter()
-            .map(|content| {
-                if content.has_media() {
-                    Err(ModelError::Fatal(
-                        "PersonAI embeddings accept text only".into(),
-                    ))
-                } else {
-                    Ok(content.text())
-                }
-            })
+            .map(personai_embedding_input)
             .collect::<Result<_, _>>()?;
-        let mut body = json!({"model": model, "input": inputs});
+        let mut body = serde_json::to_value(crab_serverapi::gateway::EmbeddingsRequest {
+            model: model.into(),
+            input: inputs,
+        })
+        .map_err(|error| ModelError::Fatal(error.to_string()))?;
         if let Some(dimensions) = request.dimensions {
             body["dimensions"] = json!(dimensions);
         }
@@ -743,15 +901,100 @@ impl EmbeddingModel for BoundPersonAiModels {
             })
             .collect::<Result<Vec<_>, ModelError>>()?;
         let result = EmbeddingResponse {
-            provider_model: response.get("model").and_then(Value::as_str)
-                .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned),
+            provider_model: response
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
             model: self.model_ref(model),
             vectors,
             input_tokens: response["usage"]["prompt_tokens"].as_u64(),
         };
-        result.validate(inputs.len(), request.dimensions)?;
+        result.validate(request.inputs.len(), request.dimensions)?;
         Ok(result)
     }
+}
+
+/// Preserve caller-selected reasoning controls. Absence of an opt-in does not
+/// disable forced-reasoning models or select a lower effort on their behalf.
+pub fn personai_generation_request_body(body: &Value, thinking_enabled: bool) -> Value {
+    let mut body = body.clone();
+    if thinking_enabled {
+        if body.get("enable_thinking").is_none() {
+            body["enable_thinking"] = json!(true);
+        }
+        if body.get("thinking").is_none() {
+            body["thinking"] = json!({"type":"enabled"});
+        }
+    }
+    body
+}
+
+/// Encode ordered text/image inputs using PersonAI's native embedding contract.
+/// Images must already be resolved by the authorized host.
+pub fn personai_embedding_request_body(
+    model: &str,
+    request: &EmbeddingRequest,
+) -> Result<Value, ModelError> {
+    let inputs = request
+        .inputs
+        .iter()
+        .map(personai_embedding_input)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut body = serde_json::to_value(crab_serverapi::gateway::EmbeddingsRequest {
+        model: model.into(),
+        input: inputs,
+    })
+    .map_err(|error| ModelError::Fatal(error.to_string()))?;
+    if let Some(dimensions) = request.dimensions {
+        body["dimensions"] = json!(dimensions);
+    }
+    Ok(body)
+}
+
+fn personai_embedding_input(
+    content: &Content,
+) -> Result<crab_serverapi::gateway::EmbeddingInput, ModelError> {
+    use crab_serverapi::gateway::{EmbeddingImageInput, EmbeddingInput};
+    let mut image = None;
+    for block in &content.0 {
+        match block {
+            ContentBlock::Text { .. } => {}
+            ContentBlock::Media { media }
+                if media.mime_type.starts_with("image/") && image.is_none() =>
+            {
+                image = Some(media)
+            }
+            _ => {
+                return Err(ModelError::Fatal(
+                    "PersonAI embedding input accepts text and at most one resolved image per item"
+                        .into(),
+                ));
+            }
+        }
+    }
+    let text = content.text();
+    let Some(image) = image else {
+        if text.trim().is_empty() {
+            return Err(ModelError::Fatal("embedding text must not be empty".into()));
+        }
+        return Ok(EmbeddingInput::Text(text));
+    };
+    let (image_url, image_base64) = match &image.source {
+        MediaSource::Url(url) if !url.trim().is_empty() => (Some(url.clone()), None),
+        MediaSource::Base64(data) if !data.trim().is_empty() => (None, Some(data.clone())),
+        _ => {
+            return Err(ModelError::Fatal(
+                "embedding image must not be empty".into(),
+            ));
+        }
+    };
+    Ok(EmbeddingInput::Image(EmbeddingImageInput {
+        text: (!text.is_empty()).then_some(text),
+        image_url,
+        image_base64,
+    }))
 }
 
 #[async_trait]
@@ -1147,11 +1390,22 @@ fn map_error(error: ServerApiError) -> ModelError {
             detail.http_status = Some(*status);
             detail.message = message.clone();
             detail.error_type = Some(error_type.clone());
+            let message_lower = message.to_ascii_lowercase();
+            let rate_limited = matches!(
+                error_type.as_str(),
+                "1302" | "rate_limit_exceeded" | "rate_limit_error"
+            ) || message_lower.contains("速率限制")
+                || message_lower.contains("请求频率")
+                || message_lower.contains("rate limit");
             detail.category = match (*status, error_type.as_str()) {
                 (401, _) => Category::Authentication,
                 (403, _) => Category::Permission,
                 (404, "gateway_error" | "model_not_found") => Category::Unavailable,
-                (429, "gateway_error") => Category::Quota,
+                (429, _) if rate_limited => Category::Transient,
+                (429, "gateway_error" | "insufficient_quota" | "insufficient_balance") => {
+                    Category::Quota
+                }
+                (429, _) => Category::Transient,
                 (502..=504, _) => Category::Transient,
                 _ => Category::Other,
             };
@@ -1162,6 +1416,12 @@ fn map_error(error: ServerApiError) -> ModelError {
             detail.category = match code {
                 401 => Category::Authentication,
                 403 => Category::Permission,
+                429 if message.contains("速率限制")
+                    || message.contains("请求频率")
+                    || message.to_ascii_lowercase().contains("rate limit") =>
+                {
+                    Category::Transient
+                }
                 429 => Category::Quota,
                 _ => Category::Other,
             };
@@ -1186,7 +1446,7 @@ fn map_error(error: ServerApiError) -> ModelError {
 fn chat_completions_request(model: &str, request: &ChatRequest) -> Result<Value, ModelError> {
     let messages = request.messages.iter().map(|message| {
         let role = match message.role {
-            Role::System => "system", Role::Developer => "developer", Role::User => "user",
+            Role::System => "system", Role::User => "user",
             Role::Assistant => "assistant", Role::Tool => "tool",
         };
         let mut encoded = json!({"role": role, "content": content_for_chat(&message.content)?});
@@ -1204,6 +1464,8 @@ fn chat_completions_request(model: &str, request: &ChatRequest) -> Result<Value,
         body["tools"] = Value::Array(request.tools.iter().map(|tool| json!({
             "type": "function", "function": {"name": tool.call_name, "description": tool.description, "parameters": tool.input_schema}
         })).collect());
+    } else {
+        body["tool_choice"] = json!("none");
     }
     Ok(body)
 }
@@ -1228,7 +1490,7 @@ fn responses_request(model: &str, request: &ChatRequest) -> Result<Value, ModelE
             continue;
         }
         let role = match message.role {
-            Role::System | Role::Developer => "developer",
+            Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
             Role::Tool => unreachable!(),
@@ -1247,6 +1509,8 @@ fn responses_request(model: &str, request: &ChatRequest) -> Result<Value, ModelE
         body["tools"] = Value::Array(request.tools.iter().map(|tool| json!({
             "type": "function", "name": tool.call_name, "description": tool.description, "parameters": tool.input_schema
         })).collect());
+    } else {
+        body["tool_choice"] = json!("none");
     }
     Ok(body)
 }
@@ -1262,7 +1526,9 @@ fn apply_options(body: &mut Value, request: &ChatRequest, responses: bool) {
         body[if responses {
             "max_output_tokens"
         } else {
-            "max_completion_tokens"
+            // PersonAI's Chat gateway defaults max_tokens when it is absent.
+            // Sending only max_completion_tokens leaves two competing limits.
+            "max_tokens"
         }] = json!(value);
     }
     if let Some(value) = &request.options.stop_sequences
@@ -1390,7 +1656,7 @@ fn parse_responses_response(response: Value) -> Result<ChatResponse, ModelError>
                     item["name"].as_str().unwrap_or_default(),
                     arguments,
                 ));
-            } else if !has_output_text && let Some(content) = item["content"].as_array() {
+            } else if !has_output_text && item["type"] == "message" && let Some(content) = item["content"].as_array() {
                 for part in content {
                     if let Some(fragment) = part["text"].as_str() {
                         text.push_str(fragment);
@@ -1431,6 +1697,9 @@ mod tests {
             (404, "gateway_error", ProviderErrorCategory::Unavailable),
             (404, "invalid_request_error", ProviderErrorCategory::Other),
             (429, "gateway_error", ProviderErrorCategory::Quota),
+            (429, "1302", ProviderErrorCategory::Transient),
+            (429, "rate_limit_exceeded", ProviderErrorCategory::Transient),
+            (429, "insufficient_quota", ProviderErrorCategory::Quota),
             (502, "gateway_error", ProviderErrorCategory::Transient),
         ] {
             let error = map_error(ServerApiError::gateway(status, "original message", kind))
@@ -1457,6 +1726,25 @@ mod tests {
         };
         assert_eq!(detail.business_code, Some(429));
         assert_eq!(detail.category, ProviderErrorCategory::Quota);
+    }
+
+    #[test]
+    fn provider_rate_limit_wrapped_as_gateway_error_remains_transient() {
+        let ModelError::Provider(detail) = map_error(ServerApiError::gateway(
+            429,
+            "您的账户已达到速率限制，请您控制请求频率",
+            "gateway_error",
+        )) else {
+            panic!("structured error expected")
+        };
+        assert_eq!(detail.category, ProviderErrorCategory::Transient);
+        let ModelError::Provider(detail) = map_error(ServerApiError::business(
+            429,
+            "您的账户已达到速率限制，请您控制请求频率",
+        )) else {
+            panic!("structured error expected")
+        };
+        assert_eq!(detail.category, ProviderErrorCategory::Transient);
     }
 
     #[test]
@@ -1494,10 +1782,129 @@ mod tests {
     fn chat_request() -> ChatRequest {
         ChatRequest {
             options: Default::default(),
-            messages: vec![eliteforge_agent_core::Message::user("hello")],
+            messages: vec![
+                eliteforge_agent_core::Message::system("trusted host rule"),
+                eliteforge_agent_core::Message::user("hello"),
+            ],
             tools: vec![],
             extensions: Default::default(),
         }
+    }
+
+    #[test]
+    fn native_embedding_discovery_uses_tags_and_keeps_instance_metadata_in_cache() {
+        let provider = Arc::new(PersonAiContextHandle::default());
+        provider.publish(AccountContext {
+            account_scope: "alice".into(),
+            revision: 1,
+            authorization: AuthorizedClientContext::new(),
+        });
+        let url = "http://127.0.0.1:1";
+        let factory = PersonAiModels::new(
+            "personai".into(),
+            url,
+            Arc::new(PersonAiServices::new(url).unwrap()),
+            provider.clone(),
+        )
+        .unwrap();
+        let media = |id: &str, code: &str, tags: &[&str]| DiscoveredMediaModel {
+            id: id.into(),
+            model_code: code.into(),
+            model_name: None,
+            media_type: multimedia::MediaType::EMBEDDING,
+            dimension: Some(1024),
+            tags: tags.iter().map(|tag| (*tag).into()).collect(),
+        };
+        let snapshot = PersonAiDiscoverySnapshot {
+            account_scope: "alice".into(),
+            account_revision: 1,
+            media: BTreeMap::from([(
+                multimedia::MediaType::EMBEDDING,
+                vec![
+                    media("text-id", "same-code", &["text_embedding"]),
+                    media("image-id", "same-code", &["multimodal_embedding"]),
+                    media("unknown-id", "Qwen3-VL-Embedding-2B", &[]),
+                ],
+            )]),
+            ..Default::default()
+        };
+        let config = PersonAiConfig::new(url);
+        let update = factory
+            .runtime_update(provider.current().unwrap(), &snapshot, &config)
+            .unwrap();
+        assert_eq!(update.embedding.len(), 2);
+        assert_eq!(update.embedding[0].model.model, "text-id");
+        assert_eq!(update.embedding[0].capabilities.input, [Modality::Text]);
+        assert_eq!(update.embedding[1].model.model, "image-id");
+        assert_eq!(
+            update.embedding[1].capabilities.input,
+            [Modality::Text, Modality::Image]
+        );
+        let cached = factory.catalog_snapshot(&snapshot, &config);
+        assert_eq!(cached.entries.len(), 2);
+        let restored = restore_discovery(&cached).unwrap();
+        let image = &restored.media[&multimedia::MediaType::EMBEDDING][1];
+        assert_eq!(image.dimension, Some(1024));
+        assert_eq!(image.tags, ["multimodal_embedding"]);
+    }
+
+    #[test]
+    fn native_rerank_discovery_registers_typed_model_and_catalog() {
+        let provider = Arc::new(PersonAiContextHandle::default());
+        provider.publish(AccountContext {
+            account_scope: "alice".into(),
+            revision: 1,
+            authorization: AuthorizedClientContext::new(),
+        });
+        let url = "http://127.0.0.1:1";
+        let factory = PersonAiModels::new(
+            "personai".into(),
+            url,
+            Arc::new(PersonAiServices::new(url).unwrap()),
+            provider.clone(),
+        )
+        .unwrap();
+        let mut config = PersonAiConfig::new(url);
+        config.embedding_models = vec!["text-only".into(), "image-space".into()];
+        config.multimodal_embedding_models = vec!["image-space".into()];
+        let snapshot = PersonAiDiscoverySnapshot {
+            account_scope: "alice".into(),
+            account_revision: 1,
+            media: BTreeMap::from([(
+                PERSONAI_RERANK_MEDIA_TYPE,
+                vec![DiscoveredMediaModel {
+                    id: "rerank-1".into(),
+                    model_code: "bge-reranker".into(),
+                    model_name: None,
+                    media_type: PERSONAI_RERANK_MEDIA_TYPE,
+                    tags: vec!["rerank".into()],
+                    dimension: None,
+                }],
+            )]),
+            ..Default::default()
+        };
+        let update = factory
+            .runtime_update(provider.current().unwrap(), &snapshot, &config)
+            .unwrap();
+        assert_eq!(update.embedding.len(), 2);
+        assert_eq!(update.embedding[0].capabilities.input, vec![Modality::Text]);
+        assert_eq!(update.embedding[1].model.model, "image-space");
+        assert_eq!(
+            update.embedding[1].capabilities.input,
+            vec![Modality::Text, Modality::Image]
+        );
+        assert_eq!(update.rerank.len(), 1);
+        assert_eq!(
+            update.rerank[0].model,
+            ModelRef::new("personai", "rerank-1")
+        );
+        let catalog = factory.catalog_snapshot(&snapshot, &config);
+        assert_eq!(catalog.entries[0].operation, ModelOperation::Rerank);
+        assert_eq!(catalog.entries[0].protocol, "personai.rerank");
+        assert_eq!(
+            restore_discovery(&catalog).unwrap().media[&PERSONAI_RERANK_MEDIA_TYPE][0].id,
+            "rerank-1"
+        );
     }
 
     #[tokio::test]
@@ -1556,6 +1963,9 @@ mod tests {
             // Assert the actual SDK-encrypted HTTP payload, not just the builder.
             assert_eq!(body["stream"], true);
             assert_eq!(body["stream_options"]["include_usage"], true);
+            assert_eq!(body["messages"][0]["role"], "system");
+            assert_eq!(body["messages"][0]["content"], "trusted host rule");
+            assert_eq!(body["messages"][1]["role"], "user");
             accepted_tx.send(()).unwrap();
             release_rx.await.unwrap();
             let body = concat!(
@@ -1626,6 +2036,12 @@ mod tests {
     async fn streams_responses_text_and_tool_calls() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
+        let public = private
+            .to_public_key()
+            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .unwrap();
+        let private_pem = private.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
@@ -1653,6 +2069,16 @@ mod tests {
                 }
             }
             assert!(String::from_utf8_lossy(&request).contains(" /api/v1/responses "));
+            let end = request.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap() + 4;
+            let envelope: crab_serverapi::crypto::ClientEncryptedEnvelope =
+                serde_json::from_slice(&request[end..]).unwrap();
+            let plaintext = crab_serverapi::crypto::ClientCrypto::decrypt_to_string(
+                private_pem.as_str(), &envelope.encrypted_key, &envelope.iv, &envelope.ciphertext,
+            ).unwrap();
+            let payload: Value = serde_json::from_str(&plaintext).unwrap();
+            assert_eq!(payload["input"][0]["role"], "system");
+            assert_eq!(payload["input"][0]["content"][0]["text"], "trusted host rule");
+            assert_eq!(payload["input"][1]["role"], "user");
             let body = concat!(
                 "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
                 "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"item-1\",\"call_id\":\"call-1\",\"name\":\"lookup\"}}\n\n",
@@ -1666,11 +2092,6 @@ mod tests {
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
-        let private = RsaPrivateKey::new(&mut rand::thread_rng(), 2048).unwrap();
-        let public = private
-            .to_public_key()
-            .to_public_key_pem(rsa::pkcs8::LineEnding::LF)
-            .unwrap();
         let provider = Arc::new(PersonAiContextHandle::default());
         provider.publish(AccountContext {
             account_scope: "alice".into(),
@@ -1711,13 +2132,15 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
-            for _ in 0..6 {
+            for _ in 0..7 {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut bytes = [0_u8; 8192];
                 let size = socket.read(&mut bytes).await.unwrap();
                 let request = String::from_utf8_lossy(&bytes[..size]);
                 let body = if request.contains(" /api/v1/embeddings ") {
                     r#"{"data":[{"index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":2}}"#
+                } else if request.contains(" /api/v1/rerank ") {
+                    r#"{"results":[{"index":1,"relevance_score":0.91}],"usage":{"total_tokens":7}}"#
                 } else if request.contains(" /api/v1/images/generations ") {
                     r#"{"code":0,"data":{"id":"img","media_type":0,"status":0,"progress":0}}"#
                 } else if request.contains(" /api/v1/multimedia/tasks/img ") {
@@ -1768,6 +2191,40 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(embedding.vectors[0].values.len(), 2);
+
+        let rerank = RerankModel::rerank_with_usage(
+            binding.as_ref(),
+            "rerank-1",
+            RerankRequest {
+                choice: Default::default(),
+                query: "orchid".into(),
+                documents: vec!["stone".into(), "flower".into()],
+                top_n: Some(1),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rerank.response.model, binding.model_ref("rerank-1"));
+        assert_eq!(rerank.response.results[0].index, 1);
+        assert_eq!(rerank.response.results[0].score, 0.91);
+        assert_eq!(rerank.usage.unwrap().input_tokens, 7);
+        assert!(
+            RerankModel::rerank(
+                binding.as_ref(),
+                "rerank-1",
+                RerankRequest {
+                    choice: Default::default(),
+                    query: Content(vec![ContentBlock::Json {
+                        value: json!({"q":"not text"})
+                    }]),
+                    documents: vec!["flower".into()],
+                    top_n: Some(1),
+                }
+            )
+            .await
+            .is_err()
+        );
 
         let image = ImageGenerationModel::submit(
             binding.as_ref(),
@@ -1845,5 +2302,141 @@ mod tests {
         .unwrap();
         assert_eq!(detection.result["ai_confidence"], 0.2);
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod embedding_input_tests {
+    use super::*;
+    #[test]
+    fn native_protocols_preserve_system_instructions_without_role_rewriting() {
+        let mut request = ChatRequest {
+            options: Default::default(),
+            messages: vec![
+                eliteforge_agent_core::Message::system("trusted host rule"),
+                eliteforge_agent_core::Message::user("question"),
+                eliteforge_agent_core::Message::assistant("answer"),
+                eliteforge_agent_core::Message::tool("call-1", "evidence"),
+            ],
+            tools: vec![],
+            extensions: Default::default(),
+        };
+        request.options.max_output_tokens = Some(32_768);
+        let chat = chat_completions_request("glm_plan/glm-5.3-flash", &request).unwrap();
+        let responses = responses_request("glm_plan/glm-5.3-flash", &request).unwrap();
+        assert_eq!(chat["messages"][0]["role"], "system");
+        assert_eq!(chat["messages"][0]["content"], "trusted host rule");
+        assert_eq!(responses["input"][0]["role"], "system");
+        assert_eq!(responses["input"][0]["content"][0]["text"], "trusted host rule");
+        assert_eq!(chat["messages"][1]["role"], "user");
+        assert_eq!(responses["input"][1]["role"], "user");
+        assert_eq!(chat["messages"][2]["role"], "assistant");
+        assert_eq!(responses["input"][2]["role"], "assistant");
+        assert_eq!(chat["messages"][3]["role"], "tool");
+        assert_eq!(chat["messages"][3]["tool_call_id"], "call-1");
+        assert_eq!(responses["input"][3]["type"], "function_call_output");
+        assert_eq!(chat["max_tokens"], 32_768);
+        assert_eq!(responses["max_output_tokens"], 32_768);
+    }
+
+    #[test]
+    fn native_chat_and_responses_use_their_personai_gateway_output_limit_fields() {
+        let mut request = ChatRequest {
+            options: Default::default(),
+            messages: vec![],
+            tools: vec![],
+            extensions: Default::default(),
+        };
+        request.options.max_output_tokens = Some(32_768);
+        let chat = chat_completions_request("extractor", &request).unwrap();
+        let responses = responses_request("extractor", &request).unwrap();
+        assert_eq!(chat["max_tokens"], 32_768);
+        assert_eq!(chat["tool_choice"], "none");
+        assert!(chat.get("max_completion_tokens").is_none());
+        assert!(chat.get("max_output_tokens").is_none());
+        assert_eq!(responses["max_output_tokens"], 32_768);
+        assert_eq!(responses["tool_choice"], "none");
+        assert!(responses.get("max_tokens").is_none());
+    }
+    #[test]
+    fn generation_preserves_provider_defaults_and_explicit_reasoning_controls() {
+        let input = json!({"model":"always-reasoning","messages":[{"role":"user","content":"extract graph"}],"max_tokens":2048});
+        let lightweight = personai_generation_request_body(&input, false);
+        assert_eq!(lightweight, input);
+        assert!(lightweight.get("thinking").is_none());
+        assert!(lightweight.get("enable_thinking").is_none());
+        assert_eq!(lightweight["messages"], input["messages"]);
+        assert_eq!(lightweight["max_tokens"], 2048);
+        let enabled = personai_generation_request_body(&input, true);
+        assert_eq!(enabled["enable_thinking"], true);
+        assert_eq!(enabled["thinking"]["type"], "enabled");
+        assert_eq!(enabled["messages"], input["messages"]);
+        assert_eq!(enabled["max_tokens"], 2048);
+        let explicit = json!({"thinking":{"type":"disabled"},"enable_thinking":false,"reasoning_effort":"none"});
+        assert_eq!(personai_generation_request_body(&explicit, false), explicit);
+        assert_eq!(personai_generation_request_body(&explicit, true), explicit);
+        for explicit in [
+            json!({"reasoning_effort":"max"}),
+            json!({"reasoning":{"effort":"high"}}),
+            json!({"thinking":{"type":"enabled"}}),
+            json!({"enable_thinking":true}),
+        ] {
+            assert_eq!(personai_generation_request_body(&explicit, false), explicit);
+        }
+    }
+    #[test]
+    fn native_request_preserves_order_pixels_text_and_dimensions() {
+        let image = Content(vec![
+            ContentBlock::Text {
+                text: "diagram caption".into(),
+            },
+            ContentBlock::Media {
+                media: MediaContent {
+                    mime_type: "image/png".into(),
+                    source: MediaSource::Base64("AA==".into()),
+                    name: None,
+                    estimated_tokens: Some(4096),
+                },
+            },
+        ]);
+        let mut request = EmbeddingRequest::texts(["正文"]);
+        request.inputs.push(image);
+        request.dimensions = Some(1024);
+        let body = personai_embedding_request_body("actual-model", &request).unwrap();
+        assert_eq!(body["model"], "actual-model");
+        assert_eq!(body["dimensions"], 1024);
+        assert_eq!(body["input"][0], "正文");
+        assert_eq!(body["input"][1]["text"], "diagram caption");
+        assert_eq!(body["input"][1]["image_base64"], "AA==");
+    }
+    #[test]
+    fn sdk_embedding_keeps_text_and_image_together_and_rejects_unsupported_blocks() {
+        let mut content = Content::from("caption");
+        content.0.push(ContentBlock::Media {
+            media: MediaContent {
+                mime_type: "image/png".into(),
+                source: MediaSource::Url("https://example.com/image.png".into()),
+                name: None,
+                estimated_tokens: Some(10),
+            },
+        });
+        let input = serde_json::to_value(personai_embedding_input(&content).unwrap()).unwrap();
+        assert_eq!(input["text"], "caption");
+        assert_eq!(input["image_url"], "https://example.com/image.png");
+        assert!(input["image_base64"].is_null());
+        if let ContentBlock::Media { media } = &mut content.0[1] {
+            media.source = MediaSource::Base64("AA==".into());
+        }
+        let input = serde_json::to_value(personai_embedding_input(&content).unwrap()).unwrap();
+        assert_eq!(input["image_base64"], "AA==");
+        assert!(input["image_url"].is_null());
+        content.0.push(content.0[1].clone());
+        assert!(personai_embedding_input(&content).is_err());
+        assert!(
+            personai_embedding_input(&Content(vec![ContentBlock::Json {
+                value: json!({"x":1})
+            }]))
+            .is_err()
+        );
     }
 }

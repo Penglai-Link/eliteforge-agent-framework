@@ -13,10 +13,7 @@ impl fw::EmbeddingModel for HttpEmbeddingModel {
         self.config.context_window_tokens.map(|v| v as usize)
     }
     fn input_token_estimate(&self, request: &fw::EmbeddingRequest) -> u64 {
-        embedding_body(&self.config, request)
-            .to_string()
-            .len()
-            .max(1) as u64
+        request.inputs.iter().map(fw::Content::estimated_tokens).fold(0usize, usize::saturating_add).max(1) as u64
     }
 
     fn on_failure(&self, error: &fw::ModelError) {
@@ -32,17 +29,7 @@ impl fw::EmbeddingModel for HttpEmbeddingModel {
         _: &str,
         request: fw::EmbeddingRequest,
     ) -> Result<fw::EmbeddingResponse, fw::ModelError> {
-        if request.inputs.iter().any(|content| {
-            content
-                .0
-                .iter()
-                .any(|block| !matches!(block, fw::ContentBlock::Text { .. }))
-        }) {
-            return Err(fw::ModelError::Fatal(
-                "HTTP embedding requires text content".into(),
-            ));
-        }
-        let body = embedding_body(&self.config, &request);
+        let body = self.factory.embedding_body(&self.config, &request)?;
         let response = self
             .factory
             .create(&self.config)
@@ -267,7 +254,7 @@ fn rerank_native_body(config: &AgentModelConfig, request: &fw::RerankRequest) ->
     body
 }
 
-fn embedding_body(config: &AgentModelConfig, request: &fw::EmbeddingRequest) -> Value {
+pub(crate) fn embedding_body(config: &AgentModelConfig, request: &fw::EmbeddingRequest) -> Value {
     let inputs = request
         .inputs
         .iter()

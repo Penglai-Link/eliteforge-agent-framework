@@ -3,6 +3,49 @@ use crate::*;
 use std::sync::Arc;
 
 impl ModelClient {
+    /// One-shot automatic text generation. Candidates come from the registered
+    /// catalog and the host data source; no Agent/session/history is created.
+    /// Fixed models remain available through `chat`.
+    pub async fn text_generation(
+        &self,
+        request: ChatRequest,
+        limits: &RunLimits,
+        stage: &str,
+    ) -> Result<ChatResponse, AgentError> {
+        limits.validate()?;
+        let snapshot = self.runtime.snapshot();
+        let candidates = snapshot
+            .chat
+            .models()
+            .into_iter()
+            .filter_map(|model| {
+                let descriptor = snapshot.chat.get(&model)?;
+                Some(AutoRouteCandidate {
+                    protocol: snapshot.chat.protocol(&model).unwrap_or_default().into(),
+                    context_window_tokens: descriptor.context_window_tokens,
+                    input_modalities: descriptor.input_modalities.clone(),
+                    metadata: descriptor.metadata.clone(),
+                    model,
+                })
+            })
+            .collect::<Vec<_>>();
+        let call_key = RunId::new_v4().to_string();
+        let model = self.auto_routers.select_text_generation(
+            &AutoRouteContext {
+                operation: ModelOperation::Chat,
+                stage,
+                affinity: &call_key,
+                call_key: &call_key,
+                previous: None,
+                transient_failures: 0,
+            },
+            &candidates,
+        )?;
+        let mut pinned = self.clone();
+        pinned.runtime = ModelRuntime::frozen(snapshot);
+        pinned.chat(&model, request, limits, stage).await
+    }
+
     pub fn control_context(&self, limits: &RunLimits) -> Result<RunContext, AgentError> {
         limits.validate()?;
         let mut context = match &self.options.run {
@@ -231,7 +274,7 @@ impl ModelClient {
 
     pub async fn embed_observed(
         &self,
-        request: EmbeddingRequest,
+        mut request: EmbeddingRequest,
         limits: &RunLimits,
     ) -> ObservedModelResult<EmbeddingResponse> {
         let report = Arc::new(model_observation::ModelReportState::default());
@@ -244,10 +287,17 @@ impl ModelClient {
                     .unwrap_or(context.limits().max_model_retries.saturating_add(2)),
             )?);
             let snapshot = self.runtime.snapshot();
+            request.choice = self.route_choice(
+                ModelOperation::Embedding,
+                &snapshot.embedding,
+                &request.choice,
+                &request.inputs,
+            )?;
             let binding = snapshot
                 .embedding
                 .select(&request.choice, &request.inputs)?
                 .clone();
+            request.choice.model = Some(binding.model.clone());
             let mut estimate_request = request.clone();
             if let Some(space) = snapshot.spaces.get(&binding.model) {
                 estimate_request.dimensions = Some(space.dimensions);
@@ -255,15 +305,17 @@ impl ModelClient {
             let retry_input = binding
                 .implementation
                 .input_token_estimate(&estimate_request);
-            Ok((context, binding, retry_input))
+            Ok((context, binding, retry_input, snapshot))
         });
         let result = match prepared {
             Err(error) => Err(error),
-            Ok((context, binding, retry_input)) => {
+            Ok((context, binding, retry_input, snapshot)) => {
                 let mut options = ModelInvocationOptions::for_run(&context, context.limits());
                 options.max_input_bytes = self.options.max_input_bytes;
                 options.max_batch_size = self.options.max_batch_size;
-                let mut client = self.with_options(options);
+                let mut client = self
+                    .with_runtime(ModelRuntime::frozen(snapshot))
+                    .with_options(options);
                 client.admitted = true;
                 let execution = async {
                     let max = context
@@ -356,7 +408,7 @@ impl ModelClient {
 
     pub async fn rerank_observed(
         &self,
-        request: RerankRequest,
+        mut request: RerankRequest,
         limits: &RunLimits,
     ) -> ObservedModelResult<RerankResponse> {
         let report = Arc::new(model_observation::ModelReportState::default());
@@ -370,26 +422,31 @@ impl ModelClient {
             )?);
             let mut inputs = request.documents.clone();
             inputs.push(request.query.clone());
-            let binding = self
-                .runtime
-                .snapshot()
-                .rerank
-                .select(&request.choice, &inputs)?
-                .clone();
+            let snapshot = self.runtime.snapshot();
+            request.choice = self.route_choice(
+                ModelOperation::Rerank,
+                &snapshot.rerank,
+                &request.choice,
+                &inputs,
+            )?;
+            let binding = snapshot.rerank.select(&request.choice, &inputs)?.clone();
+            request.choice.model = Some(binding.model.clone());
             let mut estimate_request = request.clone();
             estimate_request.choice.model = Some(binding.model.clone());
             let retry_input = binding
                 .implementation
                 .input_token_estimate(&estimate_request);
-            Ok((context, binding, retry_input))
+            Ok((context, binding, retry_input, snapshot))
         });
         let result = match prepared {
             Err(error) => Err(error),
-            Ok((context, binding, retry_input)) => {
+            Ok((context, binding, retry_input, snapshot)) => {
                 let mut options = ModelInvocationOptions::for_run(&context, context.limits());
                 options.max_input_bytes = self.options.max_input_bytes;
                 options.max_batch_size = self.options.max_batch_size;
-                let mut client = self.with_options(options);
+                let mut client = self
+                    .with_runtime(ModelRuntime::frozen(snapshot))
+                    .with_options(options);
                 client.admitted = true;
                 let execution = async {
                     let max = context

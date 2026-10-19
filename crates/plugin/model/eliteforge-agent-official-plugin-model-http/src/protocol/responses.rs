@@ -82,6 +82,8 @@ pub fn responses_request(config: &AgentModelConfig, request: &ModelRequest) -> V
         payload["tools"] =
             crate::request_tool_schema_payload(AgentModelProtocol::Responses, request);
         payload["parallel_tool_calls"] = json!(true);
+    } else {
+        payload["tool_choice"] = json!("none");
     }
     payload
 }
@@ -89,7 +91,7 @@ pub fn responses_request(config: &AgentModelConfig, request: &ModelRequest) -> V
 fn responses_input_value(messages: &[crate::AgentMessage]) -> Value {
     let input_messages = messages
         .iter()
-        .filter(|message| !matches!(message.role.as_str(), "system" | "developer"))
+        .filter(|message| message.role != "system")
         .collect::<Vec<_>>();
     if input_messages.len() == 1
         && input_messages[0].role == "user"
