@@ -49,12 +49,24 @@ impl ModelProtocolAdapter for ResponsesAdapter {
 }
 
 pub fn responses_request(config: &AgentModelConfig, request: &ModelRequest) -> Value {
-    let instructions = responses_instructions_text(&request.messages);
-    let input = request
-        .response_input_items
-        .as_ref()
-        .map(|items| json!(items))
-        .unwrap_or_else(|| responses_input_value(&request.messages));
+    let instructions =
+        responses_instructions_text(&request.messages, config.supports_developer_role);
+    let input = match &request.response_input_items {
+        Some(items) => {
+            // Stateful callers supply only conversation deltas. Preserve system
+            // messages in the delta without promoting them to developer authority.
+            let mut input = request
+                .messages
+                .iter()
+                .filter(|message| include_in_input(message, config.supports_developer_role))
+                .filter(|message| message.role == "system")
+                .map(responses_input_item_json)
+                .collect::<Vec<_>>();
+            input.extend(items.iter().cloned());
+            Value::Array(input)
+        }
+        None => responses_input_value(&request.messages, config.supports_developer_role),
+    };
     let mut payload = json!({
         "model": config.model_name,
         "input": input,
@@ -88,10 +100,16 @@ pub fn responses_request(config: &AgentModelConfig, request: &ModelRequest) -> V
     payload
 }
 
-fn responses_input_value(messages: &[crate::AgentMessage]) -> Value {
+fn include_in_input(message: &AgentMessage, supports_developer_role: bool) -> bool {
+    !(supports_developer_role
+        && message.role == "system"
+        && message.instruction_origin.is_some())
+}
+
+fn responses_input_value(messages: &[AgentMessage], supports_developer_role: bool) -> Value {
     let input_messages = messages
         .iter()
-        .filter(|message| message.role != "system")
+        .filter(|message| include_in_input(message, supports_developer_role))
         .collect::<Vec<_>>();
     if input_messages.len() == 1
         && input_messages[0].role == "user"

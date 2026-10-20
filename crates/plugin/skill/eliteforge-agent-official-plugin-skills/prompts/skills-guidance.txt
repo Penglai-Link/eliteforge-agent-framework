@@ -1,0 +1,1 @@
+Available skills are metadata only. Load a skill with `skill_load` before following its instructions. After loading it, use `skill_read_resource` for a listed file when needed. Loading a skill never executes scripts. Explicitly selected skills must be followed after loading, but selection never grants tool permissions or executes scripts.

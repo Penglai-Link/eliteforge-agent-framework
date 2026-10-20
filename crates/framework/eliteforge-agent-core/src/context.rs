@@ -3,7 +3,7 @@ use crate::*;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
     time::Duration,
 };
@@ -11,10 +11,29 @@ use std::{
 pub const INSTRUCTIONS_BLOCK: &str = "framework.instructions";
 pub const HISTORY_BLOCK: &str = "framework.history";
 
+/// Host-managed developer instructions resolved for one run. A host that
+/// supplies this extension owns every listed prompt and may disable one by
+/// omitting it; framework defaults are used only by standalone hosts.
+#[derive(Clone, Default)]
+pub struct ManagedDeveloperPrompts(pub BTreeMap<String, String>);
+
+impl ManagedDeveloperPrompts {
+    pub fn resolve(run: &RunContext, key: &str, standalone_default: &str) -> Result<String, AgentError> {
+        match run.extensions.get::<Self>() {
+            Some(prompts) => prompts.0.get(key).cloned().ok_or_else(|| {
+                AgentError::InvalidConfiguration(format!("managed developer prompt is unavailable: {key}"))
+            }),
+            None => Ok(standalone_default.to_owned()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextTrust {
     Instruction,
     Data,
+    /// A fixed instruction followed by explicitly lower-trust user data.
+    Mixed,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -40,6 +59,9 @@ impl ContextBlock {
             trust: ContextTrust::Data,
             source_version: None,
         }
+    }
+    pub fn instructions_with_data(id: impl Into<String>, messages: Vec<Message>) -> Self {
+        Self { id: id.into(), messages, trust: ContextTrust::Mixed, source_version: None }
     }
 }
 pub struct ContextInput<'a> {
@@ -81,7 +103,7 @@ pub struct FixedContextContributor(pub ContextBlock);
 #[async_trait]
 impl ContextContributor for FixedContextContributor {
     fn kind(&self) -> ContextSourceKind {
-        if self.0.trust == ContextTrust::Instruction {
+        if self.0.trust != ContextTrust::Data {
             ContextSourceKind::Instruction
         } else {
             ContextSourceKind::Data
@@ -522,7 +544,8 @@ impl BuiltinInstructions<'_> {
                     ..*input
                 };
             let addition = source.contribute(&request).await?;
-            if addition.id != source.block_id() || addition.trust != ContextTrust::Instruction {
+            if addition.id != source.block_id()
+                || !matches!(addition.trust, ContextTrust::Instruction | ContextTrust::Mixed) {
                 return Err(AgentError::InvalidConfiguration(
                     "instruction source changed its identity or trust".into(),
                 ));
@@ -532,7 +555,21 @@ impl BuiltinInstructions<'_> {
                 id: addition.id,
                 source_version: addition.source_version,
             });
-            block.messages.extend(addition.messages);
+            if addition.trust == ContextTrust::Mixed {
+                block.trust = ContextTrust::Mixed;
+            }
+            block.messages.extend(
+                addition
+                    .messages
+                    .into_iter()
+                    .map(|message| {
+                        if message.role == Role::System {
+                            message.with_instruction_origin(InstructionOrigin::Plugin)
+                        } else {
+                            message
+                        }
+                    }),
+            );
             if block.messages.len() > input.budget.max_messages
                 || context_tokens(&block.messages, input.model, input.estimator).await?
                     > input.budget.max_tokens
@@ -831,7 +868,7 @@ impl DefaultContextAssembler {
                 let block = source.contribute(&request).await?;
                 match report.kind {
                     ContextSourceKind::Instruction => {
-                        if block.trust != ContextTrust::Instruction {
+                        if !matches!(block.trust, ContextTrust::Instruction | ContextTrust::Mixed) {
                             return Err(AgentError::InvalidConfiguration(
                                 "instruction source changed its trust".into(),
                             ));
@@ -873,7 +910,7 @@ impl DefaultContextAssembler {
                         "contributor changed its block ID".into(),
                     ));
                 }
-                if block.trust == ContextTrust::Instruction && config.compression.is_some() {
+                if block.trust != ContextTrust::Data && config.compression.is_some() {
                     return Err(AgentError::InvalidConfiguration(
                         "instruction providers cannot be compressed".into(),
                     ));
@@ -1010,13 +1047,13 @@ impl DefaultContextAssembler {
                     },
                     compression: trigger,
                 };
-                let mut output = if block.trust == ContextTrust::Instruction {
+                let mut output = if block.trust != ContextTrust::Data {
                     KeepContext.reduce(&reduction).await?
                 } else {
                     config.reducer.reduce(&reduction).await?
                 };
                 validate_messages(&output).map_err(ContextError::from)?;
-                if block.trust == ContextTrust::Instruction && output != block.messages {
+                if block.trust != ContextTrust::Data && output != block.messages {
                     return Err(AgentError::InvalidConfiguration(
                         "fixed instructions were changed".into(),
                     ));
@@ -1242,6 +1279,14 @@ fn validate_contribution(
     max_messages: usize,
     max_bytes: usize,
 ) -> Result<(), AgentError> {
+    if block.trust == ContextTrust::Mixed
+        && (block.messages.first().is_none_or(|message| message.role != Role::System)
+            || !block.messages.iter().any(|message| message.role == Role::User))
+    {
+        return Err(AgentError::InvalidConfiguration(
+            "mixed context must start with an instruction and contain lower-trust data".into(),
+        ));
+    }
     if block.messages.len() > max_messages
         || serde_json::to_writer(ByteLimit(max_bytes), &block.messages).is_err()
     {
@@ -1250,10 +1295,10 @@ fn validate_contribution(
         ));
     }
     if block.messages.iter().any(|m| {
-        (if block.trust == ContextTrust::Instruction {
-            m.role != Role::System
-        } else {
-            m.role != Role::User
+        (match block.trust {
+            ContextTrust::Instruction => m.role != Role::System,
+            ContextTrust::Data => m.role != Role::User,
+            ContextTrust::Mixed => !matches!(m.role, Role::System | Role::User),
         }) || !m.tool_calls.is_empty()
             || m.tool_call_id.is_some()
             || m.tool_result.is_some()

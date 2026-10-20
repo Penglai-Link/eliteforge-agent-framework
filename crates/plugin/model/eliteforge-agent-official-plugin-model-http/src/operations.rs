@@ -86,6 +86,8 @@ pub struct HttpRerankModel {
     pub config: AgentModelConfig,
     pub factory: Arc<dyn ModelTransportFactory>,
     pub chat_fallback: bool,
+    /// Host-managed rule for the Chat Completions fallback.
+    pub chat_instruction: Option<String>,
 }
 #[async_trait]
 impl fw::RerankModel for HttpRerankModel {
@@ -105,7 +107,7 @@ impl fw::RerankModel for HttpRerankModel {
     }
     fn input_token_estimate(&self, request: &fw::RerankRequest) -> u64 {
         let body = if self.chat_fallback {
-            let mut body = rerank_chat_body(request);
+            let mut body = rerank_chat_body(request, self.chat_instruction.as_deref(), self.config.supports_developer_role);
             body["max_tokens"] = json!(self.config.max_tokens.unwrap_or(4096));
             body
         } else {
@@ -141,7 +143,7 @@ impl fw::RerankModel for HttpRerankModel {
             .collect::<Vec<_>>();
         let transport = self.factory.create(&self.config).await?;
         let results = if self.chat_fallback {
-            let body = rerank_chat_body(&request);
+            let body = rerank_chat_body(&request, self.chat_instruction.as_deref(), self.config.supports_developer_role);
             let mut body = body;
             body["max_tokens"] =
                 json!(output_limit.unwrap_or(self.config.max_tokens.unwrap_or(4096)));
@@ -235,7 +237,9 @@ pub(crate) fn parse_usage(response: &Value) -> Option<fw::Usage> {
     })
 }
 
-fn rerank_chat_body(request: &fw::RerankRequest) -> Value {
+const DEFAULT_CHAT_RERANK_PROMPT: &str = include_str!("../prompts/chat-rerank.txt");
+
+fn rerank_chat_body(request: &fw::RerankRequest, instruction: Option<&str>, supports_developer_role: bool) -> Value {
     let numbered = request
         .documents
         .iter()
@@ -243,7 +247,9 @@ fn rerank_chat_body(request: &fw::RerankRequest) -> Value {
         .map(|(index, document)| format!("[{index}] {}", document.text()))
         .collect::<Vec<_>>()
         .join("\n\n");
-    json!({"messages":[{"role":"system","content":"Rank the candidate documents by relevance. Return only a JSON array of zero-based candidate indexes, with no markdown or explanation."},{"role":"user","content":format!("Query:\n{}\n\nCandidates:\n{numbered}",request.query.text())}],"temperature":0})
+    let instruction = instruction.unwrap_or(DEFAULT_CHAT_RERANK_PROMPT.trim());
+    let role = if supports_developer_role { "developer" } else { "system" };
+    json!({"messages":[{"role":role,"content":instruction},{"role":"user","content":format!("Query:\n{}\n\nCandidates:\n{numbered}",request.query.text())}],"temperature":0})
 }
 
 fn rerank_native_body(config: &AgentModelConfig, request: &fw::RerankRequest) -> Value {

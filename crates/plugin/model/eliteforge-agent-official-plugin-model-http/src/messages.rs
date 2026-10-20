@@ -13,7 +13,9 @@ pub(crate) fn encode(message: &AgentMessage) -> Result<Message, String> {
         "tool" => Role::Tool,
         other => return Err(format!("unsupported conversation role: {other}")),
     };
-    let mut result = Message::new(role, Content::default()).with_annotations(message.annotations.clone());
+    let mut result =
+        Message::new(role, Content::default()).with_annotations(message.annotations.clone());
+    result.instruction_origin = message.instruction_origin;
     for part in &message.parts {
         let block = match part {
             AgentMessagePart::Text { text } => ContentBlock::Text { text: text.clone() },
@@ -234,6 +236,7 @@ pub(crate) fn decode(message: &Message) -> Result<AgentMessage, String> {
     }
     let mut result = AgentMessage::new(role, parts);
     result.annotations = message.annotations.clone();
+    result.instruction_origin = message.instruction_origin;
     Ok(result)
 }
 

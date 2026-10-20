@@ -1,8 +1,9 @@
 //! Standard Agent Skills integration.
 //!
 //! The default provider discovers system-level and local `SKILL.md` directories.
-//! It contributes a metadata-only context message and normal model tools that
-//! load instructions and resources only when they are selected.
+//! It contributes fixed guidance as an instruction and skill metadata as
+//! lower-trust user data. Tools load full skill instructions and resources only
+//! when selected.
 
 mod filesystem;
 mod tools;
@@ -25,6 +26,7 @@ use eliteforge_agent_core::{
     PluginReadyContext, Role, RunContext, RunMiddleware, RunNext, RunResult, SkillCatalog,
     SkillDetail, SkillProvider, SkillResource, SkillSummary, StateStore, ToolLease, ToolProvider,
     ToolProviderService,
+    ManagedDeveloperPrompts,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -33,6 +35,7 @@ use tokio::sync::OnceCell;
 pub use filesystem::{FileSystemSkillProvider, FileSystemSkillsConfig};
 
 static EMBEDDED_SKILLS_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const DEFAULT_SKILLS_GUIDANCE: &str = include_str!("../prompts/skills-guidance.txt");
 
 /// Restricts the catalog made available to one Agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1072,18 +1075,24 @@ impl ContextContributor for SkillsEndpoint {
             })
             .collect::<Vec<_>>();
         let metadata = serialize_catalog_for_context(&skills)?;
-        let mut messages = vec![Message::system(format!(
-            "Available skills are metadata only. Load a skill with `skill_load` before following its instructions. After loading it, use `skill_read_resource` for a listed file when needed. Loading a skill never executes scripts.\n<available_skills>{metadata}</available_skills>"
-        ))];
+        let guidance = ManagedDeveloperPrompts::resolve(
+            context,
+            "skills.guidance",
+            DEFAULT_SKILLS_GUIDANCE.trim(),
+        )?;
+        let mut messages = vec![
+            Message::system(guidance),
+            Message::user(format!("<available_skills>{metadata}</available_skills>")),
+        ];
         if !explicit.is_empty() {
             let explicit = serde_json::to_string(&explicit)
                 .map_err(|_| AgentError::Run("serialize requested skills failed".into()))?
                 .replace('&', "\\u0026")
                 .replace('<', "\\u003c")
                 .replace('>', "\\u003e");
-            messages.push(Message::system(format!("The user explicitly selected these skills for this run. Follow their loaded instructions and use skill_read_resource for listed resources. Selection never grants tool permissions or executes scripts.\n<requested_skills>{explicit}</requested_skills>")));
+            messages.push(Message::user(format!("<requested_skills>{explicit}</requested_skills>")));
         }
-        Ok(ContextBlock::instructions(self.block_id(), messages))
+        Ok(ContextBlock::instructions_with_data(self.block_id(), messages))
     }
 }
 

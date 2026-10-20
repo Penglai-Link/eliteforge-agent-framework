@@ -130,6 +130,7 @@ fn config(url: &str) -> http::AgentModelConfig {
         api_key: "test".into(),
         model_name: "test".into(),
         thinking_enabled: false,
+        supports_developer_role: false,
         reasoning_effort: None,
         responses_stateful_enabled: false,
         temperature: Some(0.5),
@@ -480,6 +481,7 @@ async fn rerank_fallback_reserves_actual_prompt_before_http() {
                 http::HttpModelTransport::new(http::ModelHttpClient::new(), &server.url, "test"),
             ))),
             chat_fallback: true,
+            chat_instruction: None,
         }),
     );
     let request = RerankRequest {
@@ -552,11 +554,16 @@ async fn rerank_actual_usage_settles_and_output_limit_reaches_wire() {
     let service = RerankModelService::new(
         ModelRef::new("test", "test"),
         Arc::new(http::HttpRerankModel {
-            config: config(&server.url),
+            config: {
+                let mut model = config(&server.url);
+                model.supports_developer_role = true;
+                model
+            },
             factory: Arc::new(http::FixedModelTransportFactory(Arc::new(
                 http::HttpModelTransport::new(http::ModelHttpClient::new(), &server.url, "test"),
             ))),
             chat_fallback: true,
+            chat_instruction: Some("managed rerank rule".into()),
         }),
     );
     let request = RerankRequest {
@@ -588,6 +595,8 @@ async fn rerank_actual_usage_settles_and_output_limit_reaches_wire() {
     assert_eq!(result.result.unwrap().results[0].index, 0);
     let body = server.requests.lock().unwrap().clone();
     assert!(body[0]["max_tokens"].as_u64().unwrap() < 64);
+    assert_eq!(body[0]["messages"][0]["role"], "developer");
+    assert_eq!(body[0]["messages"][0]["content"], "managed rerank rule");
     drop(body);
     client.close().await;
 }
@@ -942,6 +951,7 @@ async fn native_rerank_total_only_and_empty_usage_are_conservative() {
                     ),
                 ))),
                 chat_fallback: false,
+                chat_instruction: None,
             }),
         );
         let request = RerankRequest {

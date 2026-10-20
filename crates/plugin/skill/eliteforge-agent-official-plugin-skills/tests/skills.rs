@@ -545,9 +545,9 @@ async fn catalog_metadata_cannot_close_the_context_wrapper() {
         ProbeAction::ContextOnly,
     )
     .await;
-    assert_eq!(probe.context[0].matches("</available_skills>").count(), 1);
-    assert!(probe.context[0].contains("\\u003c/available_skills\\u003e"));
-    let catalog = probe.context[0]
+    assert_eq!(probe.context[1].matches("</available_skills>").count(), 1);
+    assert!(probe.context[1].contains("\\u003c/available_skills\\u003e"));
+    let catalog = probe.context[1]
         .split_once("<available_skills>")
         .unwrap()
         .1
@@ -569,8 +569,8 @@ async fn plugin_enforces_selection_and_resource_paths() {
     let plugin = SkillsPlugin::filesystem(skills_config(&system, &local)).only_skills(["included"]);
 
     let selected = run_probe(plugin.clone(), ProbeAction::ContextOnly).await;
-    assert!(selected.context[0].contains("included"));
-    assert!(!selected.context[0].contains("excluded"));
+    assert!(selected.context[1].contains("included"));
+    assert!(!selected.context[1].contains("excluded"));
 
     let blocked = run_probe(
         plugin.clone(),
@@ -1020,7 +1020,7 @@ async fn one_execution_caches_loaded_details_but_detects_changes_before_first_lo
     );
 
     let refreshed = run_probe(plugin.clone(), ProbeAction::ContextOnly).await;
-    assert!(refreshed.context[0].contains("changed"));
+    assert!(refreshed.context[1].contains("changed"));
 
     fs::write(
         root.join("SKILL.md"),
@@ -1102,7 +1102,7 @@ async fn custom_skill_provider_can_replace_the_filesystem_implementation() {
         },
     )
     .await;
-    assert!(probe.context[0].contains("rag://skills/rag-backed"));
+    assert!(probe.context[1].contains("rag://skills/rag-backed"));
     assert_eq!(probe.values[0]["skillMarkdown"], "RAG-backed instructions");
     assert_eq!(probe.values[1]["content"], "RAG-backed resource");
 }

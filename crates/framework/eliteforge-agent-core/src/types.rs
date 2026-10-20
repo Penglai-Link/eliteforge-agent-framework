@@ -111,11 +111,21 @@ pub struct RunHostMetadata {
 #[derive(Clone, Default)]
 pub struct RunHostMetadataService(pub Arc<std::sync::RwLock<RunHostMetadata>>);
 
+/// Trusted instruction origin retained until a model adapter chooses its wire role.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InstructionOrigin {
+    Agent,
+    Plugin,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
     #[serde(default)]
     pub annotations: Vec<crate::MessageAnnotation>,
     pub role: Role,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_origin: Option<InstructionOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<MessageProvenance>,
     pub content: crate::Content,
@@ -135,6 +145,7 @@ impl Message {
     pub fn new(role: Role, content: impl Into<crate::Content>) -> Self {
         Self {
             role,
+            instruction_origin: None,
             annotations: Vec::new(),
             provenance: None,
             content: content.into(),
@@ -148,6 +159,11 @@ impl Message {
 
     pub fn with_annotations(mut self, annotations: Vec<crate::MessageAnnotation>) -> Self {
         self.annotations = annotations;
+        self
+    }
+
+    pub fn with_instruction_origin(mut self, origin: InstructionOrigin) -> Self {
+        self.instruction_origin = Some(origin);
         self
     }
 
@@ -169,6 +185,7 @@ impl Message {
     pub fn tool(call_id: impl Into<String>, content: impl Into<crate::Content>) -> Self {
         Self {
             role: Role::Tool,
+            instruction_origin: None,
             annotations: Vec::new(),
             provenance: None,
             content: content.into(),

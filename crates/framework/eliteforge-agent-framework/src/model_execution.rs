@@ -934,7 +934,12 @@ impl ModelExecutionRuntime<'_> {
                     }
                     self.record_steering(steering).await?;
                     let stage = &self.state.definition.stages[self.state.stage];
-                    let instructions = stage.instructions.clone();
+                    let instructions = stage
+                        .instructions
+                        .iter()
+                        .cloned()
+                        .map(|message| message.with_instruction_origin(InstructionOrigin::Agent))
+                        .collect::<Vec<_>>();
                     if instructions.iter().any(|m| {
                         m.role != Role::System
                             || !m.tool_calls.is_empty()

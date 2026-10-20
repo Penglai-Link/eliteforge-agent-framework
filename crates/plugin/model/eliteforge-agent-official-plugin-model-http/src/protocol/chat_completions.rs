@@ -113,8 +113,19 @@ fn unsupported_response(body: &Value) -> String {
 }
 
 pub fn chat_completions_request(config: &AgentModelConfig, request: &ModelRequest) -> Value {
+    let instruction_role = if config.supports_developer_role {
+        "developer"
+    } else {
+        "system"
+    };
     let mut payload = json!({
-        "messages": request.messages.iter().map(chat_message_json).collect::<Vec<_>>(),
+        "messages": request.messages.iter().map(|message| {
+            let mut payload = chat_message_json(message);
+            if message.role == "system" && message.instruction_origin.is_some() {
+                payload["role"] = json!(instruction_role);
+            }
+            payload
+        }).collect::<Vec<_>>(),
     });
     // Routes without a physical model let the provider select one. Omit the
     // model field for those routes instead of sending an empty model name.

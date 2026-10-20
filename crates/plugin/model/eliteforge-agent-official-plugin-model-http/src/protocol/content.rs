@@ -84,10 +84,17 @@ fn image_data_url(part: &AgentMessagePart) -> Option<String> {
     )
 }
 
-pub(super) fn responses_instructions_text(messages: &[AgentMessage]) -> Option<String> {
+pub(super) fn responses_instructions_text(
+    messages: &[AgentMessage],
+    supports_developer_role: bool,
+) -> Option<String> {
     let instructions = messages
         .iter()
-        .filter(|message| message.role == "system")
+        .filter(|message| {
+            supports_developer_role
+                && message.role == "system"
+                && message.instruction_origin.is_some()
+        })
         .map(|message| message.plain_text_content())
         .map(|content| content.trim().to_string())
         .filter(|content| !content.is_empty())

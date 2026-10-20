@@ -7,6 +7,7 @@ pub const A2UI_EXPAND_TOOL: &str = "a2ui_expand";
 const SKILL: &str = include_str!("../skills/a2ui-interface/SKILL.md");
 const EXAMPLES: &str = include_str!("../skills/a2ui-interface/references/examples.json");
 const COMPONENTS: &str = include_str!("../skills/a2ui-interface/references/components.md");
+const DEFAULT_A2UI_GUIDANCE: &str = include_str!("../prompts/a2ui-guidance.txt");
 
 /// Installs A2UI and requests the Framework's single aggregate Skills runtime.
 /// Omit this pack entirely when a host does not support A2UI.
@@ -92,9 +93,11 @@ impl ContextContributor for Guidance {
     }
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let messages = if negotiated(&input.run.extensions) {
-            vec![Message::system(
-                "A2UI interactive interfaces are available. Use text for ordinary answers. Use native ask-user for clarification and questionnaires; the built-in QuestionCard owns layout and navigation, so do not rebuild it from atomic components. Native tool policy owns approvals and their ApprovalCard projection. For reports, custom structured forms or reusable query controls, load the a2ui-interface skill with skill_load, then call a2ui_expand to expose the UI tools. Display is read-only; SubmitOnce resumes the original run; Reusable actions start another run. Follow the user's requested language and presentation preference.",
-            )]
+            vec![Message::system(ManagedDeveloperPrompts::resolve(
+                input.run,
+                "a2ui.guidance",
+                DEFAULT_A2UI_GUIDANCE.trim(),
+            )?)]
         } else {
             vec![]
         };

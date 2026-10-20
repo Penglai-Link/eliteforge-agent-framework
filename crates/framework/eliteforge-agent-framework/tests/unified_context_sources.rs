@@ -122,6 +122,10 @@ async fn six_logical_sources_share_one_read_contract_and_protected_roles() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].messages[0].role, Role::System);
     assert_eq!(
+        requests[0].messages[0].instruction_origin,
+        Some(InstructionOrigin::Plugin)
+    );
+    assert_eq!(
         requests[0]
             .messages
             .iter()
@@ -148,6 +152,59 @@ async fn six_logical_sources_share_one_read_contract_and_protected_roles() {
     let provenance = &reports[0].blocks[0].sources;
     assert_eq!(provenance[1].id, "host.instructions");
     assert_eq!(provenance[1].source_version.as_deref(), Some("source-v1"));
+}
+
+#[tokio::test]
+async fn agent_and_plugin_instructions_retain_distinct_origins() {
+    let capture = Capture::default();
+    let mut stage = WorkflowStage::new("work");
+    stage
+        .instructions
+        .push(Message::system("agent custom rule"));
+    let agent = TestBuilder::default()
+        .plugin(ChatModelPlugin::new(capture.clone()))
+        .plugin(AgentLoopPlugin::new(
+            WorkflowLoop::new(WorkflowDefinition {
+                id: "instruction-origins".into(),
+                version: 1,
+                stages: vec![stage],
+            })
+            .unwrap(),
+        ))
+        .plugin(ContextLayoutPlugin(ContextLayout(vec![
+            ContextBlockConfig::new(INSTRUCTIONS_BLOCK, BlockBudget::tokens(200)),
+            ContextBlockConfig::new(HISTORY_BLOCK, BlockBudget::tokens(200)),
+        ])))
+        .plugin(ContextContributorPlugin::new(
+            "plugin.instructions",
+            Source {
+                id: "plugin.instructions",
+                kind: ContextSourceKind::Instruction,
+                calls: Arc::new(AtomicUsize::new(0)),
+                messages: vec![Message::system("plugin rule")],
+            },
+        ))
+        .build()
+        .await
+        .unwrap();
+    agent
+        .run(RunRequest::new("work", "question"))
+        .await
+        .unwrap();
+    assert!(agent.framework().close().await.is_success());
+    let requests = capture.0.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages[0].content.text(), "agent custom rule");
+    assert_eq!(
+        requests[0].messages[0].instruction_origin,
+        Some(InstructionOrigin::Agent)
+    );
+    assert_eq!(requests[0].messages[1].content.text(), "plugin rule");
+    assert_eq!(
+        requests[0].messages[1].instruction_origin,
+        Some(InstructionOrigin::Plugin)
+    );
+    assert_eq!(requests[0].messages[2].instruction_origin, None);
 }
 
 struct Preparation;
@@ -189,8 +246,12 @@ async fn skills_compose_once_into_builtin_instructions_with_custom_preparation()
         .build()
         .await
         .unwrap();
+    let mut request = RunRequest::new("skills-once", "question");
+    request.extensions.insert(ManagedDeveloperPrompts(std::collections::BTreeMap::from([
+        ("skills.guidance".into(), "managed skill rule".into()),
+    ])));
     agent
-        .run(RunRequest::new("skills-once", "question"))
+        .run(request)
         .await
         .unwrap();
     assert!(agent.framework().close().await.is_success());
@@ -202,7 +263,16 @@ async fn skills_compose_once_into_builtin_instructions_with_custom_preparation()
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(text.matches("<available_skills>").count(), 1);
+    assert!(text.contains("managed skill rule"));
     assert!(!text.contains("PRIVATE_LOADED_INSTRUCTION_SENTINEL"));
+    let catalog_index = requests[0].messages.iter().position(|message|
+        message.content.text().contains("<available_skills>"))
+        .expect("skill catalog message");
+    assert_eq!(requests[0].messages[catalog_index].role, Role::User);
+    assert_eq!(requests[0].messages[catalog_index].instruction_origin, None);
+    assert_eq!(requests[0].messages[catalog_index - 1].role, Role::System);
+    assert_eq!(requests[0].messages[catalog_index - 1].instruction_origin,
+        Some(InstructionOrigin::Plugin));
     let reports = reports.0.lock().unwrap();
     assert_eq!(reports[0].blocks.len(), 2);
     assert!(

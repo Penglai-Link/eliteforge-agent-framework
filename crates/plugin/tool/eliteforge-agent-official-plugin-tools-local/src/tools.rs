@@ -72,7 +72,8 @@ pub(crate) fn system_command_bindings(
                 config: config.clone(),
                 tasks: tasks.clone(),
             },
-        ),
+        )
+        .parallel_safe(),
         ToolBinding::new(
             system_command_task_read_descriptor(),
             SystemCommandTaskReadTool {

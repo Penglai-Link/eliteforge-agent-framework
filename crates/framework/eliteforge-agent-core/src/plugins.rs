@@ -318,7 +318,8 @@ impl ContextContributor for RegisteredInstructionSource {
     }
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let mut block = self.implementation.contribute(input).await?;
-        if block.id != self.implementation.block_id() || block.trust != ContextTrust::Instruction {
+        if block.id != self.implementation.block_id()
+            || !matches!(block.trust, ContextTrust::Instruction | ContextTrust::Mixed) {
             return Err(AgentError::InvalidConfiguration(
                 "instruction source changed its identity or trust".into(),
             ));

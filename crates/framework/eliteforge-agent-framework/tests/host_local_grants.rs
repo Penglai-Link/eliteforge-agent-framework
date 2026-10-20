@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -108,6 +111,104 @@ fn grant(cwd: PathBuf, roots: Vec<PathBuf>) -> Grant {
         .map(str::to_owned)
         .collect(),
     }
+}
+
+#[cfg(unix)]
+struct ConcurrentCommandScope;
+
+#[cfg(unix)]
+#[async_trait]
+impl LocalToolScopeProvider for ConcurrentCommandScope {
+    async fn grant(&self, run: &RunContext) -> Result<LocalToolGrant, AgentError> {
+        let grant = run
+            .extensions
+            .get::<Grant>()
+            .ok_or_else(|| AgentError::ToolSetup("missing host grant".into()))?;
+        Ok(LocalToolGrant {
+            terminal_owner: None,
+            filesystem: FileSystemToolsConfig::new(&grant.cwd)
+                .with_authorized_roots(grant.roots.clone()),
+            commands: SystemCommandConfig::new()
+                .with_shell("/bin/sh")
+                .with_async_after(Duration::from_secs(3)),
+            tool_ids: ["system.command.exec"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            call_names: BTreeMap::from([("system.command.exec".into(), "bash_exec".into())]),
+            exposed_tool_ids: None,
+        })
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Default)]
+struct ConcurrentCommandsModel {
+    calls: Arc<AtomicUsize>,
+    outputs: Arc<Mutex<Vec<Value>>>,
+}
+
+#[cfg(unix)]
+#[async_trait]
+impl ChatModel for ConcurrentCommandsModel {
+    async fn generate(
+        &self,
+        _: &str,
+        request: ChatRequest,
+        _: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let calls = (0..3)
+                .map(|index| {
+                    let command = format!(
+                        "printf x > started-{index}; n=0; until [ -f started-0 ] && [ -f started-1 ] && [ -f started-2 ]; do n=$((n+1)); if [ \"$n\" -ge 100 ]; then exit 9; fi; sleep 0.01; done; printf ready-{index}"
+                    );
+                    ToolCall::new(format!("command-{index}"), "bash_exec", json!({"command":command}))
+                })
+                .collect();
+            return Ok(ChatResponse::tool_calls(calls));
+        }
+        *self.outputs.lock().unwrap() = request
+            .messages
+            .iter()
+            .filter(|message| message.role == Role::Tool)
+            .filter_map(|message| message.tool_result.as_ref()?.structured.clone())
+            .collect();
+        Ok(ChatResponse::text("done"))
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn commands_from_one_model_batch_execute_concurrently() {
+    let temp = tempfile::tempdir().unwrap();
+    let model = ConcurrentCommandsModel::default();
+    let agent = TestBuilder::default()
+        .plugin(ChatModelPlugin::new(model.clone()))
+        .plugin(ScopedLocalToolsPlugin::new(Arc::new(
+            ConcurrentCommandScope,
+        )))
+        .build()
+        .await
+        .unwrap();
+    let mut request = RunRequest::new("concurrent-commands", "run three commands");
+    request.extensions.insert(grant(
+        temp.path().to_path_buf(),
+        vec![temp.path().to_path_buf()],
+    ));
+    request.limits.max_parallel_tools = 3;
+    let result = tokio::time::timeout(Duration::from_secs(8), agent.run(request))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.status, RunStatus::Completed);
+    let outputs = model.outputs.lock().unwrap().clone();
+    assert_eq!(outputs.len(), 3);
+    for (index, output) in outputs.iter().enumerate() {
+        assert_eq!(output["exitCode"], 0, "command {index}: {output}");
+        assert_eq!(output["stdout"], format!("ready-{index}"));
+    }
+    assert!(agent.framework().close().await.is_success());
 }
 #[tokio::test]
 async fn host_grants_confine_multiple_directories_and_commands_survive_turns() {

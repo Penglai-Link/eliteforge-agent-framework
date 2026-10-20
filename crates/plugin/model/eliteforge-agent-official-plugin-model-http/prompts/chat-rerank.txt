@@ -1,0 +1,1 @@
+Rank the candidate documents by relevance. Return only a JSON array of zero-based candidate indexes, with no markdown or explanation.

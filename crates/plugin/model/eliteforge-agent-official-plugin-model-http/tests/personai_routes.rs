@@ -16,6 +16,7 @@ fn config(protocol: AgentModelProtocol, path: Option<&str>) -> AgentModelConfig 
         api_key: String::new(),
         model_name: String::new(),
         thinking_enabled: false,
+        supports_developer_role: false,
         reasoning_effort: None,
         responses_stateful_enabled: false,
         temperature: None,

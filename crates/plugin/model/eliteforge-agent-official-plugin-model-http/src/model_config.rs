@@ -15,6 +15,10 @@ pub struct AgentModelConfig {
     pub model_name: String,
     #[serde(default)]
     pub thinking_enabled: bool,
+    /// Opt in to sending Agent and plugin instructions as `developer` in Chat Completions.
+    /// Other system messages remain `system` even when this is enabled.
+    #[serde(default)]
+    pub supports_developer_role: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default)]
     pub responses_stateful_enabled: bool,

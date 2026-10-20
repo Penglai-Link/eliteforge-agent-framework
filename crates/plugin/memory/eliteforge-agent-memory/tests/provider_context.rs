@@ -358,7 +358,10 @@ async fn block_and_global_pressure_coordinate_once_and_never_call_instruction_st
                 .iter()
                 .all(|(_, calls)| calls.load(Ordering::SeqCst) == 1)
         );
-        assert_eq!(window.messages[0], Message::system("trusted prefix"));
+        assert_eq!(
+            window.messages[0],
+            Message::system("trusted prefix").with_instruction_origin(InstructionOrigin::Agent)
+        );
         assert_eq!(window.messages.last().unwrap(), &Message::user("question"));
         assert_eq!(
             window.report.blocks[1].compression_trigger,
@@ -435,6 +438,7 @@ async fn custom_instruction_provider_is_immutable_or_rejects_compression_before_
             assert_eq!(
                 result.unwrap().messages[0],
                 Message::system("immutable custom instructions")
+                    .with_instruction_origin(InstructionOrigin::Plugin)
             );
         }
     }
