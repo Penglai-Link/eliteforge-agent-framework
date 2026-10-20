@@ -1024,8 +1024,6 @@ fn validate_resource_path(path: &str) -> Result<(), AgentError> {
 struct ContextSkill<'a> {
     name: &'a str,
     description: &'a str,
-    source: &'a str,
-    location: &'a str,
 }
 
 #[derive(Clone)]
@@ -1070,8 +1068,6 @@ impl ContextContributor for SkillsEndpoint {
             .map(|skill| ContextSkill {
                 name: &skill.name,
                 description: &skill.description,
-                source: &skill.source,
-                location: &skill.location,
             })
             .collect::<Vec<_>>();
         let metadata = serialize_catalog_for_context(&skills)?;
