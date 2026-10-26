@@ -350,6 +350,17 @@ impl SqliteLifecycleStore {
         }
         self.database.call(operation).await
     }
+    async fn execute_read<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, StateError> + Send + 'static,
+    ) -> Result<T, tokio_rusqlite::Error<StateError>> {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(tokio_rusqlite::Error::Error(StateError::Backend(
+                "session lifecycle store is closed".into(),
+            )));
+        }
+        self.database.call_read(operation).await
+    }
     pub fn database(&self) -> SqliteDatabase {
         self.database.clone()
     }
@@ -636,7 +647,7 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
     ) -> Result<Vec<SessionEvent>, StateError> {
         let limit = bounded(limit)?;
         let id = session.to_owned();
-        self.execute(move |c| { let mut q=c.prepare("SELECT record FROM ef_events WHERE session_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3").map_err(sql)?;
+        self.execute_read(move |c| { let mut q=c.prepare("SELECT record FROM ef_events WHERE session_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3").map_err(sql)?;
             q.query_map(params![id,after,limit],|r|r.get::<_,String>(0)).map_err(sql)?.map(|r|decode(r.map_err(sql)?)).collect()
         }).await.map_err(worker)
     }
@@ -650,13 +661,17 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
         let limit = bounded(limit)?;
         let id = session.to_owned();
         let kind = kind.to_owned();
-        self.execute(move |c| { let mut q=c.prepare("SELECT record FROM ef_events WHERE session_id=?1 AND kind=?2 AND sequence>?3 ORDER BY sequence LIMIT ?4").map_err(sql)?;
+        self.execute_read(move |c| { let mut q=c.prepare("SELECT record FROM ef_events WHERE session_id=?1 AND kind=?2 AND sequence>?3 ORDER BY sequence LIMIT ?4").map_err(sql)?;
             q.query_map(params![id,kind,after,limit],|r|r.get::<_,String>(0)).map_err(sql)?.map(|r|decode(r.map_err(sql)?)).collect()
         }).await.map_err(worker)
     }
-    async fn latest_event_by_kind(&self, session: &str, kind: &str) -> Result<Option<SessionEvent>, StateError> {
+    async fn latest_event_by_kind(
+        &self,
+        session: &str,
+        kind: &str,
+    ) -> Result<Option<SessionEvent>, StateError> {
         let (session, kind) = (session.to_owned(), kind.to_owned());
-        self.execute(move |c| {
+        self.execute_read(move |c| {
             let raw: Option<String> = c.query_row("SELECT record FROM ef_events WHERE session_id=?1 AND kind=?2 ORDER BY sequence DESC LIMIT 1", params![session,kind], |r| r.get(0)).optional().map_err(sql)?;
             raw.map(decode).transpose()
         }).await.map_err(worker)

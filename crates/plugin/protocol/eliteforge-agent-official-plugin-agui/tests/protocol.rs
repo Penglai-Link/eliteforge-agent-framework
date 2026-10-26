@@ -1740,3 +1740,301 @@ async fn structured_sender_provenance_survives_agui_live_and_replay_transport() 
     validate_client(&events).await;
     assert!(agent.framework().close().await.is_success());
 }
+
+struct GatewayEnvelopeModel;
+#[async_trait]
+impl ChatModel for GatewayEnvelopeModel {
+    async fn generate(
+        &self,
+        _model_id: &str,
+        request: ChatRequest,
+        _stream: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        if request.messages.iter().any(|m| m.role == Role::Tool) {
+            return Ok(ChatResponse::text("done"));
+        }
+        // The stable gateway pair is the whole model-visible catalog.
+        let names: Vec<_> = request.tools.iter().map(|t| t.call_name.as_str()).collect();
+        assert_eq!(names, vec!["tool_execute", "tool_search"]);
+        Ok(ChatResponse::tool_calls(vec![ToolCall::new(
+            "envelope-1",
+            "tool_execute",
+            json!({"tool":"work","arguments":{"items":[{"value":"input"},{"value":"second"}]}}),
+        )]))
+    }
+}
+
+#[tokio::test]
+async fn gateway_envelopes_present_the_inner_tool_to_the_client() {
+    use eliteforge_agent_official_plugin_tools_discovery::ToolDiscoveryPlugin;
+    let count = Arc::new(AtomicUsize::new(0));
+    let agent = TestBuilder::default()
+        .plugin(AgUiPlugin::default())
+        .plugin(ChatModelPlugin::new(GatewayEnvelopeModel))
+        .plugin(ToolDiscoveryPlugin::new().provider(StaticToolProvider::new(
+            vec![ToolBinding::new(
+                ToolDescriptor::new(
+                    "work",
+                    "work",
+                    "Work",
+                    json!({"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}),
+                ),
+                Work {
+                    count: count.clone(),
+                    large: false,
+                },
+            )],
+        )))
+        .build()
+        .await
+        .unwrap();
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("gateway", "task"))
+        .unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert_eq!(result.unwrap().tool_calls, 2);
+    assert_eq!(count.load(Ordering::SeqCst), 2);
+    validate_client(&events).await;
+    let Event::ToolCallStart(start) = events
+        .iter()
+        .find(|e| e.event_type() == EventType::ToolCallStart)
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    // The client sees the real inner tool, not the gateway envelope.
+    assert_eq!(start.tool_call_name, "work");
+    let Event::ToolCallArgs(args) = events
+        .iter()
+        .find(|e| e.event_type() == EventType::ToolCallArgs)
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    let payload: Value = serde_json::from_str(&args.delta).unwrap();
+    assert_eq!(
+        payload,
+        json!({"items":[{"value":"input"},{"value":"second"}]})
+    );
+    let Event::ToolCallResult(result) = events
+        .iter()
+        .find(|e| e.event_type() == EventType::ToolCallResult)
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(result.tool_call_id, start.tool_call_id);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.event_type() == EventType::ToolCallStart)
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| e.event_type() == EventType::ToolCallResult)
+            .count(),
+        1
+    );
+    let output: Value = serde_json::from_str(&result.content).unwrap();
+    assert_eq!(output["structured"]["results"].as_array().unwrap().len(), 2);
+    assert!(result.content.contains("result"));
+    agent.framework().close().await;
+}
+
+struct BatchContractModel;
+#[async_trait]
+impl ChatModel for BatchContractModel {
+    async fn generate(
+        &self,
+        _: &str,
+        request: ChatRequest,
+        stream: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        if request.messages.iter().any(|m| m.role == Role::Tool) {
+            stream.text_delta("done").await;
+            return Ok(ChatResponse::text("done"));
+        }
+        Ok(ChatResponse::tool_calls(vec![ToolCall::new(
+            "batch-contract",
+            TOOL_EXECUTE_CALL_NAME,
+            json!({"tool":"batch_probe","arguments":{"items":[{"n":0},{"n":1},{"n":2}]}}),
+        )]))
+    }
+}
+struct BatchContractTool;
+#[async_trait]
+impl Tool for BatchContractTool {
+    async fn call(&self, args: Value, _: &RunContext) -> Result<ToolOutput, ToolError> {
+        if args["n"] == 1 {
+            return Err(ToolError::Indeterminate(
+                "connection lost after dispatch".into(),
+            ));
+        }
+        Ok(ToolOutput::text("confirmed success"))
+    }
+}
+struct BatchContractApproval;
+#[async_trait]
+impl ToolPolicy for BatchContractApproval {
+    async fn evaluate(
+        &self,
+        _: &ToolInvocationContext<'_>,
+    ) -> Result<ToolPolicyDecision, AgentError> {
+        Ok(ToolPolicyDecision::RequireApproval(
+            "Approve this item?".into(),
+        ))
+    }
+}
+async fn batch_contract_agent(approval: bool) -> Agent {
+    use eliteforge_agent_official_plugin_tools_discovery::ToolDiscoveryPlugin;
+    let mut builder = TestBuilder::default()
+        .plugin(ChatModelPlugin::new(BatchContractModel))
+        .plugin(AgUiPlugin::default())
+        .plugin(
+            ToolDiscoveryPlugin::new().provider(StaticToolProvider::new(vec![ToolBinding::new(
+                ToolDescriptor::new(
+                    "batch.probe",
+                    "batch_probe",
+                    "Probe",
+                    json!({"type":"object"}),
+                ),
+                BatchContractTool,
+            )])),
+        );
+    if approval {
+        builder = builder.plugin(ToolPolicyPlugin::new(
+            "batch.approval",
+            BatchContractApproval,
+        ));
+    }
+    builder.build().await.unwrap()
+}
+#[tokio::test]
+async fn interrupted_batch_live_and_history_preserve_completed_unknown_and_unexecuted_items() {
+    let agent = batch_contract_agent(false).await;
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("interrupted-batch", "run"))
+        .unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert!(result.is_err());
+    let cp = agent
+        .framework()
+        .services()
+        .unwrap()
+        .get::<StateStoreService>()
+        .unwrap()
+        .0
+        .latest("interrupted-batch")
+        .await
+        .unwrap()
+        .unwrap();
+    let parent = cp
+        .history
+        .tool_invocations
+        .iter()
+        .find(|r| r.batch.is_none())
+        .unwrap();
+    let event = events
+        .iter()
+        .find_map(|e| {
+            if let Event::ToolCallResult(r) = e {
+                Some(r)
+            } else {
+                None
+            }
+        })
+        .expect("partial live result");
+    assert_eq!(event.tool_call_id.to_string(), parent.id.to_string());
+    let live: Value = serde_json::from_str(&event.content).unwrap();
+    assert_eq!(Some(&live["structured"]), parent.structured.as_ref());
+    assert_eq!(live["isError"].as_bool(), parent.is_error);
+    let batch: ToolBatchResult = serde_json::from_value(live["structured"].clone()).unwrap();
+    assert_eq!(
+        batch.results.iter().map(|r| r.status).collect::<Vec<_>>(),
+        vec![
+            ToolBatchStatus::Completed,
+            ToolBatchStatus::Unknown,
+            ToolBatchStatus::NotExecuted
+        ]
+    );
+    assert_eq!(batch.results[0].content.text(), "confirmed success");
+    for row in &batch.results {
+        let child = cp
+            .history
+            .tool_invocations
+            .iter()
+            .find(|r| r.id == row.identity.invocation_id)
+            .unwrap();
+        assert_eq!(child.batch.as_ref(), Some(&row.identity));
+    }
+    assert!(agent.framework().close().await.is_success());
+}
+#[tokio::test]
+async fn batch_approvals_reference_declared_parent_and_preserve_each_child_identity() {
+    let agent = batch_contract_agent(true).await;
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("batch-approval-contract", "run"))
+        .unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    let result = result.unwrap();
+    assert_eq!(result.interactions.len(), 3);
+    let declared = events
+        .iter()
+        .find_map(|e| {
+            if let Event::ToolCallStart(r) = e {
+                Some(r.tool_call_id.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let serialized = serde_json::to_value(&events).unwrap();
+    let finished = serialized
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "RUN_FINISHED")
+        .unwrap();
+    let cp = agent
+        .framework()
+        .services()
+        .unwrap()
+        .get::<StateStoreService>()
+        .unwrap()
+        .0
+        .latest("batch-approval-contract")
+        .await
+        .unwrap()
+        .unwrap();
+    for (index, interrupt) in finished["outcome"]["interrupts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(interrupt["toolCallId"], declared);
+        let details: ToolApprovalDetails =
+            serde_json::from_value(interrupt["metadata"]["interaction"]["presentation"].clone())
+                .unwrap();
+        let batch = details.batch.unwrap();
+        assert_eq!(batch.index, index);
+        assert_eq!(batch.parent_invocation_id.to_string(), declared);
+        assert_ne!(batch.invocation_id, batch.parent_invocation_id);
+        assert_eq!(details.parameters, json!({"n":index}));
+        let history = cp
+            .history
+            .interactions
+            .iter()
+            .find(|r| r.id.to_string() == interrupt["id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(history.invocation_id, Some(batch.invocation_id));
+        assert_eq!(
+            history.presentation.as_ref(),
+            Some(&interrupt["metadata"]["interaction"]["presentation"])
+        );
+    }
+    assert!(agent.framework().close().await.is_success());
+}

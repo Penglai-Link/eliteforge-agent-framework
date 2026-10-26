@@ -22,6 +22,10 @@ impl Extensions {
         self.0.insert(TypeId::of::<T>(), Arc::new(value));
     }
 
+    pub fn remove<T: Send + Sync + 'static>(&mut self) {
+        self.0.remove(&TypeId::of::<T>());
+    }
+
     pub fn get<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
         self.0.get(&TypeId::of::<T>())?.clone().downcast().ok()
     }
@@ -241,6 +245,16 @@ pub enum ToolTimeoutScope {
     Run,
 }
 
+/// Model-facing input contract in gateway mode. Atomic provider implementations
+/// remain internal; each batch item follows the normal invocation pipeline.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ToolInputMode {
+    #[default]
+    Batch,
+    /// Stateful interactions or file edits that require one controlled operation.
+    Single,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolDescriptor {
     /// Stable host/catalog identity; never inferred from the model call name.
@@ -254,6 +268,8 @@ pub struct ToolDescriptor {
     pub operation_kind: ToolOperationKind,
     #[serde(default)]
     pub timeout_scope: ToolTimeoutScope,
+    #[serde(default)]
+    pub input_mode: ToolInputMode,
 }
 
 impl ToolDescriptor {
@@ -270,7 +286,13 @@ impl ToolDescriptor {
             input_schema,
             operation_kind: ToolOperationKind::Unknown,
             timeout_scope: ToolTimeoutScope::Tool,
+            input_mode: ToolInputMode::Batch,
         }
+    }
+
+    pub fn with_single_input(mut self) -> Self {
+        self.input_mode = ToolInputMode::Single;
+        self
     }
 
     pub fn with_operation_kind(mut self, operation_kind: ToolOperationKind) -> Self {
@@ -418,6 +440,8 @@ impl std::error::Error for ProviderModelError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 pub enum ModelError {
+    #[error("invalid structured model output: {0}")]
+    InvalidOutput(String),
     #[error(transparent)]
     Provider(Box<ProviderModelError>),
     #[error("model is unavailable: {0}")]
@@ -755,7 +779,8 @@ impl RunRequest {
     pub fn new(session_id: impl Into<String>, input: impl Into<crate::Content>) -> Self {
         Self {
             annotations: Vec::new(),
-            agent_code: None,            host_context: None,
+            agent_code: None,
+            host_context: None,
             message_provenance: None,
             assistant_provenance: None,
             session_id: session_id.into(),
@@ -1017,6 +1042,11 @@ pub struct ToolBinding {
     pub exposed: bool,
     /// Tools run serially unless the host explicitly opts in to parallel calls.
     pub parallel_safe: bool,
+    /// Optional opaque host capability-group id. The
+    /// gateway inventory search filters by it and hosts render the group list
+    /// into their instructions. Purely descriptive discovery metadata: it never
+    /// affects admission, policy or exposure.
+    pub domain_code: Option<String>,
 }
 
 impl ToolBinding {
@@ -1026,7 +1056,14 @@ impl ToolBinding {
             executor: Arc::new(executor),
             exposed: true,
             parallel_safe: false,
+            domain_code: None,
         }
+    }
+    /// Label this binding with its capability group so `tool_search` can list
+    /// that group's tools by id.
+    pub fn with_domain_code(mut self, domain_code: impl Into<String>) -> Self {
+        self.domain_code = Some(domain_code.into());
+        self
     }
     pub fn hidden(mut self) -> Self {
         self.exposed = false;

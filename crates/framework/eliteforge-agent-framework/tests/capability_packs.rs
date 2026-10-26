@@ -929,8 +929,8 @@ async fn capability_factory_skills_runtime_aggregates_package_sources_once() {
         *observed
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
-        [(1, 1)],
-        "a configured SkillsPlugin must own the one aggregate endpoint"
+        [(2, 1)],
+        "SkillsPlugin owns separate guidance/data contributors and one aggregate tool endpoint"
     );
     assert!(agent.framework().close().await.is_success());
     std::fs::remove_dir_all(root).unwrap();

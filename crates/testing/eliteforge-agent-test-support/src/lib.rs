@@ -3,8 +3,10 @@ use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_storage_local::{SqliteConversationStore, SqliteStateStore};
 use std::sync::Arc;
+pub mod batch_outcomes;
 #[allow(dead_code)]
 mod conversation;
+pub mod storage_contracts;
 pub use conversation::*;
 
 /// Fixture convenience: installs a Framework and explicitly selects all fixture
@@ -119,6 +121,10 @@ pub fn fixture_selection(framework: &Framework) -> Result<AgentSelection, AgentE
             registry
                 .providers::<ContextContributorService>()
                 .into_iter()
+                .filter({
+                    let mut seen = std::collections::HashSet::new();
+                    move |id| seen.insert(*id)
+                })
                 .map(str::to_owned)
                 .collect(),
         ),
@@ -186,3 +192,5 @@ impl Plugin for TestStoragePlugin {
         Ok(())
     }
 }
+
+pub mod tool_search;

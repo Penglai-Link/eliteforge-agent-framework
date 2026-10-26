@@ -619,3 +619,6 @@ async fn terminate_tree(pid: Option<u32>) {
 pub fn platform_key() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
 }
+
+#[cfg(test)]
+mod storage_contract_tests;

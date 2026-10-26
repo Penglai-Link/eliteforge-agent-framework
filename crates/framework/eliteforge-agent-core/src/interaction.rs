@@ -37,22 +37,27 @@ impl InteractionRecord {
 pub trait InteractionStore: Send + Sync {
     /// Idempotent publication. Reusing an ID with different ownership or payload must fail.
     async fn publish(&self, record: &InteractionRecord) -> Result<(), StateError>;
+    /// Publish the batch atomically in one storage operation.
+    async fn publish_many(&self, records: &[InteractionRecord]) -> Result<(), StateError>;
     async fn get(&self, session_id: &str, id: RunId) -> Result<InteractionRecord, StateError>;
     /// Batched lookup in one storage round trip. Records must come back in the
-    /// requested order; a missing id is an error, matching `get`. The default
-    /// loops `get` for stores without batch support.
+    /// requested order; a missing id is an error, matching `get`. Every store must provide native batch lookup.
     async fn get_many(
         &self,
         session_id: &str,
         ids: &[RunId],
-    ) -> Result<Vec<InteractionRecord>, StateError> {
-        let mut records = Vec::with_capacity(ids.len());
-        for id in ids {
-            records.push(self.get(session_id, *id).await?);
-        }
-        Ok(records)
-    }
-    /// Pending includes expired requests; the host can display their expiry.
+    ) -> Result<Vec<InteractionRecord>, StateError>;
+    /// Ordered optional lookup for callers that tolerate deleted records.
+    async fn find_many(
+        &self,
+        session_id: &str,
+        ids: &[RunId],
+    ) -> Result<Vec<Option<InteractionRecord>>, StateError>;
+    /// Permanently close a terminal run's interactions without fabricating answers.
+    /// Idempotent and durable: late publications must not reopen pending work,
+    /// and new answers must be rejected. Existing records remain auditable.
+    async fn close_run(&self, session_id: &str, run_id: RunId) -> Result<(), StateError>;
+    /// Pending includes expired requests, but excludes closed runs.
     async fn pending(&self, session_id: &str) -> Result<Vec<InteractionRecord>, StateError>;
     /// Validate and save atomically. Identical answers are idempotent; conflicting ones fail.
     async fn answer(
@@ -136,7 +141,13 @@ impl InteractionManager {
         cursor: &WorkflowCursor,
         context: &RunContext,
     ) -> Result<(), AgentError> {
-        for request in requests {
+        let mut publications = Vec::new();
+        let ids = requests
+            .iter()
+            .map(|request| request.id)
+            .collect::<Vec<_>>();
+        let previous = self.0.find_many(&context.session_id, &ids).await?;
+        for (request, previous) in requests.iter().zip(previous) {
             let call = match cursor {
                 WorkflowCursor::Tools { executions, .. } => executions.iter().find(|e| match request.kind {
                     InteractionKind::Approval { invocation_id } => e.invocation_id == invocation_id,
@@ -146,8 +157,8 @@ impl InteractionManager {
             };
             // A previously published question may already have left the tool cursor.
             if call.is_none() {
-                match self.0.get(&context.session_id, request.id).await {
-                    Ok(previous)
+                match previous {
+                    Some(previous)
                         if previous.run_id == context.run_id
                             && previous.request == *request
                             && previous.node_invocation_id
@@ -155,25 +166,23 @@ impl InteractionManager {
                     {
                         continue;
                     }
-                    Ok(_) => return Err(StateError::Conflict.into()),
-                    Err(StateError::NotFound) => {}
-                    Err(error) => return Err(error.into()),
+                    Some(_) => return Err(StateError::Conflict.into()),
+                    None => {}
                 }
             }
-            self.0
-                .publish(&InteractionRecord {
-                    session_id: context.session_id.clone(),
-                    run_id: context.run_id,
-                    node_invocation_id: context.node_execution().map(|n| n.invocation_id),
-                    request: request.clone(),
-                    tool_call: call,
-                    response: None,
-                    response_provenance: None,
-                    created_at_unix_ms: unix_time_ms(),
-                    answered_at_unix_ms: None,
-                })
-                .await?;
+            publications.push(InteractionRecord {
+                session_id: context.session_id.clone(),
+                run_id: context.run_id,
+                node_invocation_id: context.node_execution().map(|n| n.invocation_id),
+                request: request.clone(),
+                tool_call: call,
+                response: None,
+                response_provenance: None,
+                created_at_unix_ms: unix_time_ms(),
+                answered_at_unix_ms: None,
+            });
         }
+        self.0.publish_many(&publications).await?;
         Ok(())
     }
 }

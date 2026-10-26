@@ -68,7 +68,7 @@ async fn managed_runtime_flushes_before_receiver_and_store_close() {
     runtime.force_flush().await.unwrap();
     assert_eq!(
         store
-            .metric_points(Some("requests".into()), 0, 10)
+            .metric_points(Some("requests".into()).into(), 0, 10)
             .await
             .unwrap()
             .records[0]
@@ -96,7 +96,7 @@ async fn managed_runtime_flushes_before_receiver_and_store_close() {
             .await
             .is_success()
     );
-    assert!(store.metric_points(None, 0, 1).await.is_err());
+    assert!(store.metric_points(None.into(), 0, 1).await.is_err());
     let reopened = eliteforge_agent_official_plugin_storage_local::SqliteTelemetryStore::open(
         temp.path().join("otel.db"),
         TelemetryRetention {
@@ -108,7 +108,7 @@ async fn managed_runtime_flushes_before_receiver_and_store_close() {
     .await
     .unwrap();
     let points = reopened
-        .metric_points(Some("requests".into()), 0, 10)
+        .metric_points(Some("requests".into()).into(), 0, 10)
         .await
         .unwrap();
     assert!(points.records.iter().any(|p| p.data["asInt"] == "12"));

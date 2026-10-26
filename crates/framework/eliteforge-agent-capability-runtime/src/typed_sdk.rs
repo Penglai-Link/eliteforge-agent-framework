@@ -444,15 +444,43 @@ impl TypedBackend {
         id: &str,
         store: Arc<dyn InteractionStore>,
     ) -> RuntimeResult<()> {
-        for operation in ["publish", "get", "pending", "answer"] {
+        for operation in [
+            "close_run",
+            "publish",
+            "publish_many",
+            "get",
+            "get_many",
+            "find_many",
+            "pending",
+            "answer",
+        ] {
             let store = store.clone();
             self.method(id, operation, move |params: Value, _| {
                 let store = store.clone();
                 async move {
                     match operation {
+                        "close_run" => {
+                            store
+                                .close_run(
+                                    string(&params, "session_id")?,
+                                    decode(params["run_id"].clone())?,
+                                )
+                                .await
+                                .map_err(state_fault)?;
+                            Ok(Value::Null)
+                        }
                         "publish" => {
                             store
                                 .publish(&decode(params["record"].clone())?)
+                                .await
+                                .map_err(state_fault)?;
+                            Ok(Value::Null)
+                        }
+                        "publish_many" => {
+                            store
+                                .publish_many(&decode::<Vec<InteractionRecord>>(
+                                    params["records"].clone(),
+                                )?)
                                 .await
                                 .map_err(state_fault)?;
                             Ok(Value::Null)
@@ -462,6 +490,24 @@ impl TypedBackend {
                                 .get(
                                     string(&params, "session_id")?,
                                     decode(params["id"].clone())?,
+                                )
+                                .await
+                                .map_err(state_fault)?,
+                        ),
+                        "get_many" => encode(
+                            store
+                                .get_many(
+                                    string(&params, "session_id")?,
+                                    &decode::<Vec<RunId>>(params["ids"].clone())?,
+                                )
+                                .await
+                                .map_err(state_fault)?,
+                        ),
+                        "find_many" => encode(
+                            store
+                                .find_many(
+                                    string(&params, "session_id")?,
+                                    &decode::<Vec<RunId>>(params["ids"].clone())?,
                                 )
                                 .await
                                 .map_err(state_fault)?,

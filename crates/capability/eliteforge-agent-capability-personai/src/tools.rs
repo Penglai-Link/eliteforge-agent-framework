@@ -472,6 +472,15 @@ mod tests {
     fn call(name: &str, arguments: Value) -> ChatResponse {
         ChatResponse::tool_calls(vec![ToolCall::new(name, name, arguments)])
     }
+    /// A `tool_execute` envelope addressing an inner tool discovered through
+    /// `tool_search`.
+    fn envelope(id: &str, tool: &str, arguments: Value) -> ChatResponse {
+        ChatResponse::tool_calls(vec![ToolCall::new(
+            id,
+            "tool_execute",
+            json!({"tool": tool, "arguments": {"items": [arguments]}}),
+        )])
+    }
     #[tokio::test]
     async fn discovery_executes_all_remote_tools_with_structured_results() {
         let server = Server::start().await;
@@ -479,12 +488,28 @@ mod tests {
         let script = Script {
             requests: Arc::default(),
             replies: Arc::new(Mutex::new(VecDeque::from([
-                call("tool_search", json!({"query":"personai","limit":10})),
-                call("personai_search", json!({"query":"rust","count":1})),
-                call("personai_generate_image", json!({"prompt":"a cat"})),
-                call("personai_query_image", json!({"task_id":"image-task"})),
-                call("personai_detect_text", json!({"text":"hello"})),
                 call(
+                    "tool_search",
+                    json!({"items":[{"query":"personai","limit":10}]}),
+                ),
+                envelope(
+                    "search",
+                    "personai_search",
+                    json!({"query":"rust","count":1}),
+                ),
+                envelope(
+                    "generate",
+                    "personai_generate_image",
+                    json!({"prompt":"a cat"}),
+                ),
+                envelope(
+                    "query",
+                    "personai_query_image",
+                    json!({"task_id":"image-task"}),
+                ),
+                envelope("detect", "personai_detect_text", json!({"text":"hello"})),
+                envelope(
+                    "detect-image",
                     "personai_detect_image",
                     json!({"image_url":"https://example.com/image.png"}),
                 ),
@@ -507,9 +532,23 @@ mod tests {
             "done"
         );
         let requests = script.requests.lock().unwrap().clone();
-        assert_eq!(requests[0].tools.len(), 1);
-        assert_eq!(requests[0].tools[0].call_name, "tool_search");
-        assert_eq!(requests[1].tools.len(), 6);
+        // Cache-stability invariant: every request sees exactly the two
+        // stable gateway tools, even after discovery and execution.
+        for (index, request) in requests.iter().enumerate() {
+            let names: Vec<_> = request.tools.iter().map(|t| t.call_name.as_str()).collect();
+            assert_eq!(
+                names,
+                vec!["tool_execute", "tool_search"],
+                "request {index} must keep the stable gateway catalog"
+            );
+        }
+        // The search output carries the wrapped tools' schemas as plain text.
+        assert!(
+            requests[1]
+                .messages
+                .iter()
+                .any(|m| m.role == Role::Tool && m.content.text().contains("personai_search"))
+        );
         let transcript = requests
             .last()
             .unwrap()
@@ -574,10 +613,13 @@ mod tests {
         let script = Script {
             requests: Arc::default(),
             replies: Arc::new(Mutex::new(VecDeque::from([
-                call("tool_search", json!({"query":"personai_search"})),
-                call("personai_search", json!({"query":"rust"})),
+                call(
+                    "tool_search",
+                    json!({"items":[{"query":"personai_search"}]}),
+                ),
+                envelope("search", "personai_search", json!({"query":"rust"})),
                 ChatResponse::text("denied"),
-                call("tool_search", json!({"query":"personai"})),
+                call("tool_search", json!({"items":[{"query":"personai"}]})),
                 ChatResponse::text("logged out"),
             ]))),
         };

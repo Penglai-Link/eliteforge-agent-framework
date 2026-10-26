@@ -209,7 +209,14 @@ async fn layout_order_is_independent_of_registration_order_and_reports_explain_o
     );
     let reports = reports.0.lock().unwrap();
     let report = &reports[0];
-    assert_eq!(report.blocks.iter().map(|block| block.configured_tokens).collect::<Vec<_>>(), vec![Some(40), Some(30), Some(30), Some(100)]);
+    assert_eq!(
+        report
+            .blocks
+            .iter()
+            .map(|block| block.configured_tokens)
+            .collect::<Vec<_>>(),
+        vec![Some(40), Some(30), Some(30), Some(100)]
+    );
     assert_eq!(
         report
             .blocks
@@ -309,6 +316,131 @@ async fn structured_assistant_output_is_saved_and_old_messages_still_decode() {
     .unwrap();
     assert!(old.structured.is_none());
     agent.framework().close().await;
+}
+
+#[derive(Clone)]
+struct DynamicData(Arc<Mutex<String>>);
+#[async_trait]
+impl ContextContributor for DynamicData {
+    fn block_id(&self) -> &str {
+        "dynamic"
+    }
+    async fn contribute(&self, _: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::data(
+            "dynamic",
+            self.0.lock().unwrap().clone(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn dynamic_context_changes_leave_the_append_only_history_prefix_intact() {
+    let store = TestConversationStore::default();
+    let mut call = Message::assistant("");
+    let mut historical_call = ToolCall::new("lookup-1", "lookup", json!({"q":"prior"}));
+    historical_call.invocation_id =
+        RunId::parse_str("00000000-0000-4000-8000-000000000001").unwrap();
+    call.tool_calls.push(historical_call);
+    let seed = vec![
+        Message::user("prior question"),
+        call,
+        Message::tool("lookup-1", "prior evidence"),
+        Message::assistant("prior answer"),
+    ];
+    store
+        .open("cache-order")
+        .await
+        .unwrap()
+        .append(&seed)
+        .await
+        .unwrap();
+    let capture = Capture::default();
+    let reports = Reports::default();
+    let dynamic = Arc::new(Mutex::new("working revision A".to_owned()));
+    let layout = ContextLayout(vec![
+        ContextBlockConfig::new(INSTRUCTIONS_BLOCK, BlockBudget::tokens(100)),
+        ContextBlockConfig::new(HISTORY_BLOCK, BlockBudget::tokens(2000)),
+        ContextBlockConfig::new("dynamic", BlockBudget::tokens(100)),
+    ]);
+    let agent = TestBuilder::default()
+        .plugin(ChatModelPlugin::new(capture.clone()))
+        .plugin(ConversationStorePlugin::new(store.clone()))
+        .plugin(ContextContributorPlugin::new(
+            "fixed",
+            FixedInstructions::new("rules", "stable rule"),
+        ))
+        .plugin(ContextContributorPlugin::new(
+            "dynamic",
+            DynamicData(dynamic.clone()),
+        ))
+        .plugin(ContextLayoutPlugin(layout))
+        .plugin(EventPlugin::new("report", reports.clone()))
+        .build()
+        .await
+        .unwrap();
+    agent
+        .run(RunRequest::new("cache-order", "question"))
+        .await
+        .unwrap();
+    *dynamic.lock().unwrap() = "working revision B".into();
+    agent
+        .run(RunRequest::new("cache-order", "question"))
+        .await
+        .unwrap();
+    assert!(agent.framework().close().await.is_success());
+    let requests = capture.0.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let first = &requests[0].messages;
+    let second = &requests[1].messages;
+    assert_eq!(&first[1..1 + seed.len()], seed.as_slice());
+    assert_eq!(&second[..first.len() - 1], &first[..first.len() - 1]);
+    assert_eq!(first.last().unwrap().content.text(), "working revision A");
+    assert_eq!(second.last().unwrap().content.text(), "working revision B");
+    assert_eq!(
+        store
+            .snapshot("cache-order")
+            .iter()
+            .filter(|m| m.content.text().contains("working revision"))
+            .count(),
+        0,
+        "request-only context must never leak into persisted conversation history"
+    );
+    let reports = reports.0.lock().unwrap();
+    for (index, report) in reports.iter().enumerate() {
+        assert_eq!(
+            report
+                .blocks
+                .iter()
+                .map(|b| b.id.as_str())
+                .collect::<Vec<_>>(),
+            [INSTRUCTIONS_BLOCK, HISTORY_BLOCK, "dynamic"]
+        );
+        assert_eq!(
+            report
+                .blocks
+                .iter()
+                .map(|b| b.final_message_count)
+                .sum::<usize>(),
+            requests[index].messages.len()
+        );
+    }
+    let fixture = json!({"messages":first,"contextReport":reports[0]});
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../contracts/context-cache-order.json");
+    if std::env::var_os("UPDATE_CONTEXT_CACHE_FIXTURE").is_some() {
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&fixture).unwrap() + "\n",
+        )
+        .unwrap();
+    }
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(saved["messages"], fixture["messages"]);
+    assert_eq!(
+        saved["contextReport"]["blocks"],
+        fixture["contextReport"]["blocks"]
+    );
 }
 
 struct InvalidAllocation;
@@ -468,5 +600,147 @@ async fn middleware_cannot_send_an_oversized_rewrite_after_successful_assembly()
         AgentError::Model(ModelError::ContextOverflow(_))
     ));
     assert!(capture.0.lock().unwrap().is_empty());
+    agent.framework().close().await;
+}
+
+struct MixedInstructions;
+#[async_trait]
+impl ContextContributor for MixedInstructions {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        "mixed"
+    }
+    async fn contribute(&self, _: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        Ok(ContextBlock::instructions_with_data(
+            "mixed",
+            vec![Message::system("fixed"), Message::user("live data")],
+        ))
+    }
+}
+#[tokio::test]
+async fn dynamic_data_cannot_be_hidden_in_an_instruction_contributor() {
+    let capture = Capture::default();
+    let agent = TestBuilder::default()
+        .plugin(ChatModelPlugin::new(capture.clone()))
+        .plugin(ContextContributorPlugin::new("mixed", MixedInstructions))
+        .build()
+        .await
+        .unwrap();
+    let error = agent
+        .run(RunRequest::new("separated", "question"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.primary(),
+        AgentError::InvalidConfiguration(_)
+    ));
+    assert!(capture.0.lock().unwrap().is_empty());
+    assert!(agent.framework().close().await.is_success());
+}
+
+#[derive(Clone, Default)]
+struct CachedHistoryProjection(Arc<Mutex<Vec<usize>>>);
+#[async_trait]
+impl ContextReducer for CachedHistoryProjection {
+    async fn cached_projection(
+        &self,
+        input: &ContextReductionInput<'_>,
+    ) -> Result<Option<Vec<Message>>, AgentError> {
+        Ok(Some(vec![
+            Message::user("松"),
+            input.block.messages.last().unwrap().clone(),
+        ]))
+    }
+    async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
+        let mut raw_tokens = 0;
+        for message in &input.block.messages {
+            raw_tokens += input.estimator.message(input.model, message).await?;
+        }
+        let target = input.compression.unwrap().target_tokens;
+        assert_eq!(
+            target,
+            raw_tokens.min(input.budget.max_tokens) * 2000 / 10000,
+            "recompression must use complete immutable history, not the tiny cached summary"
+        );
+        self.0.lock().unwrap().push(raw_tokens);
+        Ok(vec![
+            Message::user("项目代号青松；本地开发；API 后验证 UI；禁止调用工具。"),
+            input.block.messages.last().unwrap().clone(),
+        ])
+    }
+}
+#[tokio::test]
+async fn repeated_manual_compaction_keeps_history_target_independent_of_cached_summary_size() {
+    let reducer = CachedHistoryProjection::default();
+    let capture = Capture::default();
+    let reports = Reports::default();
+    let store = TestConversationStore::default();
+    store
+        .open("repeat-compact")
+        .await
+        .unwrap()
+        .append(&[
+            Message::user(format!(
+                "项目代号青松。{}",
+                "historical evidence ".repeat(150)
+            )),
+            Message::assistant("记录完成"),
+        ])
+        .await
+        .unwrap();
+    let mut history_config =
+        ContextBlockConfig::new(HISTORY_BLOCK, BlockBudget::tokens(7000)).compress_at(10000, 2000);
+    history_config.reducer = Arc::new(reducer.clone());
+    let mut assembler = DefaultContextAssembler::new(
+        ContextLayout(vec![
+            ContextBlockConfig::new(INSTRUCTIONS_BLOCK, BlockBudget::tokens(0)),
+            history_config,
+        ]),
+        vec![],
+    )
+    .unwrap();
+    assembler.force_global_compression = true;
+    let agent = TestBuilder::default()
+        .plugin(ChatModelPlugin::new(capture.clone()))
+        .plugin(EventPlugin::new("reports", reports.clone()))
+        .plugin(ConversationStorePlugin::new(store.clone()))
+        .plugin(ContextAssemblerPlugin::new(assembler))
+        .build()
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let mut request = RunRequest::new("repeat-compact", "question");
+        request.limits.max_context_tokens = 12000;
+        agent.run(request).await.unwrap();
+    }
+    let requests = capture.0.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests.iter() {
+        assert_eq!(
+            request.messages.len(),
+            2,
+            "must retain the newly summarized projection rather than restore raw history on apparent no-gain"
+        );
+        assert!(request.messages[0].content.text().contains("青松"));
+        assert!(
+            !request.messages[0]
+                .content
+                .text()
+                .contains("historical evidence")
+        );
+    }
+    let raw_tokens = reducer.0.lock().unwrap();
+    for (report, raw) in reports.0.lock().unwrap().iter().zip(raw_tokens.iter()) {
+        let history = report
+            .blocks
+            .iter()
+            .find(|block| block.id == HISTORY_BLOCK)
+            .unwrap();
+        assert_eq!(history.original_tokens, Some(*raw));
+        assert!(matches!(history.outcome, ContextBlockOutcome::Reduced));
+    }
+    drop(requests);
     agent.framework().close().await;
 }

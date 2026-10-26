@@ -519,11 +519,46 @@ impl StateStore for RemoteImplementation {
 }
 #[async_trait]
 impl InteractionStore for RemoteImplementation {
+    async fn close_run(&self, session_id: &str, run_id: RunId) -> Result<(), StateError> {
+        self.state(
+            "close_run",
+            json!({"session_id":session_id,"run_id":run_id}),
+        )
+        .await
+    }
     async fn publish(&self, record: &InteractionRecord) -> Result<(), StateError> {
         self.state("publish", json!({"record":record})).await
     }
+    async fn publish_many(&self, records: &[InteractionRecord]) -> Result<(), StateError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        self.state("publish_many", json!({"records":records})).await
+    }
     async fn get(&self, session_id: &str, id: RunId) -> Result<InteractionRecord, StateError> {
         self.state("get", json!({"session_id":session_id,"id":id}))
+            .await
+    }
+    async fn get_many(
+        &self,
+        session_id: &str,
+        ids: &[RunId],
+    ) -> Result<Vec<InteractionRecord>, StateError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.state("get_many", json!({"session_id":session_id,"ids":ids}))
+            .await
+    }
+    async fn find_many(
+        &self,
+        session_id: &str,
+        ids: &[RunId],
+    ) -> Result<Vec<Option<InteractionRecord>>, StateError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.state("find_many", json!({"session_id":session_id,"ids":ids}))
             .await
     }
     async fn pending(&self, session_id: &str) -> Result<Vec<InteractionRecord>, StateError> {
@@ -727,6 +762,10 @@ struct RemoteToolDescriptor {
     exposed: bool,
     #[serde(default)]
     parallel_safe: bool,
+    /// Capability group carried across the process hop so remote tools keep
+    /// their `domainCode` listing at the gateway.
+    #[serde(default)]
+    domain_code: Option<String>,
 }
 fn default_true() -> bool {
     true
@@ -785,6 +824,7 @@ impl ToolProvider for RemoteImplementation {
                 descriptor: tool.descriptor,
                 exposed: tool.exposed,
                 parallel_safe: tool.parallel_safe,
+                domain_code: tool.domain_code,
             })
             .collect();
         Ok(ToolLease::new(tools).with_shutdown(move || async move {

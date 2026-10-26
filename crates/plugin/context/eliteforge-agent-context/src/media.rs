@@ -111,10 +111,17 @@ pub async fn project_multimodal_data(
                     text.push_str(value);
                     text.push('\n');
                 }
+                ContentBlock::Json { value } => {
+                    text.push_str(
+                        &serde_json::to_string(value)
+                            .map_err(|error| AgentError::InvalidConfiguration(error.to_string()))?,
+                    );
+                    text.push('\n');
+                }
                 ContentBlock::Media { media: value } => media.push(value.clone()),
                 _ => {
                     return Err(AgentError::InvalidConfiguration(
-                        "multimodal data requires text or resolved media".into(),
+                        "multimodal data requires text, JSON or resolved media".into(),
                     ));
                 }
             }

@@ -352,18 +352,57 @@ impl ChatModel for OptionalCatalog {
         request: ChatRequest,
         _: &dyn ChatStream,
     ) -> Result<ChatResponse, ModelError> {
-        for name in [
-            "tool_search",
-            "web_search",
-            "web_fetch",
-            "media_read_image",
-            "media_read_pdf",
-        ] {
+        // Gateway semantics: enabling optional packs never changes the stable
+        // two-tool catalog; the wrapped tools appear only in search output.
+        for name in ["tool_search", "tool_execute"] {
             assert_eq!(
                 request.tools.iter().any(|t| t.call_name == name),
                 self.enabled,
                 "{name}"
             );
+        }
+        for name in [
+            "web_search",
+            "web_fetch",
+            "media_read_image",
+            "media_read_pdf",
+        ] {
+            assert!(
+                !request.tools.iter().any(|t| t.call_name == name),
+                "{name} must stay wrapped by the gateway"
+            );
+        }
+        if !self.enabled {
+            return Ok(ChatResponse::text("optional tools checked"));
+        }
+        let transcript: String = request
+            .messages
+            .iter()
+            .map(|m| m.content.text())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !transcript.contains("web_search") {
+            return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
+                "find-web",
+                "tool_search",
+                json!({"query":"web","limit":20}),
+            )]));
+        }
+        if !transcript.contains("media_read_image") {
+            return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
+                "find-media",
+                "tool_search",
+                json!({"query":"media","limit":20}),
+            )]));
+        }
+        // Discovery output proves the optional plugins were actually installed.
+        for name in [
+            "web_search",
+            "web_fetch",
+            "media_read_image",
+            "media_read_pdf",
+        ] {
+            assert!(transcript.contains(name), "{name} missing from catalog");
         }
         Ok(ChatResponse::text("optional tools checked"))
     }
@@ -393,13 +432,16 @@ async fn optional_features_compile_without_implicitly_installing_their_plugins()
             .build()
             .await
             .unwrap();
-        agent
+        let result = agent
             .run(RunRequest::new(
                 "catalog",
                 "list tools without network access",
             ))
             .await
             .unwrap();
+        // The model only reaches this text after both searches returned the
+        // wrapped tools; a broken inventory would exhaust the step budget.
+        assert_eq!(result.output, "optional tools checked");
         assert!(agent.framework().close().await.is_success());
     }
 }

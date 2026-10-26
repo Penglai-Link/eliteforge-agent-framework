@@ -75,7 +75,7 @@ impl AskUserTool {
                     }}
                 }
             }),
-        )
+        ).with_single_input()
     }
     pub fn binding() -> ToolBinding {
         ToolBinding::new(Self::descriptor(), Self)

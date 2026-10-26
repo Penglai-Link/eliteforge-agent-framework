@@ -99,6 +99,8 @@ impl ExternalAgentEventSink for ExternalEvents<'_> {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push(HistoryToolInvocation {
+                        batch_revision: None,
+                        batch: None,
                         id,
                         run_id: self.context.run_id,
                         step_id: self.message_id.clone(),
@@ -212,7 +214,7 @@ impl AgentLoop for ExternalAgentLoop {
             .with_host_metadata(request);
             checkpoint.history.messages.push(
                 HistoryMessage::user(context.run_id, &request.input)
-                        .with_annotations(request.annotations.clone())
+                    .with_annotations(request.annotations.clone())
                     .with_provenance(request.message_provenance.clone()),
             );
             checkpoint.history.steps.push(HistoryStep {

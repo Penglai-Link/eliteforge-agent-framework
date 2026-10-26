@@ -96,11 +96,7 @@ impl AgentBuilder {
             if registry.get::<ContextAssemblerService>().is_some()
                 && (registry.get::<ContextLayoutService>().is_some()
                     || registry.get::<ContextBudgetPolicyService>().is_some()
-                    || registry.get::<ContextReducerService>().is_some()
-                    || registry
-                        .all::<ContextContributorService>()
-                        .iter()
-                        .any(|s| s.0.kind() == ContextSourceKind::Data))
+                    || registry.get::<ContextReducerService>().is_some())
             {
                 return Err(AgentError::InvalidConfiguration(
                     "configure sources, layout and reducers inside a custom ContextAssembler; separate context plugins would be ignored".into(),
@@ -248,7 +244,6 @@ impl AgentBuilder {
                 context_sources: registry
                     .all::<ContextContributorService>()
                     .iter()
-                    .filter(|s| s.0.kind() == ContextSourceKind::Instruction)
                     .map(|s| s.0.clone())
                     .collect(),
             };
@@ -946,6 +941,18 @@ impl AgentGeneration {
     }
     pub async fn checkpoint(&self, run_id: RunId) -> Result<Checkpoint, AgentError> {
         self.execute(LoadCheckpoint(run_id)).await
+    }
+    /// Read interaction records in the requested order through the store's batch API.
+    pub async fn interactions(
+        &self,
+        session: &str,
+        interaction_ids: &[RunId],
+    ) -> Result<Vec<InteractionRecord>, AgentError> {
+        self.execute(GetInteractions {
+            session_id: session.into(),
+            interaction_ids: interaction_ids.to_vec(),
+        })
+        .await
     }
     pub async fn latest_checkpoint(&self, session: &str) -> Result<Option<Checkpoint>, AgentError> {
         self.execute(LatestCheckpoint(session.into())).await

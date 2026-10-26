@@ -37,6 +37,14 @@ pub struct ToolExecution {
     pub descriptor: ToolDescriptor,
     pub call: ToolCall,
     pub state: ToolExecutionState,
+    /// The model addressed this call through the `tool_execute` gateway
+    /// envelope; admission rewrote `call` to the inner tool's call. Old
+    /// checkpoints deserialize to false.
+    #[serde(default)]
+    pub via_gateway: bool,
+    /// Provider call whose result contains this independently admitted item.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_item: Option<ToolBatchItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

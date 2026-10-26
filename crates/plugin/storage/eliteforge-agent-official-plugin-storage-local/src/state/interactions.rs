@@ -43,45 +43,87 @@ fn encode_record(record: &InteractionRecord, max: usize) -> Result<String, State
     }
     Ok(encoded)
 }
+pub(super) fn close_run(
+    c: &rusqlite::Connection,
+    session: &str,
+    run: RunId,
+) -> Result<(), StateError> {
+    c.execute(
+        "INSERT OR IGNORE INTO ef_closed_interaction_runs(session_id,run_id) VALUES (?1,?2)",
+        params![session, run.to_string()],
+    )
+    .map_err(database_error)?;
+    Ok(())
+}
+
 #[async_trait]
 impl InteractionStore for SqliteStateStore {
     async fn publish(&self, record: &InteractionRecord) -> Result<(), StateError> {
-        if record.request.id.is_nil()
-            || record.run_id.is_nil()
-            || record.session_id.trim().is_empty()
-            || record.response.is_some()
-            || record.response_provenance.is_some()
-            || record.answered_at_unix_ms.is_some()
-        {
-            return Err(StateError::Invalid("invalid pending interaction".into()));
+        self.publish_many(std::slice::from_ref(record)).await
+    }
+    async fn publish_many(&self, records: &[InteractionRecord]) -> Result<(), StateError> {
+        if records.is_empty() {
+            return Ok(());
         }
-        compile_schema(&record.request.response_schema)
-            .map_err(|_| StateError::Invalid("invalid interaction schema".into()))?;
-        if let InteractionKind::Approval { invocation_id } = record.request.kind
-            && record
-                .tool_call
-                .as_ref()
-                .is_none_or(|call| call.invocation_id != invocation_id)
-        {
-            return Err(StateError::Invalid(
-                "approval must bind the original tool invocation".into(),
+        let mut encoded = Vec::with_capacity(records.len());
+        for record in records {
+            if record.request.id.is_nil()
+                || record.run_id.is_nil()
+                || record.session_id.trim().is_empty()
+                || record.response.is_some()
+                || record.response_provenance.is_some()
+                || record.answered_at_unix_ms.is_some()
+            {
+                return Err(StateError::Invalid("invalid pending interaction".into()));
+            }
+            compile_schema(&record.request.response_schema)
+                .map_err(|_| StateError::Invalid("invalid interaction schema".into()))?;
+            if let InteractionKind::Approval { invocation_id } = record.request.kind
+                && record
+                    .tool_call
+                    .as_ref()
+                    .is_none_or(|call| call.invocation_id != invocation_id)
+            {
+                return Err(StateError::Invalid(
+                    "approval must bind the original tool invocation".into(),
+                ));
+            }
+            encoded.push((
+                record.clone(),
+                encode_record(record, self.max_checkpoint_bytes)?,
             ));
         }
-        let record = record.clone();
-        let encoded = encode_record(&record, self.max_checkpoint_bytes)?;
+        let ids = serde_json::to_string(
+            &records
+                .iter()
+                .map(|record| record.request.id.to_string())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|e| StateError::Invalid(e.to_string()))?;
         let max = self.max_checkpoint_bytes;
         self.execute(move |connection| {
             let tx = crate::database::begin(connection).map_err(database_error)?;
-            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ef_interactions WHERE id=?1)", [record.request.id.to_string()], |r| r.get(0)).map_err(database_error)?;
-            if exists {
-                let previous = read_record(&tx, &record.session_id, record.request.id, max)?;
-                if previous.run_id != record.run_id || previous.node_invocation_id != record.node_invocation_id
-                    || previous.request != record.request || previous.tool_call != record.tool_call {
-                    return Err(StateError::Conflict);
+            let mut previous = std::collections::HashMap::<RunId,InteractionRecord>::new();
+            {
+                let mut q = tx.prepare("SELECT record FROM ef_interactions WHERE id IN (SELECT value FROM json_each(?1))").map_err(database_error)?;
+                let rows = q.query_map([ids],|r|r.get::<_,String>(0)).map_err(database_error)?;
+                for row in rows {
+                    let raw = row.map_err(database_error)?;
+                    if raw.len() > max { return Err(StateError::NotFound); }
+                    let record: InteractionRecord = serde_json::from_str(&raw).map_err(|_| StateError::Invalid("invalid interaction record".into()))?;
+                    previous.insert(record.request.id,record);
                 }
-            } else {
-                tx.execute("INSERT INTO ef_interactions(id,session_id,run_id,answered,record) VALUES (?1,?2,?3,0,?4)",
-                    params![record.request.id.to_string(), record.session_id, record.run_id.to_string(), encoded]).map_err(database_error)?;
+            }
+            for (record,encoded) in encoded {
+                if let Some(old) = previous.get(&record.request.id) {
+                    if old.session_id != record.session_id || old.run_id != record.run_id
+                        || old.node_invocation_id != record.node_invocation_id || old.request != record.request || old.tool_call != record.tool_call {
+                        return Err(StateError::Conflict);
+                    }
+                } else {
+                    tx.execute("INSERT INTO ef_interactions(id,session_id,run_id,answered,record) VALUES (?1,?2,?3,0,?4)",params![record.request.id.to_string(),record.session_id,record.run_id.to_string(),encoded]).map_err(database_error)?;
+                    previous.insert(record.request.id,record);
+                }
             }
             tx.commit().map_err(database_error)
         }).await
@@ -89,7 +131,7 @@ impl InteractionStore for SqliteStateStore {
     async fn get(&self, session: &str, id: RunId) -> Result<InteractionRecord, StateError> {
         let session = session.to_owned();
         let max = self.max_checkpoint_bytes;
-        self.execute(move |c| read_record(c, &session, id, max))
+        self.execute_read(move |c| read_record(c, &session, id, max))
             .await
     }
     async fn get_many(
@@ -97,56 +139,39 @@ impl InteractionStore for SqliteStateStore {
         session: &str,
         ids: &[RunId],
     ) -> Result<Vec<InteractionRecord>, StateError> {
+        self.find_many(session, ids)
+            .await?
+            .into_iter()
+            .map(|record| record.ok_or(StateError::NotFound))
+            .collect()
+    }
+    async fn find_many(
+        &self,
+        session: &str,
+        ids: &[RunId],
+    ) -> Result<Vec<Option<InteractionRecord>>, StateError> {
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let session = session.to_owned();
-        let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        let ids = serde_json::to_string(&ids.iter().map(ToString::to_string).collect::<Vec<_>>())
+            .map_err(|_| StateError::Invalid("invalid interaction identities".into()))?;
         let max = self.max_checkpoint_bytes;
-        self.execute(move |c| {
-            let mut found = std::collections::HashMap::new();
-            for chunk in ids.chunks(400) {
-                let placeholders = std::iter::repeat("?")
-                    .take(chunk.len())
-                    .collect::<Vec<_>>()
-                    .join(",");
-                let sql = format!(
-                    "SELECT id, record FROM ef_interactions WHERE session_id=? AND id IN ({placeholders})"
-                );
-                let mut parameters: Vec<&str> = Vec::with_capacity(chunk.len() + 1);
-                parameters.push(session.as_str());
-                parameters.extend(chunk.iter().map(String::as_str));
-                let mut query = c.prepare(&sql).map_err(database_error)?;
-                let rows = query
-                    .query_map(rusqlite::params_from_iter(parameters), |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(database_error)?;
-                for row in rows {
-                    let (id, encoded) = row.map_err(database_error)?;
-                    // Same oversized-record guard as single reads.
-                    if encoded.len() <= max {
-                        found.insert(id, encoded);
-                    }
-                }
-            }
-            ids.iter()
-                .map(|id| {
-                    let encoded = found
-                        .get(id)
-                        .ok_or(StateError::NotFound)?;
-                    serde_json::from_str(encoded)
-                        .map_err(|_| StateError::Invalid("invalid interaction record".into()))
-                })
-                .collect()
-        })
-        .await
+        self.execute_read(move |c| {
+            let mut q = c.prepare("SELECT i.record FROM json_each(?1) requested LEFT JOIN ef_interactions i ON i.id=requested.value AND i.session_id=?2 AND length(CAST(i.record AS BLOB))<=?3 ORDER BY CAST(requested.key AS INTEGER)").map_err(database_error)?;
+            q.query_map(params![ids,session,max], |r|r.get::<_,Option<String>>(0)).map_err(database_error)?
+                .map(|row| row.map_err(database_error)?.map(|encoded| serde_json::from_str(&encoded).map_err(|_| StateError::Invalid("invalid interaction record".into()))).transpose()).collect()
+        }).await
+    }
+    async fn close_run(&self, session: &str, run: RunId) -> Result<(), StateError> {
+        let session = session.to_owned();
+        self.execute(move |c| close_run(c, &session, run)).await
     }
     async fn pending(&self, session: &str) -> Result<Vec<InteractionRecord>, StateError> {
         let session = session.to_owned();
         let max = self.max_checkpoint_bytes;
-        self.execute(move |c| {
-            let mut query = c.prepare("SELECT record FROM ef_interactions WHERE session_id=?1 AND answered=0 ORDER BY rowid LIMIT 1025").map_err(database_error)?;
+        self.execute_read(move |c| {
+            let mut query = c.prepare("SELECT i.record FROM ef_interactions i WHERE i.session_id=?1 AND i.answered=0 AND NOT EXISTS (SELECT 1 FROM ef_closed_interaction_runs closed WHERE closed.session_id=i.session_id AND closed.run_id=i.run_id) ORDER BY i.rowid LIMIT 1025").map_err(database_error)?;
             let rows = query.query_map([session], |r| r.get::<_, String>(0)).map_err(database_error)?;
             let mut result = Vec::new(); let mut bytes = 0usize;
             for row in rows {
@@ -193,6 +218,10 @@ impl InteractionStore for SqliteStateStore {
                     // The legacy answer API can commit before the host supplies
                     // its trusted sender on the resume request. Fill it once.
                 } else {
+                    let closed: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM ef_closed_interaction_runs WHERE session_id=?1 AND run_id=?2)",
+                        params![session, record.run_id.to_string()], |r| r.get(0)).map_err(database_error)?;
+                    if closed { return Err(StateError::Invalid("interaction run is terminal".into())); }
                     let now = db_now(&tx)?;
                     record
                         .request

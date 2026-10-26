@@ -28,4 +28,5 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
+eliteforge-agent-test-support = { path = "../../testing/eliteforge-agent-test-support" }
 tempfile = "3"

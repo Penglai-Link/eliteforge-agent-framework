@@ -26,59 +26,49 @@ impl SessionStore for SqliteStateStore {
             let conversations = has_table(&tx, "ef_conversations")?;
             let summaries = has_table(&tx, "ef_context_summaries")?;
             let now = db_now(&tx)?;
+            let identities = {
+                let mut q = tx.prepare("SELECT ?1 UNION SELECT id FROM ef_sessions WHERE owner_session_id=?1").map_err(database_error)?;
+                q.query_map([&session_id],|r|r.get::<_,String>(0)).map_err(database_error)?.collect::<Result<Vec<_>,_>>().map_err(database_error)?
+            };
+            let identities = serde_json::to_string(&identities).map_err(|e| StateError::Invalid(e.to_string()))?;
             let busy: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM ef_checkpoints WHERE session_id=?1 AND owner IS NOT NULL AND expires>?2)",
-                params![session_id, now], |row| row.get(0),
+                "SELECT EXISTS(SELECT 1 FROM ef_checkpoints WHERE session_id IN (SELECT value FROM json_each(?1)) AND owner IS NOT NULL AND expires>?2) OR EXISTS(SELECT 1 FROM ef_runs WHERE (session_id IN (SELECT value FROM json_each(?1)) OR owner_session_id IN (SELECT value FROM json_each(?1))) AND status='RUNNING' AND lease_until>?2)",
+                params![identities,now],|r|r.get(0),
             ).map_err(database_error)?;
-            if busy {
-                return Err(StateError::Busy);
+            if busy { return Err(StateError::Busy); }
+            if conversations {
+                let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ef_conversations WHERE session IN (SELECT value FROM json_each(?1)) AND owner IS NOT NULL AND lease_until>?2)",params![identities,now],|r|r.get(0)).map_err(database_error)?;
+                if busy { return Err(StateError::Busy); }
             }
-            if crate::lifecycle::busy(&tx, &session_id)? { return Err(StateError::Busy); }
-            let mut identities = vec![session_id.clone()];
-            {
-                let mut query = tx.prepare("SELECT id FROM ef_sessions WHERE owner_session_id=?1 AND id<>?1").map_err(database_error)?;
-                identities.extend(query.query_map([&session_id], |r| r.get::<_, String>(0)).map_err(database_error)?.collect::<Result<Vec<_>,_>>().map_err(database_error)?);
-            }
+            // Fixed work per table, independent of the number of owned sessions.
+            let mut tables = vec![
+                ("ef_session_heads","session_id"), ("ef_checkpoints","session_id"),
+                ("ef_interactions","session_id"), ("ef_closed_interaction_runs","session_id"), ("ef_history_steps","session_id"),
+                ("ef_history_messages","session_id"), ("ef_history_tools","session_id"),
+                ("ef_history_interactions","session_id"), ("ef_history_runs","session_id"),
+                ("ef_history_versions","session_id"), ("ef_events","session_id"),
+                ("ef_session_artifact_refs","session_id"), ("ef_session_context","session_id"),
+                ("ef_runs","session_id"), ("ef_goals","session_id"), ("ef_sessions","id"),
+            ];
+            if conversations { tables.insert(3,("ef_conversations","session")); }
+            if summaries { tables.insert(3,("ef_context_summaries","json_extract(key, '$.conversation.session_id')")); }
+            // Tombstone only identities that actually own data, including orphan
+            // checkpoint rows; deleting an absent ID remains a no-op.
+            let union = tables.iter().map(|(table,column)| format!("SELECT {column} AS id FROM {table} WHERE {column} IN (SELECT value FROM json_each(?1))")).collect::<Vec<_>>().join(" UNION ");
+            let present = {
+                let mut q = tx.prepare(&union).map_err(database_error)?;
+                q.query_map([&identities],|r|r.get::<_,String>(0)).map_err(database_error)?.collect::<Result<Vec<_>,_>>().map_err(database_error)?
+            };
             let mut total = 0;
-            for session_id in identities {
-                let busy: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ef_checkpoints WHERE session_id=?1 AND owner IS NOT NULL AND expires>?2)",params![session_id,now],|r|r.get(0)).map_err(database_error)?;
-                if busy || crate::lifecycle::busy(&tx, &session_id)? { return Err(StateError::Busy); }
-            if conversations {
-                let busy: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM ef_conversations WHERE session=?1 AND owner IS NOT NULL AND lease_until>?2)",
-                    params![session_id, now], |row| row.get(0),
-                ).map_err(database_error)?;
-                if busy {
-                    return Err(StateError::Busy);
-                }
-            }
-            // Remove the foreign-key head before its checkpoints. All runs
-            // and all branches belong to the same session deletion boundary.
-            let mut rows = tx.execute("DELETE FROM ef_session_heads WHERE session_id=?1", [&session_id]).map_err(database_error)?;
-            rows += tx.execute("DELETE FROM ef_checkpoints WHERE session_id=?1", [&session_id]).map_err(database_error)?;
-            rows += tx.execute("DELETE FROM ef_interactions WHERE session_id=?1", [&session_id]).map_err(database_error)?;
-            if conversations {
-                rows += tx.execute("DELETE FROM ef_conversations WHERE session=?1", [&session_id]).map_err(database_error)?;
-            }
-            if summaries {
-                // Keys are JSON-encoded SummaryKey values. Compare the exact
-                // session field, never a prefix or a LIKE pattern.
-                rows += tx.execute(
-                    "DELETE FROM ef_context_summaries WHERE json_extract(key, '$.conversation.session_id')=?1",
-                    [&session_id],
-                ).map_err(database_error)?;
-            }
-            for table in ["ef_history_steps", "ef_history_messages", "ef_history_tools", "ef_history_interactions", "ef_history_runs", "ef_history_versions", "ef_events", "ef_session_artifact_refs", "ef_session_context", "ef_runs"] {
-                rows += tx.execute(&format!("DELETE FROM {table} WHERE session_id=?1"), [&session_id]).map_err(database_error)?;
+            for (table,column) in tables {
+                total += tx.execute(&format!("DELETE FROM {table} WHERE {column} IN (SELECT value FROM json_each(?1))"),[&identities]).map_err(database_error)?;
             }
             tx.execute("INSERT OR IGNORE INTO ef_artifact_cleanup(artifact_id) SELECT artifact_id FROM ef_artifact_ownership WHERE NOT EXISTS(SELECT 1 FROM ef_session_artifact_refs r WHERE r.artifact_id=ef_artifact_ownership.artifact_id)",[]).map_err(database_error)?;
-            if has_table(&tx,"ef_local_artifact_metadata")? { tx.execute("DELETE FROM ef_local_artifact_metadata WHERE id IN (SELECT artifact_id FROM ef_artifact_cleanup)",[]).map_err(database_error)?; }
-            rows += tx.execute("DELETE FROM ef_goals WHERE session_id=?1", [&session_id]).map_err(database_error)?;
-            rows += tx.execute("DELETE FROM ef_sessions WHERE id=?1", [&session_id]).map_err(database_error)?;
-            // Global admission ledger prevents a late writer recreating a deleted identity.
-            if rows != 0 { tx.execute("INSERT INTO ef_session_ids(id,deleted) VALUES (?1,1) ON CONFLICT(id) DO UPDATE SET deleted=1", [&session_id]).map_err(database_error)?; }
-            total += rows;
+            if has_table(&tx,"ef_local_artifact_metadata")? {
+                tx.execute("DELETE FROM ef_local_artifact_metadata WHERE id IN (SELECT artifact_id FROM ef_artifact_cleanup)",[]).map_err(database_error)?;
             }
+            let present = serde_json::to_string(&present).map_err(|e| StateError::Invalid(e.to_string()))?;
+            tx.execute("INSERT INTO ef_session_ids(id,deleted) SELECT value,1 FROM json_each(?1) WHERE true ON CONFLICT(id) DO UPDATE SET deleted=1",[present]).map_err(database_error)?;
             tx.commit().map_err(database_error)?;
             Ok(total != 0)
         }).await?;

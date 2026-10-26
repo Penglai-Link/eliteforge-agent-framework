@@ -732,7 +732,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         if input {"a2ui_request_input"} else {"a2ui_publish"},
         if input {"Publish a schema-validated SubmitOnce form and wait for its response to resume this run. Use the negotiated catalog and bind submit context.response to the response data model. Follow the a2ui-interface skill."} else {"Create, update or delete validated A2UI v0.9.1 surfaces. Choose Display for read-only reports or Reusable for repeated actions. Use the negotiated catalog, root component and complete envelopes; follow the a2ui-interface skill."},
         json!({"type":"object","additionalProperties":false,"required":["mode","messages"],"properties":{"mode":{"enum":if input{vec!["SubmitOnce"]}else{vec!["Display","Reusable"]}},"messages":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object"}},"responseSchema":{"type":"object"}}})
-    )).collect()
+    ).with_single_input()).collect()
 }
 #[async_trait]
 impl ToolProvider for A2uiService {
@@ -812,15 +812,20 @@ impl Tool for A2uiTool {
 fn form_error_details(error: &jsonschema::ValidationError<'_>, index: usize) -> Vec<String> {
     use jsonschema::error::ValidationErrorKind;
     match error.kind() {
-        ValidationErrorKind::OneOfNotValid { context }
-        | ValidationErrorKind::AnyOf { context } => context.iter()
-            .min_by_key(|branch| branch.len())
-            .into_iter()
-            .flatten()
-            .flat_map(|child| form_error_details(child, index))
-            .take(16)
-            .collect(),
-        _ => vec![format!("messages[{index}]{}: {error}", error.instance_path())],
+        ValidationErrorKind::OneOfNotValid { context } | ValidationErrorKind::AnyOf { context } => {
+            context
+                .iter()
+                .min_by_key(|branch| branch.len())
+                .into_iter()
+                .flatten()
+                .flat_map(|child| form_error_details(child, index))
+                .take(16)
+                .collect()
+        }
+        _ => vec![format!(
+            "messages[{index}]{}: {error}",
+            error.instance_path()
+        )],
     }
 }
 
@@ -858,10 +863,13 @@ fn validate_input_messages(
             return Err(invalid(format!("messages[{index}]: unsafe form content")));
         }
         if message["version"] != VERSION {
-            return Err(invalid(format!("messages[{index}]/version: expected {VERSION}")));
+            return Err(invalid(format!(
+                "messages[{index}]/version: expected {VERSION}"
+            )));
         }
         if !validator.is_valid(message) {
-            let details = validator.iter_errors(message)
+            let details = validator
+                .iter_errors(message)
                 .take(8)
                 .flat_map(|error| form_error_details(&error, index))
                 .collect::<Vec<_>>()

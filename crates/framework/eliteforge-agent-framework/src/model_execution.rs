@@ -1,12 +1,8 @@
 //! Shared persistent model/tool execution for ReAct and workflow stages.
 use crate::*;
 use async_trait::async_trait;
-use futures::{StreamExt, stream};
-use std::{
-    collections::{BTreeSet, HashSet},
-    sync::Arc,
-    time::Duration,
-};
+use futures::{StreamExt, stream::FuturesUnordered};
+use std::{collections::BTreeSet, sync::Arc, time::Duration};
 pub(crate) struct ModelExecutionLoop {
     pub(crate) conversation: bool,
     definition: WorkflowDefinition,
@@ -139,9 +135,10 @@ impl AgentLoop for ModelExecutionLoop {
                 visible_tools: initial_tools
                     .as_ref()
                     .expect("new run catalog")
-                    .descriptors()
-                    .into_iter()
-                    .map(|t| t.id)
+                    .by_name
+                    .values()
+                    .filter(|binding| binding.exposed)
+                    .map(|binding| binding.descriptor.id.clone())
                     .collect(),
                 revoked_tools: BTreeSet::new(),
                 interactions: Vec::new(),
@@ -168,7 +165,9 @@ impl AgentLoop for ModelExecutionLoop {
                 checkpoint.transcript = previous.transcript.clone();
             }
             checkpoint.transcript.push(
-                Message::user(&request.input).with_annotations(request.annotations.clone()).with_provenance(request.message_provenance.clone()),
+                Message::user(&request.input)
+                    .with_annotations(request.annotations.clone())
+                    .with_provenance(request.message_provenance.clone()),
             );
             if context.node_execution().is_none() {
                 checkpoint.history.messages.push(
@@ -351,8 +350,10 @@ impl AgentLoop for ModelExecutionLoop {
                 .fetch_max(state.child_runs, std::sync::atomic::Ordering::AcqRel);
             context.revoke_tools(&state.revoked_tools.iter().cloned().collect::<Vec<_>>())?;
             for binding in tools.by_name.values_mut() {
-                binding.exposed = state.visible_tools.contains(&binding.descriptor.id);
+                binding.exposed = (tools.gateway && is_gateway_descriptor(&binding.descriptor))
+                    || state.visible_tools.contains(&binding.descriptor.id);
             }
+            tools.refresh_gateway_search();
             let mut incoming = request.clone();
             if !state.interactions.is_empty() {
                 let manager = services.interactions.as_ref().ok_or(AgentError::MissingService("InteractionStore"))?;
@@ -364,10 +365,11 @@ impl AgentLoop for ModelExecutionLoop {
                         incoming.resume.as_mut().unwrap().response = None;
                 }
                 // Apply committed answers only when their tool batch is complete.
-                for interaction in state.interactions.clone() {
-                    let unfinished = matches!(&state.cursor, WorkflowCursor::Tools { executions, .. } if executions.iter().any(|e| !matches!(e.state, ToolExecutionState::Finished(_))));
-                    if matches!(interaction.kind, InteractionKind::Input) && unfinished { continue; }
-                    let record = manager.0.get(&context.session_id, interaction.id).await?;
+                let unfinished = matches!(&state.cursor, WorkflowCursor::Tools { executions, .. } if executions.iter().any(|e| !matches!(e.state, ToolExecutionState::Finished(_))));
+                let ids = state.interactions.iter()
+                    .filter(|interaction| !matches!(interaction.kind, InteractionKind::Input) || !unfinished)
+                    .map(|interaction| interaction.id).collect::<Vec<_>>();
+                for record in manager.0.get_many(&context.session_id, &ids).await? {
                     if let Some(response) = record.response {
                         let mut answered = incoming.clone();
                         answered.message_provenance = record.response_provenance;
@@ -377,7 +379,11 @@ impl AgentLoop for ModelExecutionLoop {
                 }
             }
             let resumed = apply_resume(&incoming, &mut state, &mut checkpoint, &tools);
-            for binding in tools.by_name.values_mut() { binding.exposed = state.visible_tools.contains(&binding.descriptor.id); }
+            for binding in tools.by_name.values_mut() {
+                binding.exposed = (tools.gateway && is_gateway_descriptor(&binding.descriptor))
+                    || state.visible_tools.contains(&binding.descriptor.id);
+            }
+            tools.refresh_gateway_search();
             context.revoke_tools(&state.revoked_tools.iter().cloned().collect::<Vec<_>>())?;
             match resumed {
                 Err(error) => Err(error),
@@ -399,12 +405,16 @@ impl AgentLoop for ModelExecutionLoop {
                         tools,
                         context,
                         services,
+                        processed_results: Default::default(),
+                        published_batch_snapshots: Default::default(),
                         conversation: conversation
                             .as_mut()
                             .map(|s| s.as_mut() as &mut dyn ConversationSession),
                     };
-                    runtime.save(None).await?;
-                    let result = runtime.execute().await;
+                    let result = match runtime.save(None).await {
+                        Ok(()) => runtime.execute().await,
+                        Err(error) => Err(error),
+                    };
                     if let Err(error) = &result {
                         // Storage failures have an unknown write outcome. Never
                         // overwrite them with a guessed terminal transition.
@@ -418,6 +428,13 @@ impl AgentLoop for ModelExecutionLoop {
                             let saved = runtime
                                 .save(Some(AgentEvent::RunFailed(error.to_string())))
                                 .await;
+                            if saved.is_ok() {
+                                if let WorkflowCursor::Tools {assistant,executions} = &runtime.state.cursor {
+                                    for event in crate::tool_batches::interrupted_result_events(assistant,executions) {
+                                        runtime.context.emit_output(event);
+                                    }
+                                }
+                            }
                             return finish_with_cleanup(result, saved);
                         }
                     }
@@ -515,6 +532,7 @@ fn apply_resume(
                             return Err(AgentError::InvalidConfiguration("input interaction has no matching tool result".into()));
                         }
                         let mut batch = vec![assistant.as_ref().clone()];
+                        let mut completed = Vec::new();
                         for execution in executions {
                             let ToolExecutionState::Finished(output) = &execution.state else {
                                 return Err(AgentError::InvalidConfiguration(
@@ -550,14 +568,9 @@ fn apply_resume(
                                 }
                                 _ => {}
                             }
-                            let mut message = Message::tool(&execution.call.id, &output.content);
-                            message.tool_result = Some(ToolResultMetadata {
-                                is_error: output.is_error,
-                                structured: output.structured.clone(),
-                                result_reference: output.result_reference.clone(),
-                            });
-                            batch.push(message);
+                            completed.push((execution, output));
                         }
+                        batch.extend(crate::tool_batches::result_messages(&completed));
                         checkpoint.transcript.extend(batch);
                         state.cursor = WorkflowCursor::Model;
                     }
@@ -605,6 +618,11 @@ struct ModelExecutionRuntime<'a> {
     tools: crate::react::ToolSet,
     context: &'a RunContext,
     services: &'a AgentServices,
+    // A failed commit must not invoke host post-processing a second time during
+    // terminal cleanup. Durable history takes over this guard after a commit.
+    processed_results: BTreeSet<RunId>,
+    published_batch_snapshots:
+        std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     conversation: Option<&'a mut dyn ConversationSession>,
 }
 impl ModelExecutionRuntime<'_> {
@@ -627,6 +645,12 @@ impl ModelExecutionRuntime<'_> {
     fn update_history(&mut self) {
         let now = unix_time_ms();
         if let WorkflowCursor::Tools { executions, .. } = &self.state.cursor {
+            crate::tool_batches::update_batch_history(
+                executions,
+                &mut self.checkpoint.history,
+                now,
+                self.checkpoint.status.is_terminal(),
+            );
             for execution in executions {
                 let Some(record) = self
                     .checkpoint
@@ -722,6 +746,7 @@ impl ModelExecutionRuntime<'_> {
             .enumerate()
             .filter(|(_, e)| {
                 matches!(e.state, ToolExecutionState::Finished(_))
+                    && !self.processed_results.contains(&e.invocation_id)
                     && self
                         .checkpoint
                         .history
@@ -732,37 +757,122 @@ impl ModelExecutionRuntime<'_> {
             })
             .map(|(i, e)| (i, e.clone()))
             .collect();
+        let mut failure = None;
         for (index, execution) in pending {
             let ToolExecutionState::Finished(mut output) = execution.state.clone() else {
                 continue;
             };
-            if let Some(processor) = self.context.extensions.get::<ToolResultProcessorService>() {
-                let was_error = output.is_error;
-                output = processor
-                    .0
-                    .process(
-                        &ToolInvocationContext {
-                            invocation_id: &execution.invocation_id.to_string(),
-                            call: &execution.call,
-                            descriptor: &execution.descriptor,
-                            run: self.context,
-                        },
-                        output,
+            let processed = async {
+                // Resolve native effects before publishing/auditing a final result.
+                // A rejected exposure must never be persisted as a success.
+                output = self.apply_tool_effect(output)?;
+                let applied_effect = output.effect.clone();
+                if let Some(processor) = self.context.extensions.get::<ToolResultProcessorService>()
+                {
+                    let was_error = output.is_error;
+                    let item_context =
+                        crate::tool_batches::invocation_context(self.context, &execution);
+                    output = processor
+                        .0
+                        .process(
+                            &ToolInvocationContext {
+                                invocation_id: &execution.invocation_id.to_string(),
+                                call: &execution.call,
+                                descriptor: &execution.descriptor,
+                                run: &item_context,
+                            },
+                            output,
+                        )
+                        .await?;
+                    if was_error && !output.is_error {
+                        return Err(AgentError::Run(
+                            "tool result processor converted a failure to success".into(),
+                        ));
+                    }
+                }
+                // Host processors may supply an exposure effect of their own.
+                if output.effect != applied_effect {
+                    output = self.apply_tool_effect(output)?;
+                }
+                Ok::<_, AgentError>(output)
+            }
+            .await;
+            let output = match processed {
+                Ok(output) => output,
+                Err(error) => {
+                    // The call already returned. Do not expose unprocessed data
+                    // (a host processor may redact it), or claim it never ran.
+                    // A host storage error is not an unknown checkpoint commit.
+                    failure.get_or_insert_with(|| {
+                        AgentError::Run(format!("Tool result processing failed: {error}"))
+                    });
+                    ToolOutput::error(
+                        "Tool result processing failed. Execution effects may already exist. Verify them before retrying; the unprocessed result is unavailable.",
                     )
-                    .await?;
-                if was_error && !output.is_error {
-                    return Err(AgentError::Run(
-                        "tool result processor converted a failure to success".into(),
-                    ));
+                }
+            };
+            self.execution_mut(index).state = ToolExecutionState::Finished(output);
+            self.processed_results.insert(execution.invocation_id);
+        }
+        failure.map_or(Ok(()), Err)
+    }
+    fn apply_tool_effect(&mut self, mut output: ToolOutput) -> Result<ToolOutput, AgentError> {
+        match &output.effect {
+            ToolEffect::ExposeTools(ids) => {
+                if let Err(error) = self.tools.apply_exposure(ids) {
+                    output = ToolOutput::error(error);
+                } else {
+                    self.state.visible_tools.extend(ids.iter().cloned());
                 }
             }
-            self.execution_mut(index).state = ToolExecutionState::Finished(output);
+            ToolEffect::SetExposedTools(ids) => {
+                if let Err(error) = self.tools.set_exposure(ids) {
+                    output = ToolOutput::error(error);
+                } else {
+                    self.state.visible_tools = ids.iter().cloned().collect();
+                }
+            }
+            ToolEffect::RevokeTools(ids) => self.context.revoke_tools(ids)?,
+            ToolEffect::RequestInput(_) | ToolEffect::AwaitInput | ToolEffect::Continue => {}
         }
-        Ok(())
+        Ok(output)
     }
-    async fn save(&mut self, event: Option<AgentEvent>) -> Result<(), AgentError> {
+    async fn save(&mut self, mut event: Option<AgentEvent>) -> Result<(), AgentError> {
         self.process_finished_history_tools().await?;
+        // Commit recovery context together with terminal history. A later user
+        // turn must see confirmed effects and unknown outcomes, not repeat the
+        // original plan. Keep the cursor for audit; terminal runs never dispatch it.
+        if self.checkpoint.status.is_terminal()
+            && let WorkflowCursor::Tools {
+                assistant,
+                executions,
+            } = &self.state.cursor
+            && !self.checkpoint.transcript.contains(assistant.as_ref())
+        {
+            self.checkpoint.transcript.push(assistant.as_ref().clone());
+            self.checkpoint
+                .transcript
+                .extend(crate::tool_batches::interrupted_result_messages(
+                    assistant, executions,
+                ));
+        }
+        if let Some(AgentEvent::ToolFinished {
+            call_id, is_error, ..
+        }) = &mut event
+            && let WorkflowCursor::Tools { executions, .. } = &self.state.cursor
+            && let Some(ToolExecution {
+                state: ToolExecutionState::Finished(output),
+                ..
+            }) = executions
+                .iter()
+                .find(|execution| execution.call.id == *call_id)
+        {
+            *is_error = output.is_error;
+        }
         self.update_history();
+        if self.checkpoint.status.is_terminal() {
+            self.state.interactions.clear();
+        }
         self.state.revoked_tools = self
             .context
             .revoked_tools
@@ -800,7 +910,19 @@ impl ModelExecutionRuntime<'_> {
                 self.checkpoint.clone(),
             )
             .await?;
-        if !self.state.interactions.is_empty() {
+        if self.checkpoint.status.is_terminal() {
+            // Embedded DAG checkpoints share the parent's run ID. Only the DAG
+            // owner may close that run, after all sibling nodes have settled.
+            if self.context.node_execution().is_none()
+                && let Some(manager) = &self.services.interactions
+            {
+                // Also close independently configured/remote interaction stores.
+                manager
+                    .0
+                    .close_run(&self.checkpoint.session_id, self.checkpoint.run_id)
+                    .await?;
+            }
+        } else if !self.state.interactions.is_empty() {
             self.services
                 .interactions
                 .as_ref()
@@ -809,6 +931,29 @@ impl ModelExecutionRuntime<'_> {
                 .await?;
         }
         self.sync_conversation().await?;
+        // Publish only committed states. Resumes get a fresh snapshot, while
+        // repeated saves of the same state produce no duplicate progress frame.
+        if !self.checkpoint.status.is_terminal()
+            && let WorkflowCursor::Tools {
+                assistant,
+                executions,
+            } = &self.state.cursor
+        {
+            for event in crate::tool_batches::batch_snapshot_events(
+                assistant,
+                executions,
+                &self.checkpoint.history,
+            ) {
+                if let OutputEvent::ActivitySnapshot { id, content, .. } = &event {
+                    if self.published_batch_snapshots.get(id) == Some(content) {
+                        continue;
+                    }
+                    self.published_batch_snapshots
+                        .insert(id.clone(), content.clone());
+                }
+                self.context.emit_output(event);
+            }
+        }
         if let Some(event) = event {
             // Agent owns the sole live terminal event; checkpoints keep a separate journal.
             if !matches!(
@@ -853,7 +998,9 @@ impl ModelExecutionRuntime<'_> {
             validate_annotations(&input.annotations).map_err(AgentError::InvalidConfiguration)?;
             let annotations = input.annotations;
             let requested_skills = input.requested_skills;
-            let provenance = input.provenance.or_else(|| self.context.message_provenance());
+            let provenance = input
+                .provenance
+                .or_else(|| self.context.message_provenance());
             let input = input.content;
             self.checkpoint.history.messages.push(
                 HistoryMessage::user(self.context.run_id, &input)
@@ -862,7 +1009,9 @@ impl ModelExecutionRuntime<'_> {
                     .with_provenance(provenance.clone()),
             );
             self.checkpoint.transcript.push(
-                Message::user(input.clone()).with_annotations(annotations).with_provenance(provenance),
+                Message::user(input.clone())
+                    .with_annotations(annotations)
+                    .with_provenance(provenance),
             );
             // Persist the message and its journal event together before
             // publishing the live event, including at the final reply boundary.
@@ -888,14 +1037,31 @@ impl ModelExecutionRuntime<'_> {
         self.checkpoint.status = execution;
         self.state.outcome = Some(status.clone());
         self.save(None).await?;
-        if let WorkflowCursor::Tools { executions, .. } = &self.state.cursor {
-            for execution in executions {
-                if let ToolExecutionState::Finished(output) = &execution.state {
-                    self.context.emit_output(OutputEvent::ToolResult {
-                        call: execution.call.clone(),
-                        output: output.clone(),
-                    });
-                }
+        if let WorkflowCursor::Tools {
+            assistant,
+            executions,
+        } = &self.state.cursor
+        {
+            let completed: Vec<_> = executions
+                .iter()
+                .filter_map(|execution| {
+                    let ToolExecutionState::Finished(output) = &execution.state else {
+                        return None;
+                    };
+                    if let Some(item) = &execution.batch_item {
+                        if executions.iter().any(|e| {
+                            e.batch_item.as_ref().is_some_and(|i| {
+                                i.parent_invocation_id == item.parent_invocation_id
+                            }) && !matches!(e.state, ToolExecutionState::Finished(_))
+                        }) {
+                            return None;
+                        }
+                    }
+                    Some((execution, output.clone()))
+                })
+                .collect();
+            for event in crate::tool_batches::result_events(assistant, &completed) {
+                self.context.emit_output(event);
             }
         }
         Ok(self.result(status))
@@ -926,9 +1092,7 @@ impl ModelExecutionRuntime<'_> {
                             .stop(RunStatus::StepLimit, ExecutionStatus::Completed)
                             .await;
                     }
-                    let mut steering: Vec<LiveInput> = self
-                        .context
-                        .take_steering_inputs();
+                    let mut steering: Vec<LiveInput> = self.context.take_steering_inputs();
                     if let Some(source) = self.context.extensions.get::<LiveInputSourceService>() {
                         steering.extend(source.0.drain_inputs(self.context, false).await?);
                     }
@@ -950,16 +1114,20 @@ impl ModelExecutionRuntime<'_> {
                             "stage context must provide trusted instructions".into(),
                         ));
                     }
+                    // The gateway pair is transport infrastructure and remains
+                    // visible in restricted stages. Unwrapping below enforces
+                    // stage.tools against the actual inner descriptor ID.
                     let descriptors: Vec<_> = self
                         .tools
                         .descriptors()
                         .into_iter()
                         .filter(|t| {
                             !self.context.is_tool_revoked(&t.id)
-                                && stage
-                                    .tools
-                                    .as_ref()
-                                    .is_none_or(|allowed| allowed.contains(&t.id))
+                                && (self.tools.gateway && is_gateway_descriptor(t)
+                                    || stage
+                                        .tools
+                                        .as_ref()
+                                        .is_none_or(|allowed| allowed.contains(&t.id)))
                         })
                         .collect();
                     let mut memory = if let Some(session) = &mut self.conversation {
@@ -1013,6 +1181,18 @@ impl ModelExecutionRuntime<'_> {
                     };
                     self.checkpoint = journal.checkpoint.lock().await.clone();
                     let response = response?;
+                    // Maintenance assembles and persists context through the same model
+                    // service, but has no reply message or further workflow stage.
+                    if self
+                        .context
+                        .extensions
+                        .get::<ContextCompactionRequest>()
+                        .is_some()
+                    {
+                        return self
+                            .stop(RunStatus::Completed, ExecutionStatus::Completed)
+                            .await;
+                    }
                     self.state.steps += 1;
                     self.state.usage.add(&response.usage);
                     self.state.output = response.content.clone();
@@ -1028,9 +1208,7 @@ impl ModelExecutionRuntime<'_> {
                         }
                         self.checkpoint.transcript.push(assistant);
                         if self.state.stage + 1 == self.state.definition.stages.len() {
-                            let mut steering: Vec<LiveInput> = self
-                                .context
-                                .take_steering_inputs();
+                            let mut steering: Vec<LiveInput> = self.context.take_steering_inputs();
                             if let Some(source) =
                                 self.context.extensions.get::<LiveInputSourceService>()
                             {
@@ -1042,9 +1220,7 @@ impl ModelExecutionRuntime<'_> {
                                 );
                             }
                             if steering.is_empty() {
-                                steering = self
-                                    .context
-                                    .pending_inputs_or_seal();
+                                steering = self.context.pending_inputs_or_seal();
                             }
                             if steering.is_empty() {
                                 return self
@@ -1057,13 +1233,15 @@ impl ModelExecutionRuntime<'_> {
                             self.save(None).await?;
                         }
                     } else {
+                        let expanded =
+                            crate::tool_batches::expand_calls(&assistant.tool_calls, &self.tools)?;
                         let remaining = self
                             .state
                             .request
                             .limits
                             .max_tool_calls
                             .saturating_sub(self.state.tool_calls);
-                        let overflow = assistant.tool_calls.len() > remaining;
+                        let overflow = expanded.len() > remaining;
                         if overflow
                             && (remaining == 0
                                 || self.state.request.limits.tool_batch_budget_policy
@@ -1073,7 +1251,7 @@ impl ModelExecutionRuntime<'_> {
                                 .stop(RunStatus::ToolCallLimit, ExecutionStatus::Completed)
                                 .await;
                         }
-                        let admitted = assistant.tool_calls.len().min(remaining);
+                        let admitted = expanded.len().min(remaining);
                         if !admit_native_tools(
                             self.context,
                             self.state.request.limits.max_tool_calls,
@@ -1084,39 +1262,97 @@ impl ModelExecutionRuntime<'_> {
                                 .await;
                         }
                         self.state.tool_batch_limit_reached = overflow;
-                        let mut ids = HashSet::new();
                         let mut executions = Vec::new();
-                        for (index, call) in assistant.tool_calls.iter().enumerate() {
-                            if call.id.is_empty() || !ids.insert(&call.id) {
-                                return Err(AgentError::Run(
-                                    "model returned invalid tool call IDs".into(),
-                                ));
-                            }
+                        for (index, (call, batch_item, batch_error)) in expanded.iter().enumerate()
+                        {
                             let binding = self.tools.by_name.get(&call.call_name).filter(|b| {
-                                descriptors.contains(&b.descriptor)
+                                descriptors.iter().any(|d| d.id == b.descriptor.id)
                                     || (self.state.request.limits.allow_unexposed_tools
                                         && !self.context.is_tool_revoked(&b.descriptor.id)
                                         && stage.tools.as_ref().is_none_or(|allowed| {
                                             allowed.contains(&b.descriptor.id)
                                         }))
                             });
-                            let (descriptor, state) = match binding {
-                                Some(binding) => {
-                                    (binding.descriptor.clone(), ToolExecutionState::Planned)
-                                }
-                                None => (
-                                    ToolDescriptor::new(
-                                        "unavailable",
-                                        &call.call_name,
-                                        "Unavailable tool",
-                                        serde_json::json!({}),
+                            // Gateway unwrap: a `tool_execute` envelope is
+                            // rewritten to the inner tool's call so schema
+                            // validation, policy, middleware, audit and
+                            // dispatch all see the real tool. The assistant
+                            // transcript keeps the provider-faithful envelope;
+                            // the provider call id and invocation identity are
+                            // preserved for result pairing.
+                            let via_gateway = binding
+                                .as_ref()
+                                .is_some_and(|b| b.descriptor.id == TOOL_EXECUTE_ID);
+                            let (descriptor, state, execution_call) = if via_gateway {
+                                match GatewayEnvelope::parse(&call.arguments) {
+                                    Ok(envelope) => {
+                                        match self.tools.by_name.get(&envelope.tool).filter(|b| {
+                                            (b.exposed
+                                                || self.state.request.limits.allow_unexposed_tools)
+                                                && !self.context.is_tool_revoked(&b.descriptor.id)
+                                                && stage.tools.as_ref().is_none_or(|allowed| {
+                                                    allowed.contains(&b.descriptor.id)
+                                                })
+                                        }) {
+                                            Some(inner) => (
+                                                inner.descriptor.clone(),
+                                                ToolExecutionState::Planned,
+                                                envelope.unwrap_call(call),
+                                            ),
+                                            None => (
+                                                ToolDescriptor::new(
+                                                    "unavailable",
+                                                    &envelope.tool,
+                                                    "Unavailable tool",
+                                                    serde_json::json!({}),
+                                                ),
+                                                ToolExecutionState::Finished(ToolOutput::error(
+                                                    "Tool is not exposed for this stage",
+                                                )),
+                                                // Keep the inner name so rejection
+                                                // diagnostics address the tool the
+                                                // model actually asked for.
+                                                envelope.unwrap_call(call),
+                                            ),
+                                        }
+                                    }
+                                    Err(message) => (
+                                        ToolDescriptor::new(
+                                            "unavailable",
+                                            &call.call_name,
+                                            "Unavailable tool",
+                                            serde_json::json!({}),
+                                        ),
+                                        ToolExecutionState::Finished(ToolOutput::error(format!(
+                                            "Invalid tool_execute arguments: {message}"
+                                        ))),
+                                        call.clone(),
                                     ),
-                                    ToolExecutionState::Finished(ToolOutput::error(
-                                        "Tool is not exposed for this stage",
-                                    )),
-                                ),
+                                }
+                            } else {
+                                match binding {
+                                    Some(binding) => (
+                                        binding.descriptor.clone(),
+                                        ToolExecutionState::Planned,
+                                        call.clone(),
+                                    ),
+                                    None => (
+                                        ToolDescriptor::new(
+                                            "unavailable",
+                                            &call.call_name,
+                                            "Unavailable tool",
+                                            serde_json::json!({}),
+                                        ),
+                                        ToolExecutionState::Finished(ToolOutput::error(
+                                            "Tool is not exposed for this stage",
+                                        )),
+                                        call.clone(),
+                                    ),
+                                }
                             };
-                            let state = if index >= admitted {
+                            let state = if let Some(error) = batch_error {
+                                ToolExecutionState::Finished(ToolOutput::error(error))
+                            } else if index >= admitted {
                                 ToolExecutionState::Finished(ToolOutput::error(
                                     "Tool not executed: tool-call budget exhausted",
                                 ))
@@ -1127,8 +1363,10 @@ impl ModelExecutionRuntime<'_> {
                                 invocation_id: call.invocation_id,
                                 tool_id: descriptor.id.clone(),
                                 descriptor,
-                                call: call.clone(),
+                                call: execution_call,
                                 state,
+                                via_gateway,
+                                batch_item: batch_item.clone(),
                             });
                         }
                         self.state.tool_calls += admitted;
@@ -1194,11 +1432,12 @@ impl ModelExecutionRuntime<'_> {
                 continue;
             }
             let invocation_id = execution.invocation_id.to_string();
+            let item_context = crate::tool_batches::invocation_context(self.context, &execution);
             let invocation = ToolInvocationContext {
                 invocation_id: &invocation_id,
                 call: &execution.call,
                 descriptor: &execution.descriptor,
-                run: self.context,
+                run: &item_context,
             };
             let approved = matches!(&execution.state, ToolExecutionState::Approved);
             let mut approval = None;
@@ -1224,7 +1463,15 @@ impl ModelExecutionRuntime<'_> {
                 continue;
             }
             if let Some(prompt) = approval {
-                let interaction = InteractionRequest::approval(execution.invocation_id, prompt);
+                let mut interaction = InteractionRequest::approval(execution.invocation_id, prompt);
+                interaction.presentation = Some(
+                    serde_json::to_value(ToolApprovalDetails {
+                        tool: execution.call.call_name.clone(),
+                        parameters: execution.call.arguments.clone(),
+                        batch: execution.batch_item.clone(),
+                    })
+                    .expect("approval details serialize"),
+                );
                 self.execution_mut(index).state = ToolExecutionState::WaitingApproval {
                     interaction_id: interaction.id,
                 };
@@ -1238,119 +1485,43 @@ impl ModelExecutionRuntime<'_> {
                 .await
                 .map(Some);
         }
-        let mut parallel_results = self.execute_parallel(count).await?;
-        let parallel_dispatch = !parallel_results.is_empty();
-        for index in 0..count {
-            if matches!(self.execution(index).state, ToolExecutionState::Finished(_)) {
-                continue;
-            }
-            self.context.check_cancelled()?;
-            let execution = self.execution(index).clone();
-            let result = if let Some(result) = parallel_results.remove(&index) {
-                result
-            } else {
+        if !self.execute_parallel(count).await? {
+            for index in 0..count {
+                if matches!(self.execution(index).state, ToolExecutionState::Finished(_)) {
+                    continue;
+                }
+                self.context.check_cancelled()?;
+                let execution = self.execution(index).clone();
                 self.execution_mut(index).state = ToolExecutionState::Started;
                 self.save(Some(AgentEvent::ToolStarted {
                     tool_id: execution.tool_id.clone(),
                     call_id: execution.call.id.clone(),
                 }))
                 .await?;
-                let binding = &self.tools.by_name[&execution.call.call_name];
                 let journal = Arc::new(WorkflowBudgetJournal {
                     store: self.services.state.clone().expect("validated state store"),
                     lease: self.lease.clone(),
                     checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
                 });
-                let mut tool_context = self.context.clone();
-                tool_context.budget_journal = Some(journal.clone());
+                let mut context = crate::tool_batches::invocation_context(self.context, &execution);
+                context.budget_journal = Some(journal.clone());
                 let result = self
                     .services
                     .tool_invoker
                     .invoke(
                         &execution.invocation_id.to_string(),
                         &execution.call,
-                        binding,
-                        &tool_context,
+                        &self.tools.by_name[&execution.call.call_name],
+                        &context,
                         self.state.request.limits.tool_timeout,
                     )
                     .await;
                 self.checkpoint = journal.checkpoint.lock().await.clone();
-                result
-            };
-            let mut output = match result {
-                Ok(output) => output,
-                Err(error @ ToolError::Indeterminate(_)) => {
-                    self.context.check_cancelled()?;
-                    if parallel_dispatch {
-                        continue;
-                    }
-                    return Err(AgentError::Run(error.to_string()));
-                }
-                Err(error) => ToolOutput::error(error.to_string()),
-            };
-            if output.effect == ToolEffect::AwaitInput {
-                output.effect = ToolEffect::RequestInput(Box::new(InteractionRequest::input(
-                    &output.content,
-                    serde_json::json!({"type":"string"}),
-                )?));
-            }
-            if let ToolEffect::RequestInput(interaction) = &output.effect {
-                if !matches!(interaction.kind, InteractionKind::Input)
-                    || interaction.id.is_nil()
-                    || self
-                        .state
-                        .interactions
-                        .iter()
-                        .any(|i| i.id == interaction.id)
-                    || self
-                        .state
-                        .answers
-                        .iter()
-                        .any(|a| a.interaction_id == interaction.id)
-                {
-                    return Err(AgentError::Run(
-                        "tool returned invalid interaction identity/kind".into(),
-                    ));
-                }
-                compile_schema(&interaction.response_schema)?;
-                self.state.interactions.push(interaction.as_ref().clone());
-                // An answer can change the intended arguments. Remaining calls
-                // from this pre-answer batch are observations of non-execution;
-                // the model must replan after receiving the answer.
-                for remaining in index + 1..count {
-                    if parallel_results.contains_key(&remaining) {
-                        continue;
-                    }
-                    if !matches!(
-                        self.execution(remaining).state,
-                        ToolExecutionState::Finished(_)
-                    ) {
-                        self.execution_mut(remaining).state =
-                            ToolExecutionState::Finished(ToolOutput::error(
-                                "Tool not executed: awaiting input; replan after the answer",
-                            ));
-                    }
-                }
-            }
-            let is_error = output.is_error;
-            self.execution_mut(index).state = ToolExecutionState::Finished(output);
-            self.save(Some(AgentEvent::ToolFinished {
-                tool_id: execution.tool_id,
-                call_id: execution.call.id,
-                is_error,
-            }))
-            .await?;
-            if !self.state.interactions.is_empty()
-                && parallel_results.is_empty()
-                && !self.has_started_tools()
-            {
-                self.complete_tool_batch().await?;
-                return self
-                    .stop(RunStatus::AwaitingInput, ExecutionStatus::Waiting)
-                    .await
-                    .map(Some);
+                self.finish_tool_result(index, result).await?;
             }
         }
+        // Known results are durable before cancellation can terminate the run.
+        self.context.check_cancelled()?;
         if self.has_started_tools() {
             return Err(AgentError::Run(
                 "tool execution ended without a confirmed result".into(),
@@ -1371,48 +1542,121 @@ impl ModelExecutionRuntime<'_> {
         }
         Ok(None)
     }
-    async fn execute_parallel(
+    async fn finish_tool_result(
         &mut self,
-        count: usize,
-    ) -> Result<std::collections::BTreeMap<usize, Result<ToolOutput, ToolError>>, AgentError> {
+        index: usize,
+        result: Result<ToolOutput, ToolError>,
+    ) -> Result<(), AgentError> {
+        let execution = self.execution(index).clone();
+        let mut output = match result {
+            Ok(output) => output,
+            Err(error @ ToolError::Indeterminate(_)) => {
+                self.context.check_cancelled()?;
+                return Err(AgentError::Run(error.to_string()));
+            }
+            Err(error) => ToolOutput::error(error.to_string()),
+        };
+        if output.effect == ToolEffect::AwaitInput {
+            output.effect = ToolEffect::RequestInput(Box::new(InteractionRequest::input(
+                &output.content,
+                serde_json::json!({"type":"string"}),
+            )?));
+        }
+        if let ToolEffect::RequestInput(interaction) = &output.effect {
+            if !matches!(interaction.kind, InteractionKind::Input)
+                || interaction.id.is_nil()
+                || self
+                    .state
+                    .interactions
+                    .iter()
+                    .any(|i| i.id == interaction.id)
+                || self
+                    .state
+                    .answers
+                    .iter()
+                    .any(|a| a.interaction_id == interaction.id)
+            {
+                return Err(AgentError::Run(
+                    "tool returned invalid interaction identity/kind".into(),
+                ));
+            }
+            compile_schema(&interaction.response_schema)?;
+            self.state.interactions.push(interaction.as_ref().clone());
+            // An answer may change the plan. In-flight siblings must still be
+            // collected; only calls not dispatched yet can be skipped.
+            if let WorkflowCursor::Tools { executions, .. } = &mut self.state.cursor {
+                for (other, pending) in executions.iter_mut().enumerate() {
+                    if other != index
+                        && matches!(
+                            pending.state,
+                            ToolExecutionState::Planned | ToolExecutionState::Approved
+                        )
+                    {
+                        pending.state = ToolExecutionState::Finished(ToolOutput::error(
+                            "Tool not executed: awaiting input; replan after the answer",
+                        ));
+                    }
+                }
+            }
+        }
+        let is_error = output.is_error;
+        self.execution_mut(index).state = ToolExecutionState::Finished(output);
+        self.save(Some(AgentEvent::ToolFinished {
+            tool_id: execution.tool_id,
+            call_id: execution.call.id,
+            is_error,
+        }))
+        .await
+    }
+    async fn execute_parallel(&mut self, count: usize) -> Result<bool, AgentError> {
         let indices: Vec<_> = (0..count)
             .filter(|&i| !matches!(self.execution(i).state, ToolExecutionState::Finished(_)))
             .collect();
-        if self.state.request.limits.max_parallel_tools < 2
+        let limit = self.state.request.limits.max_parallel_tools;
+        if limit < 2
             || indices.len() < 2
             || indices
                 .iter()
                 .any(|&i| !self.tools.by_name[&self.execution(i).call.call_name].parallel_safe)
         {
-            return Ok(Default::default());
+            return Ok(false);
         }
-        for &index in &indices {
-            self.execution_mut(index).state = ToolExecutionState::Started;
-        }
-        // All dispatch intents are durable before the first side effect.
-        self.save(None).await?;
         let journal = Arc::new(WorkflowBudgetJournal {
             store: self.services.state.clone().expect("validated state store"),
             lease: self.lease.clone(),
             checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
         });
-        let mut context = self.context.clone();
-        context.budget_journal = Some(journal.clone());
-        let work: Vec<_> = indices
-            .into_iter()
-            .map(|index| {
+        let mut pending = indices.into_iter();
+        let mut running = FuturesUnordered::new();
+        let mut failure = None;
+        loop {
+            while running.len() < limit
+                && failure.is_none()
+                && self.context.check_cancelled().is_ok()
+                && self.state.interactions.is_empty()
+            {
+                let Some(index) = pending.next() else {
+                    break;
+                };
                 let execution = self.execution(index).clone();
+                // Persist only the calls occupying a dispatch slot. Queued calls
+                // remain Planned/Approved and become NotExecuted on cancellation.
+                let mut checkpoint = journal.checkpoint.lock().await;
+                self.checkpoint = checkpoint.clone();
+                self.execution_mut(index).state = ToolExecutionState::Started;
+                self.save(Some(AgentEvent::ToolStarted {
+                    tool_id: execution.tool_id.clone(),
+                    call_id: execution.call.id.clone(),
+                }))
+                .await?;
+                *checkpoint = self.checkpoint.clone();
+                drop(checkpoint);
                 let binding = self.tools.by_name[&execution.call.call_name].clone();
-                let context = context.clone();
+                let mut context = crate::tool_batches::invocation_context(self.context, &execution);
+                context.budget_journal = Some(journal.clone());
                 let invoker = self.services.tool_invoker.clone();
                 let timeout = self.state.request.limits.tool_timeout;
-                async move {
-                    context
-                        .emit(AgentEvent::ToolStarted {
-                            tool_id: execution.tool_id.clone(),
-                            call_id: execution.call.id.clone(),
-                        })
-                        .await;
+                running.push(async move {
                     let result = invoker
                         .invoke(
                             &execution.invocation_id.to_string(),
@@ -1423,15 +1667,31 @@ impl ModelExecutionRuntime<'_> {
                         )
                         .await;
                     (index, result)
+                });
+            }
+            let Some((index, result)) = running.next().await else {
+                break;
+            };
+            // Share the revision with concurrent budget reservations. Never let
+            // an older journal checkpoint overwrite a completed sibling.
+            let mut checkpoint = journal.checkpoint.lock().await;
+            self.checkpoint = checkpoint.clone();
+            let saved = self.finish_tool_result(index, result).await;
+            *checkpoint = self.checkpoint.clone();
+            if let Err(error) = saved {
+                if error.contains_state_error() {
+                    return Err(error);
                 }
-            })
-            .collect();
-        let results = stream::iter(work)
-            .buffered(self.state.request.limits.max_parallel_tools)
-            .collect()
-            .await;
-        self.checkpoint = journal.checkpoint.lock().await.clone();
-        Ok(results)
+                failure.get_or_insert(error);
+            }
+            // Even after cancellation/indeterminate execution, drain in-flight
+            // results before returning the error. Known successes remain known.
+        }
+        self.context.check_cancelled()?;
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        Ok(true)
     }
     async fn complete_tool_batch(&mut self) -> Result<(), AgentError> {
         let WorkflowCursor::Tools {
@@ -1441,45 +1701,16 @@ impl ModelExecutionRuntime<'_> {
         else {
             unreachable!()
         };
-        let mut batch = vec![*assistant];
-        let mut outputs = Vec::new();
-        for execution in executions {
-            let ToolExecutionState::Finished(mut output) = execution.state else {
+        let mut batch = vec![assistant.as_ref().clone()];
+        let mut completed = Vec::new();
+        for execution in &executions {
+            let ToolExecutionState::Finished(output) = execution.state.clone() else {
                 return Err(AgentError::Run("unfinished tool in completed batch".into()));
             };
-            match &output.effect {
-                ToolEffect::ExposeTools(ids) => {
-                    if let Err(error) = self.tools.apply_exposure(ids) {
-                        output = ToolOutput::error(error);
-                    } else {
-                        self.state.visible_tools.extend(ids.iter().cloned());
-                    }
-                }
-                ToolEffect::SetExposedTools(ids) => {
-                    if let Err(error) = self.tools.set_exposure(ids) {
-                        output = ToolOutput::error(error);
-                    } else {
-                        self.state.visible_tools = ids.iter().cloned().collect();
-                    }
-                }
-                ToolEffect::RequestInput(_) | ToolEffect::AwaitInput => {}
-                ToolEffect::RevokeTools(ids) => {
-                    self.context.revoke_tools(ids)?;
-                }
-                ToolEffect::Continue => {}
-            }
-            outputs.push(OutputEvent::ToolResult {
-                call: execution.call.clone(),
-                output: output.clone(),
-            });
-            let mut message = Message::tool(execution.call.id, output.content);
-            message.tool_result = Some(ToolResultMetadata {
-                is_error: output.is_error,
-                structured: output.structured,
-                result_reference: output.result_reference,
-            });
-            batch.push(message);
+            completed.push((execution, output));
         }
+        batch.extend(crate::tool_batches::result_messages(&completed));
+        let outputs = crate::tool_batches::result_events(&assistant, &completed);
         self.checkpoint.transcript.extend(batch);
         self.state.cursor = WorkflowCursor::Model;
         self.save(None).await?;
@@ -1641,6 +1872,46 @@ struct WorkflowBudgetJournal {
 }
 #[async_trait]
 impl HistoryCommitter for WorkflowBudgetJournal {
+    async fn context_compaction(&self, status: HistoryStatus) -> Result<(), StateError> {
+        let mut current = self.checkpoint.lock().await;
+        let mut next = current.clone();
+        let pending = next.history.steps.iter_mut().rev().find(|step| {
+            step.name == CONTEXT_COMPACTION_STEP && step.status == HistoryStatus::Running
+        });
+        let now = unix_time_ms();
+        if let Some(step) = pending {
+            if status == HistoryStatus::Running {
+                return Ok(());
+            }
+            step.status = status;
+            step.finished_at_ms = Some(now);
+        } else if status == HistoryStatus::Running {
+            next.history.steps.push(HistoryStep {
+                id: format!(
+                    "context-compaction/{}/{}",
+                    next.run_id,
+                    next.history.steps.len()
+                ),
+                run_id: next.run_id,
+                node_invocation_id: None,
+                sequence: 0,
+                attempt: 1,
+                name: CONTEXT_COMPACTION_STEP.into(),
+                model: None,
+                status,
+                usage: None,
+                started_at_ms: now,
+                finished_at_ms: None,
+            });
+        } else {
+            return Ok(());
+        }
+        *current = self
+            .store
+            .commit(&self.lease, current.revision, next)
+            .await?;
+        Ok(())
+    }
     async fn model_attempt(
         &self,
         step: HistoryStep,
@@ -1675,15 +1946,21 @@ impl HistoryCommitter for WorkflowBudgetJournal {
                 .iter()
                 .any(|t| t.id == call.invocation_id)
             {
+                // Gateway envelopes record the inner tool for durable history;
+                // the update path rewrites tool_id from the execution anyway.
+                let presented = presented_call(&call);
+                let call = presented.as_ref().unwrap_or(&call);
                 next.history.tool_invocations.push(HistoryToolInvocation {
+                    batch_revision: None,
+                    batch: None,
                     id: call.invocation_id,
                     run_id: step.run_id,
                     step_id: step.id.clone(),
                     message_id: message.id.clone(),
-                    call_id: call.id,
+                    call_id: call.id.clone(),
                     tool_id: call.call_name.clone(),
-                    tool_name: call.call_name,
-                    arguments: call.arguments,
+                    tool_name: call.call_name.clone(),
+                    arguments: call.arguments.clone(),
                     status: HistoryStatus::Planned,
                     content: Vec::new(),
                     structured: None,

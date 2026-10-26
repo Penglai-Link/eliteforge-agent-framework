@@ -222,7 +222,7 @@ impl ContextPreparationPolicy for Preparation {
     }
 }
 #[tokio::test]
-async fn skills_compose_once_into_builtin_instructions_with_custom_preparation() {
+async fn skills_guidance_and_dynamic_catalog_use_separate_blocks_with_custom_preparation() {
     let directory = tempfile::tempdir().unwrap();
     let skill = directory.path().join("review");
     std::fs::create_dir(&skill).unwrap();
@@ -247,13 +247,12 @@ async fn skills_compose_once_into_builtin_instructions_with_custom_preparation()
         .await
         .unwrap();
     let mut request = RunRequest::new("skills-once", "question");
-    request.extensions.insert(ManagedDeveloperPrompts(std::collections::BTreeMap::from([
-        ("skills.guidance".into(), "managed skill rule".into()),
-    ])));
-    agent
-        .run(request)
-        .await
-        .unwrap();
+    request
+        .extensions
+        .insert(ManagedDeveloperPrompts(std::collections::BTreeMap::from([
+            ("skills.guidance".into(), "managed skill rule".into()),
+        ])));
+    agent.run(request).await.unwrap();
     assert!(agent.framework().close().await.is_success());
     let requests = capture.0.lock().unwrap();
     let text = requests[0]
@@ -265,21 +264,29 @@ async fn skills_compose_once_into_builtin_instructions_with_custom_preparation()
     assert_eq!(text.matches("<available_skills>").count(), 1);
     assert!(text.contains("managed skill rule"));
     assert!(!text.contains("PRIVATE_LOADED_INSTRUCTION_SENTINEL"));
-    let catalog_index = requests[0].messages.iter().position(|message|
-        message.content.text().contains("<available_skills>"))
+    let catalog_index = requests[0]
+        .messages
+        .iter()
+        .position(|message| message.content.text().contains("<available_skills>"))
         .expect("skill catalog message");
     assert_eq!(requests[0].messages[catalog_index].role, Role::User);
     assert_eq!(requests[0].messages[catalog_index].instruction_origin, None);
-    assert_eq!(requests[0].messages[catalog_index - 1].role, Role::System);
-    assert_eq!(requests[0].messages[catalog_index - 1].instruction_origin,
-        Some(InstructionOrigin::Plugin));
+    assert_eq!(
+        requests[0].messages[catalog_index - 1].content.text(),
+        "question"
+    );
+    assert_eq!(requests[0].messages[0].role, Role::System);
+    assert_eq!(
+        requests[0].messages[0].instruction_origin,
+        Some(InstructionOrigin::Plugin)
+    );
     let reports = reports.0.lock().unwrap();
-    assert_eq!(reports[0].blocks.len(), 2);
+    assert_eq!(reports[0].blocks.len(), 3);
     assert!(
         reports[0].blocks[0]
             .sources
             .iter()
-            .any(|source| source.id == "skills.catalog")
+            .any(|source| source.id == "skills.guidance")
     );
 }
 

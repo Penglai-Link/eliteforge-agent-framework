@@ -60,6 +60,51 @@ pub struct TelemetryTraceFilter {
     pub trace_id: Option<String>,
     pub attributes: BTreeMap<String, String>,
 }
+/// Match each attribute in either the resource or the OTLP point attribute list.
+#[derive(Clone, Debug, Default)]
+pub struct TelemetryMetricFilter {
+    pub name: Option<String>,
+    pub attributes: BTreeMap<String, String>,
+}
+impl From<Option<String>> for TelemetryMetricFilter {
+    fn from(name: Option<String>) -> Self {
+        Self {
+            name,
+            ..Default::default()
+        }
+    }
+}
+/// Generic trace predicates. Hosts supply their classification semantics.
+#[derive(Clone, Debug)]
+pub enum TelemetryTracePredicate {
+    Attribute { key: String, value: String },
+    StatusCode(i32),
+    HasEnded(bool),
+    Abandoned(bool),
+    All(Vec<Self>),
+    Any(Vec<Self>),
+    Not(Box<Self>),
+}
+#[derive(Clone, Debug)]
+pub struct TelemetryBucketQuery {
+    pub start: i64,
+    pub end: i64,
+    pub width_ms: i64,
+}
+#[derive(Clone, Debug, Default)]
+pub struct TelemetryTraceStatistics {
+    pub total: usize,
+    pub classified: BTreeMap<String, usize>,
+    pub average_duration_ms: f64,
+    pub p95_duration_ms: f64,
+    pub buckets: Vec<TelemetryTraceBucket>,
+}
+#[derive(Clone, Debug)]
+pub struct TelemetryTraceBucket {
+    pub started_at: i64,
+    pub total: usize,
+    pub classified: BTreeMap<String, usize>,
+}
 #[derive(Clone, Debug)]
 pub struct TelemetryPage<T> {
     pub total: usize,
@@ -102,7 +147,22 @@ pub trait TelemetryStore: Send + Sync {
         offset: usize,
         limit: usize,
     ) -> Result<TelemetryPage<TelemetryTrace>, TelemetryError>;
+    /// Bounded batch read. Ordering is trace id, start timestamp, span id; missing traces contribute no rows.
+    async fn query_spans(
+        &self,
+        trace_ids: Vec<String>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<TelemetryPage<TelemetrySpan>, TelemetryError>;
+    /// Aggregate in storage without materializing every trace in the caller.
+    async fn aggregate_traces(
+        &self,
+        filter: TelemetryTraceFilter,
+        classifications: BTreeMap<String, TelemetryTracePredicate>,
+        buckets: Option<TelemetryBucketQuery>,
+    ) -> Result<TelemetryTraceStatistics, TelemetryError>;
     async fn spans(&self, trace_id: String) -> Result<Vec<TelemetrySpan>, TelemetryError>;
+    /// Up to 128 attributes in a single query.
     /// Sum requested numeric span attributes; the caller supplies semantic attribute names.
     async fn sum_span_attributes(
         &self,
@@ -112,7 +172,7 @@ pub trait TelemetryStore: Send + Sync {
     ) -> Result<BTreeMap<String, u64>, TelemetryError>;
     async fn metric_points(
         &self,
-        name: Option<String>,
+        filter: TelemetryMetricFilter,
         offset: usize,
         limit: usize,
     ) -> Result<TelemetryPage<TelemetryMetricPoint>, TelemetryError>;

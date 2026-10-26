@@ -16,6 +16,7 @@ const SUMMARY_PROMPT: &str = include_str!("../prompts/context-summary.txt");
 pub struct CompressionOptions {
     /// Hard input cap in the summary connection's token estimate.
     pub max_input_tokens: usize,
+    /// Independent UTF-8 storage/safety cap; never interpreted as a token budget.
     pub max_summary_bytes: usize,
     pub max_model_calls: usize,
 }
@@ -104,22 +105,78 @@ impl ModelCompressor {
                 compression: None,
             },
             false,
+            None,
         )
         .await
+        .map(HistoryProjection::into_messages)
     }
     async fn project(
         &self,
         input: &ContextReductionInput<'_>,
         persistent: bool,
-    ) -> Result<Vec<Message>, AgentError> {
+        split: Option<(ContextBudget, usize)>,
+    ) -> Result<HistoryProjection, AgentError> {
         let messages = &input.block.messages;
         let budget = input.budget;
         let context = input.run;
         validate_messages(messages).map_err(ContextError::from)?;
         context.check_cancelled()?;
+        if persistent && input.compression.is_none() && input.overflow_recoveries == 0 {
+            if let Some(projection) = self.load_projection(input, split).await? {
+                return Ok(projection);
+            }
+        }
         let fits = messages.len() <= budget.max_messages
             && context_tokens(messages, input.model, input.estimator).await? <= budget.max_tokens;
-        let newest = messages.iter().rposition(|m| m.role == Role::User);
+        let users = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == Role::User)
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        let mut newest = if let Some((_, turns)) = split {
+            // Maintenance requests and failed prompts may have no assistant
+            // response. They stay in the raw suffix, but must not evict the
+            // most recent actual conversation/tool turn from retention.
+            let completed: Vec<_> = users
+                .iter()
+                .enumerate()
+                .filter_map(|(position, start)| {
+                    let end = users.get(position + 1).copied().unwrap_or(messages.len());
+                    (position + 1 == users.len()
+                        || messages[*start..end]
+                            .iter()
+                            .any(|m| m.role == Role::Assistant))
+                    .then_some(*start)
+                })
+                .collect();
+            completed
+                .get(completed.len().saturating_sub(turns))
+                .copied()
+        } else {
+            users.last().copied()
+        };
+        // Retain whole recent turns; if necessary drop the oldest retained turn,
+        // never the current turn or a tool result by itself.
+        if split.is_some() {
+            while let Some(start) = newest {
+                let mut retained = messages[..start]
+                    .iter()
+                    .filter(|m| m.role == Role::System)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                retained.extend_from_slice(&messages[start..]);
+                if context_tokens(&retained, input.model, input.estimator).await?
+                    <= budget.max_tokens
+                {
+                    break;
+                }
+                let Some(next) = users.iter().copied().find(|index| *index > start) else {
+                    break;
+                };
+                newest = Some(next);
+            }
+        }
         let has_completed_turn =
             newest.is_some_and(|index| messages[..index].iter().any(|m| m.role == Role::User));
         // Proactive pressure cannot shrink the protected current turn. Keep a
@@ -127,9 +184,13 @@ impl ModelCompressor {
         // overflow and configured hard limits still require reduction or fail.
         if fits
             && input.overflow_recoveries == 0
-            && (input.compression.is_none() || !has_completed_turn)
+            && (!has_completed_turn
+                || (input.compression.is_none() && (!persistent || self.store.is_none())))
         {
-            return Ok(messages.clone());
+            return Ok(HistoryProjection {
+                summary: vec![],
+                recent: messages.clone(),
+            });
         }
         let newest =
             newest.ok_or_else(|| budget_error("history has no removable completed user turn"))?;
@@ -138,7 +199,6 @@ impl ModelCompressor {
             .filter(|m| m.role == Role::System)
             .cloned()
             .collect();
-        let prefix_len = preserved.len();
         preserved.extend_from_slice(&messages[newest..]);
         let reserved = context_tokens(&preserved, input.model, input.estimator)
             .await?
@@ -148,24 +208,57 @@ impl ModelCompressor {
                     .message(input.model, &Message::user(SUMMARY_LABEL))
                     .await?,
             );
-        if preserved.len().saturating_add(1) > budget.max_messages || reserved >= budget.max_tokens
+        if preserved.len().saturating_add(usize::from(split.is_none())) > budget.max_messages
+            || (if split.is_some() {
+                context_tokens(&preserved, input.model, input.estimator).await? > budget.max_tokens
+            } else {
+                reserved >= budget.max_tokens
+            })
         {
+            if fits && input.compression.is_none() {
+                return Ok(HistoryProjection {
+                    summary: vec![],
+                    recent: messages.clone(),
+                });
+            }
             return Err(budget_error(
                 "trusted instructions and newest complete turn leave no summary capacity",
             ));
         }
-        let summary_bytes = self.options.max_summary_bytes.min(
+        let summary_tokens = if let Some((summary_budget, _)) = split {
+            let label = input
+                .estimator
+                .message(input.model, &Message::user(SUMMARY_LABEL))
+                .await?;
+            input
+                .compression
+                .map_or(summary_budget.max_tokens, |d| {
+                    d.target_tokens.min(summary_budget.max_tokens)
+                })
+                .checked_sub(label)
+                .ok_or_else(|| budget_error("summary block leaves no content capacity"))?
+        } else {
             input
                 .compression
                 .map_or(budget.max_tokens, |d| {
                     d.target_tokens.min(budget.max_tokens)
                 })
                 .saturating_sub(reserved)
-                .max(1),
-        ) / input.overflow_recoveries.saturating_add(1);
-        if summary_bytes == 0 {
+                .max(1)
+                / input.overflow_recoveries.saturating_add(1)
+        };
+        // A token-budget-derived byte guard scales with the summary block. It is
+        // deliberately generous; the actual target-model tokenizer admits text.
+        let summary_bytes = split.map_or(self.options.max_summary_bytes, |(budget, _)| {
+            summary_byte_guard(budget.max_tokens)
+        });
+        if summary_tokens == 0 {
             return Err(budget_error("no summary capacity remains"));
         }
+        let label_tokens = input
+            .estimator
+            .message(input.model, &Message::user(SUMMARY_LABEL))
+            .await?;
         let cache_key = if persistent && self.store.is_some() {
             if messages != &input.history.messages {
                 return Err(ContextError::Other(
@@ -179,9 +272,7 @@ impl ModelCompressor {
                 generation: input.history.generation.clone(),
                 block_id: input.block.id.clone(),
                 policy_version: self.policy_version.clone(),
-                configuration_digest: fingerprint(
-                    &json!({"algorithm": "model-compressor-v2", "policy": self.policy_version, "summary_model": self.model, "target_model": input.model, "options": self.options, "tokens": budget.max_tokens, "messages": budget.max_messages, "overflow_recoveries": input.overflow_recoveries, "compression": input.compression}),
-                )?,
+                configuration_digest: self.projection_digest(input.model, split)?,
             })
         } else {
             None
@@ -202,9 +293,44 @@ impl ModelCompressor {
                 && record.value.summary.len() <= summary_bytes
                 && record.value.source_digest == fingerprint(&messages[..count])?
             {
-                covered = count;
-                summary = record.value.summary.clone();
+                let tokens = input
+                    .estimator
+                    .message(
+                        input.model,
+                        &Message::user(format!("{SUMMARY_LABEL}{}", record.value.summary)),
+                    )
+                    .await?
+                    .saturating_sub(label_tokens);
+                if tokens <= summary_tokens {
+                    covered = count;
+                    summary = record.value.summary.clone();
+                }
             }
+        }
+        if fits && input.compression.is_none() && input.overflow_recoveries == 0 {
+            if covered == 0 {
+                return Ok(HistoryProjection {
+                    summary: vec![],
+                    recent: messages.clone(),
+                });
+            }
+            let mut recent: Vec<_> = messages[..covered]
+                .iter()
+                .filter(|m| m.role == Role::System)
+                .cloned()
+                .collect();
+            recent.extend_from_slice(&messages[covered..]);
+            let projection = HistoryProjection {
+                summary: vec![Message::user(format!("{SUMMARY_LABEL}{summary}"))],
+                recent,
+            };
+            if self.projection_fits(&projection, input, split).await? {
+                return Ok(projection);
+            }
+            return Ok(HistoryProjection {
+                summary: vec![],
+                recent: messages.clone(),
+            });
         }
         let turns = history_turns(&messages[covered..newest]);
         if turns.is_empty() && summary.is_empty() {
@@ -238,12 +364,19 @@ impl ModelCompressor {
                 let candidate = summary_request(
                     &summary,
                     &turns[cursor..=end],
-                    summary_bytes,
+                    SummaryBudget::new(summary_tokens, summary_bytes),
+                    None,
                     context,
                     &summary_limits,
                 )?;
                 let capacity = descriptor.input_capacity(&summary_limits, &candidate.options)?;
-                if estimator.request(&self.model, &candidate).await? > capacity {
+                let cost = estimator.request(&self.model, &candidate).await?;
+                if cost > capacity {
+                    break;
+                }
+                // Reserve feedback space when packing additional turns, without
+                // rejecting a complete turn that already fits on its own.
+                if end > cursor && cost.saturating_add((capacity / 8).min(512)) > capacity {
                     break;
                 }
                 end += 1;
@@ -253,35 +386,131 @@ impl ModelCompressor {
                     "one complete historical turn exceeds the summary-model input limit; configure a larger context or offload tool output",
                 ));
             }
-            let request = summary_request(
-                &summary,
-                &turns[cursor..end],
-                summary_bytes,
-                context,
-                &summary_limits,
-            )?;
-            let response = tokio::select! {
-                biased;
-                _ = context.cancelled() => return Err(AgentError::Cancelled),
-                response = input.models.invoke_auxiliary(&self.model, request, "context_compression", &summary_limits, context) => response?,
-            };
-            summary = parse_summary(response, summary_bytes)?;
+            let mut previous_attempt = None;
+            let mut summary_budget = SummaryBudget::new(summary_tokens, summary_bytes);
+            for attempt in 0..3 {
+                context.check_cancelled()?;
+                if calls >= self.options.max_model_calls {
+                    return Err(budget_error(
+                        "history exceeds configured summary-call limit",
+                    ));
+                }
+                let mut request = summary_request(
+                    &summary,
+                    &turns[cursor..end],
+                    summary_budget,
+                    previous_attempt.as_ref(),
+                    context,
+                    &summary_limits,
+                )?;
+                let capacity = descriptor.input_capacity(&summary_limits, &request.options)?;
+                if estimator.request(&self.model, &request).await? > capacity {
+                    // A very large draft need not be echoed back. Regenerate from
+                    // the unchanged evidence with measured feedback instead.
+                    if let Some(feedback) = previous_attempt.as_mut() {
+                        feedback
+                            .as_object_mut()
+                            .expect("framework retry metadata")
+                            .remove("summary");
+                        request = summary_request(
+                            &summary,
+                            &turns[cursor..end],
+                            summary_budget,
+                            Some(feedback),
+                            context,
+                            &summary_limits,
+                        )?;
+                    }
+                    if estimator.request(&self.model, &request).await? > capacity {
+                        return Err(budget_error(
+                            "summary retry exceeds the summary-model input limit",
+                        ));
+                    }
+                }
+                let response = tokio::select! {
+                    biased;
+                    _ = context.cancelled() => return Err(AgentError::Cancelled),
+                    response = input.models.invoke_auxiliary(&self.model, request, "context_compression", &summary_limits, context) => response,
+                };
+                calls += 1;
+                let candidate = match response {
+                    Ok(response) => parse_summary(response)?,
+                    Err(error)
+                        if matches!(
+                            error.primary(),
+                            AgentError::Model(ModelError::InvalidOutput(_))
+                        ) && attempt < 2 =>
+                    {
+                        // A known malformed structured result is safe to regenerate:
+                        // auxiliary summaries have no tools or external effects.
+                        // Keep strict schema validation and never persist the draft.
+                        previous_attempt = Some(
+                            json!({"format_error":"The previous response was not valid structured JSON. Return exactly one JSON object with one nonempty string field named summary; no markdown fences or prose outside it.", "instruction":"Regenerate from the unchanged original history and obey both limits."}),
+                        );
+                        summary_budget.target_characters =
+                            (summary_budget.target_characters * 3 / 4).max(1);
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                let actual_tokens = input
+                    .estimator
+                    .message(
+                        input.model,
+                        &Message::user(format!("{SUMMARY_LABEL}{candidate}")),
+                    )
+                    .await?
+                    .saturating_sub(label_tokens);
+                if candidate.len() <= summary_bytes && actual_tokens <= summary_tokens {
+                    summary = candidate;
+                    break;
+                }
+                if attempt == 2 {
+                    return Err(budget_error(
+                        "summary remains over its token or UTF-8 byte budget after 3 attempts",
+                    ));
+                }
+                // Measured feedback narrows the next request. Do not truncate facts
+                // or publish a partial summary if retries cannot satisfy both caps.
+                summary_budget.target_characters = summary_budget
+                    .target_characters
+                    .min(
+                        candidate
+                            .chars()
+                            .count()
+                            .saturating_mul(summary_tokens)
+                            .checked_div(actual_tokens.max(1))
+                            .unwrap_or(0),
+                    )
+                    .min(
+                        candidate
+                            .chars()
+                            .count()
+                            .saturating_mul(summary_bytes)
+                            .checked_div(candidate.len().max(1))
+                            .unwrap_or(0),
+                    )
+                    .saturating_mul(3)
+                    .checked_div(4)
+                    .unwrap_or(0)
+                    .max(1);
+                previous_attempt = Some(json!({
+                    "summary": candidate,
+                    "actual_tokens": actual_tokens,
+                    "actual_utf8_bytes": candidate.len(),
+                    "instruction": "Compress this overlong draft again using the original history as evidence. Obey both independent limits and the reduced character target."
+                }));
+            }
             cursor = end;
-            calls += 1;
         }
-        preserved.insert(
-            prefix_len,
-            Message::user(format!("{SUMMARY_LABEL}{summary}")),
-        );
-        validate_messages(&preserved).map_err(ContextError::from)?;
-        if (preserved.len() > budget.max_messages
-            || context_tokens(&preserved, input.model, input.estimator).await? > budget.max_tokens)
-            || (context_tokens(&preserved, input.model, input.estimator).await?
-                >= context_tokens(messages, input.model, input.estimator).await?
-                && preserved.len() >= messages.len())
-        {
+        let projected = HistoryProjection {
+            summary: vec![Message::user(format!("{SUMMARY_LABEL}{summary}"))],
+            recent: preserved,
+        };
+        validate_messages(&projected.clone().into_messages()).map_err(ContextError::from)?;
+        if !self.projection_fits(&projected, input, split).await? {
             return Err(budget_error(
-                "generated summary does not reduce the projection within budget",
+                "generated summary does not fit the independent history and summary quotas",
             ));
         }
         context.check_cancelled()?;
@@ -301,15 +530,142 @@ impl ModelCompressor {
                 .compare_exchange(key, loaded.as_ref().map(|r| r.version.as_str()), &record)
                 .await?;
         }
-        Ok(preserved)
+        Ok(projected)
+    }
+
+    fn configuration_digest(&self, target_model: &ModelRef) -> Result<String, ContextError> {
+        fingerprint(
+            &json!({"algorithm":"model-compressor-v7", "policy":self.policy_version,
+            "summary_model":self.model, "target_model":target_model, "options":self.options}),
+        )
     }
 }
 #[async_trait]
 impl ContextReducer for ModelCompressor {
+    async fn project_history(
+        &self,
+        input: &ContextReductionInput<'_>,
+        summary_budget: ContextBudget,
+        recent_turns: usize,
+        cached_only: bool,
+    ) -> Result<Option<HistoryProjection>, AgentError> {
+        let split = Some((summary_budget, recent_turns));
+        if cached_only {
+            self.load_projection(input, split).await
+        } else {
+            self.project(input, true, split).await.map(Some)
+        }
+    }
+    async fn cached_projection(
+        &self,
+        input: &ContextReductionInput<'_>,
+    ) -> Result<Option<Vec<Message>>, AgentError> {
+        Ok(self
+            .load_projection(input, None)
+            .await?
+            .map(HistoryProjection::into_messages))
+    }
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
-        self.project(input, true).await
+        self.project(input, true, None)
+            .await
+            .map(HistoryProjection::into_messages)
     }
 }
+impl ModelCompressor {
+    fn projection_digest(
+        &self,
+        model: &ModelRef,
+        split: Option<(ContextBudget, usize)>,
+    ) -> Result<String, ContextError> {
+        fingerprint(&(
+            self.configuration_digest(model)?,
+            split.map(|(budget, turns)| (budget.max_tokens, budget.max_messages, turns)),
+        ))
+    }
+    async fn projection_fits(
+        &self,
+        projected: &HistoryProjection,
+        input: &ContextReductionInput<'_>,
+        split: Option<(ContextBudget, usize)>,
+    ) -> Result<bool, AgentError> {
+        if let Some((summary, _)) = split {
+            Ok(projected.summary.len() <= summary.max_messages
+                && projected.recent.len() <= input.budget.max_messages
+                && context_tokens(&projected.summary, input.model, input.estimator).await?
+                    <= summary.max_tokens
+                && context_tokens(&projected.recent, input.model, input.estimator).await?
+                    <= input.budget.max_tokens)
+        } else {
+            let messages = projected.clone().into_messages();
+            Ok(messages.len() <= input.budget.max_messages
+                && context_tokens(&messages, input.model, input.estimator).await?
+                    <= input.budget.max_tokens)
+        }
+    }
+    async fn load_projection(
+        &self,
+        input: &ContextReductionInput<'_>,
+        split: Option<(ContextBudget, usize)>,
+    ) -> Result<Option<HistoryProjection>, AgentError> {
+        let Some(store) = &self.store else {
+            return Ok(None);
+        };
+        let messages = &input.block.messages;
+        if messages != &input.history.messages {
+            return Ok(None);
+        }
+        let Some(newest) = messages.iter().rposition(|m| m.role == Role::User) else {
+            return Ok(None);
+        };
+        let key = crate::SummaryKey {
+            conversation: input.history.key.clone(),
+            generation: input.history.generation.clone(),
+            block_id: input.block.id.clone(),
+            policy_version: self.policy_version.clone(),
+            configuration_digest: self.projection_digest(input.model, split)?,
+        };
+        let Some(record) = store.load(&key).await? else {
+            return Ok(None);
+        };
+        let count = usize::try_from(record.value.covered_messages).unwrap_or(usize::MAX);
+        let max_bytes = split.map_or(self.options.max_summary_bytes, |(budget, _)| {
+            summary_byte_guard(budget.max_tokens)
+        });
+        if record.value.format_version != 1
+            || count == 0
+            || count > newest
+            || messages[count].role != Role::User
+            || record.value.source_revision > input.history.revision
+            || record.value.summary.len() > max_bytes
+            || record.value.source_digest != fingerprint(&messages[..count])?
+        {
+            return Ok(None);
+        }
+        let mut recent: Vec<_> = messages[..count]
+            .iter()
+            .filter(|m| m.role == Role::System)
+            .cloned()
+            .collect();
+        recent.extend_from_slice(&messages[count..]);
+        let projection = HistoryProjection {
+            summary: vec![Message::user(format!(
+                "{SUMMARY_LABEL}{}",
+                record.value.summary
+            ))],
+            recent,
+        };
+        validate_messages(&projection.clone().into_messages()).map_err(ContextError::from)?;
+        if !self.projection_fits(&projection, input, split).await? {
+            return Ok(None);
+        }
+        Ok(Some(projection))
+    }
+}
+/// A framing guard derived from token capacity, not a fixed summary quota.
+pub fn summary_byte_guard(tokens: usize) -> usize {
+    tokens.saturating_mul(16).max(1024)
+}
+
 fn budget_error(message: &str) -> AgentError {
     ContextError::BudgetExceeded(message.into()).into()
 }
@@ -373,20 +729,52 @@ fn history_turns(messages: &[Message]) -> Vec<Value> {
     turns
 }
 
+#[derive(Clone, Copy)]
+struct SummaryBudget {
+    max_tokens: usize,
+    max_bytes: usize,
+    target_characters: usize,
+}
+impl SummaryBudget {
+    fn new(max_tokens: usize, max_bytes: usize) -> Self {
+        Self {
+            max_tokens,
+            max_bytes,
+            // Advisory, with headroom for CJK tokenization and UTF-8 width.
+            // Admission still uses the target connection's token estimator.
+            target_characters: (max_tokens / 2)
+                .min(max_bytes / 4)
+                .saturating_mul(4)
+                .checked_div(5)
+                .unwrap_or(0)
+                .max(1),
+        }
+    }
+}
+
 fn summary_request(
     previous: &str,
     history: &[Value],
-    max_bytes: usize,
+    budget: SummaryBudget,
+    retry: Option<&Value>,
     context: &RunContext,
     limits: &RunLimits,
 ) -> Result<ChatRequest, AgentError> {
     Ok(ChatRequest {
         messages: vec![
-            Message::system(ManagedDeveloperPrompts::resolve(context, "memory.context-summary", SUMMARY_PROMPT.trim())?)
-                .with_instruction_origin(InstructionOrigin::Plugin),
+            Message::system(ManagedDeveloperPrompts::resolve(
+                context,
+                "memory.context-summary",
+                SUMMARY_PROMPT.trim(),
+            )?)
+            .with_instruction_origin(InstructionOrigin::Plugin),
             Message::user(Content(vec![ContentBlock::Json {
                 value: json!({
-                    "previous_summary": previous, "history": history, "summary_max_utf8_bytes": max_bytes,
+                    "previous_summary": previous, "history": history,
+                    "summary_max_tokens": budget.max_tokens,
+                    "summary_max_utf8_bytes": budget.max_bytes,
+                    "summary_target_characters": budget.target_characters,
+                    "overlong_draft": retry,
                 }),
             }])),
         ],
@@ -395,13 +783,9 @@ fn summary_request(
         options: GenerationOptions {
             temperature: Some(0.0),
             top_p: Some(1.0),
-            // Bytes conservatively bound tokens; validation below enforces bytes
-            // regardless of tokenization or provider conformance.
-            max_output_tokens: Some(
-                max_bytes
-                    .saturating_add(32)
-                    .min(limits.max_model_output_tokens as usize) as u32,
-            ),
+            // The configured generation budget also covers provider reasoning.
+            // Summary bytes are independently enforced after parsing the JSON.
+            max_output_tokens: Some(limits.max_model_output_tokens),
             output_schema: Some(OutputSchema {
                 name: "conversation_summary".into(),
                 schema: json!({
@@ -420,7 +804,7 @@ struct SummaryResponse {
     summary: String,
 }
 
-fn parse_summary(response: ChatResponse, max_bytes: usize) -> Result<String, ContextError> {
+fn parse_summary(response: ChatResponse) -> Result<String, ContextError> {
     if !response.tool_calls.is_empty() {
         return Err(ContextError::Other(
             "summary model unexpectedly requested tools".into(),
@@ -453,11 +837,6 @@ fn parse_summary(response: ChatResponse, max_bytes: usize) -> Result<String, Con
     if result.summary.trim().is_empty() {
         return Err(ContextError::Other(
             "summary model returned an empty summary".into(),
-        ));
-    }
-    if result.summary.len() > max_bytes {
-        return Err(ContextError::BudgetExceeded(
-            "summary model exceeded requested UTF-8 byte budget".into(),
         ));
     }
     Ok(result.summary)

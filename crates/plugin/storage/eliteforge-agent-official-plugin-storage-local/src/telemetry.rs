@@ -1,7 +1,8 @@
 //! Dedicated telemetry storage plugin using the shared SQLite runtime.
+mod aggregate;
+mod query;
 #[path = "telemetry_rollups.rs"]
 mod rollups;
-mod query;
 use crate::SqliteDatabase;
 use async_trait::async_trait;
 use eliteforge_agent_core::*;
@@ -44,11 +45,23 @@ impl SqliteTelemetryStore {
         retention: TelemetryRetention,
     ) -> Result<Self, TelemetryError> {
         retention.validate()?;
-        database.call(|c|->rusqlite::Result<()> {c.execute_batch("CREATE TABLE IF NOT EXISTS ef_telemetry_traces (trace_id TEXT PRIMARY KEY,started_at INTEGER NOT NULL,ended_at INTEGER,status_code INTEGER NOT NULL,attributes TEXT NOT NULL,abandoned INTEGER NOT NULL DEFAULT 0);
-        CREATE INDEX IF NOT EXISTS ef_telemetry_traces_time ON ef_telemetry_traces(started_at DESC);
+        database.call(|c|->rusqlite::Result<()> {
+        let had_span_attributes:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ef_telemetry_span_attributes')",[],|r|r.get(0))?;
+        let had_trace_attributes:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ef_telemetry_trace_attributes')",[],|r|r.get(0))?;
+        let had_attributes:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ef_telemetry_metric_attributes')",[],|r|r.get(0))?;
+        c.execute_batch("CREATE TABLE IF NOT EXISTS ef_telemetry_traces (trace_id TEXT PRIMARY KEY,started_at INTEGER NOT NULL,ended_at INTEGER,status_code INTEGER NOT NULL,attributes TEXT NOT NULL,abandoned INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS ef_telemetry_trace_attributes(trace_id TEXT NOT NULL REFERENCES ef_telemetry_traces(trace_id) ON DELETE CASCADE,attribute TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(attribute,value,trace_id));
+        CREATE INDEX IF NOT EXISTS ef_telemetry_trace_attribute_trace ON ef_telemetry_trace_attributes(trace_id);
+        CREATE TRIGGER IF NOT EXISTS ef_telemetry_trace_attribute_insert AFTER INSERT ON ef_telemetry_traces BEGIN INSERT OR IGNORE INTO ef_telemetry_trace_attributes SELECT NEW.trace_id,key,value FROM json_each(NEW.attributes) WHERE type='text'; END;
+        CREATE TRIGGER IF NOT EXISTS ef_telemetry_trace_attribute_update AFTER UPDATE OF attributes ON ef_telemetry_traces BEGIN DELETE FROM ef_telemetry_trace_attributes WHERE trace_id=NEW.trace_id; INSERT OR IGNORE INTO ef_telemetry_trace_attributes SELECT NEW.trace_id,key,value FROM json_each(NEW.attributes) WHERE type='text'; END;
+        CREATE INDEX IF NOT EXISTS ef_telemetry_traces_time ON ef_telemetry_traces(started_at DESC,trace_id DESC);
         CREATE INDEX IF NOT EXISTS ef_telemetry_traces_workspace_time ON ef_telemetry_traces(json_extract(attributes,'$.\"tron.workspace.code\"'),started_at DESC,trace_id DESC);
         CREATE INDEX IF NOT EXISTS ef_telemetry_traces_retention ON ef_telemetry_traces(COALESCE(ended_at,started_at) DESC,trace_id DESC) WHERE ended_at IS NOT NULL;
         CREATE TABLE IF NOT EXISTS ef_telemetry_spans(trace_id TEXT NOT NULL REFERENCES ef_telemetry_traces(trace_id) ON DELETE CASCADE,span_id TEXT NOT NULL,ended_at INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(trace_id,span_id));
+        CREATE TABLE IF NOT EXISTS ef_telemetry_span_attributes(trace_id TEXT NOT NULL,span_id TEXT NOT NULL,name TEXT NOT NULL,attribute TEXT NOT NULL,value REAL NOT NULL,PRIMARY KEY(trace_id,span_id,attribute),FOREIGN KEY(trace_id,span_id) REFERENCES ef_telemetry_spans(trace_id,span_id) ON DELETE CASCADE);
+        CREATE INDEX IF NOT EXISTS ef_telemetry_span_attribute_sum ON ef_telemetry_span_attributes(name,attribute,trace_id,value);
+        CREATE TRIGGER IF NOT EXISTS ef_telemetry_span_attribute_insert AFTER INSERT ON ef_telemetry_spans BEGIN INSERT INTO ef_telemetry_span_attributes SELECT NEW.trace_id,NEW.span_id,json_extract(NEW.data,'$.name'),key,CAST(value AS REAL) FROM json_each(NEW.data,'$.attributes'); END;
+        CREATE TRIGGER IF NOT EXISTS ef_telemetry_span_attribute_update AFTER UPDATE OF data ON ef_telemetry_spans BEGIN DELETE FROM ef_telemetry_span_attributes WHERE trace_id=NEW.trace_id AND span_id=NEW.span_id; INSERT INTO ef_telemetry_span_attributes SELECT NEW.trace_id,NEW.span_id,json_extract(NEW.data,'$.name'),key,CAST(value AS REAL) FROM json_each(NEW.data,'$.attributes'); END;
         CREATE INDEX IF NOT EXISTS ef_telemetry_spans_parent ON ef_telemetry_spans(trace_id,json_extract(data,'$.parentSpanId'),span_id);
         CREATE INDEX IF NOT EXISTS ef_telemetry_agent_roots_time ON ef_telemetry_spans(json_extract(data,'$.startedAt') DESC,trace_id,span_id) WHERE json_extract(data,'$.name') IN ('tron.session.run','tron.dude.execute');
         CREATE INDEX IF NOT EXISTS ef_telemetry_agent_roots_workspace ON ef_telemetry_spans(json_extract(data,'$.attributes.\"tron.workspace.code\"'),json_extract(data,'$.startedAt') DESC,trace_id,span_id) WHERE json_extract(data,'$.name') IN ('tron.session.run','tron.dude.execute');
@@ -57,9 +70,25 @@ impl SqliteTelemetryStore {
         CREATE TABLE IF NOT EXISTS ef_telemetry_span_rollups(trace_id TEXT NOT NULL REFERENCES ef_telemetry_traces(trace_id) ON DELETE CASCADE,span_id TEXT NOT NULL,parent_id TEXT,own_span_count INTEGER NOT NULL DEFAULT 0,own_error_count INTEGER NOT NULL DEFAULT 0,own_model_count INTEGER NOT NULL DEFAULT 0,own_tool_count INTEGER NOT NULL DEFAULT 0,own_input_tokens INTEGER NOT NULL DEFAULT 0,own_cached_input_tokens INTEGER NOT NULL DEFAULT 0,own_output_tokens INTEGER NOT NULL DEFAULT 0,span_count INTEGER NOT NULL DEFAULT 0,error_count INTEGER NOT NULL DEFAULT 0,model_count INTEGER NOT NULL DEFAULT 0,tool_count INTEGER NOT NULL DEFAULT 0,input_tokens INTEGER NOT NULL DEFAULT 0,cached_input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(trace_id,span_id));
         CREATE TABLE IF NOT EXISTS ef_telemetry_trace_rollups(trace_id TEXT PRIMARY KEY REFERENCES ef_telemetry_traces(trace_id) ON DELETE CASCADE,span_count INTEGER NOT NULL DEFAULT 0,error_count INTEGER NOT NULL DEFAULT 0,model_count INTEGER NOT NULL DEFAULT 0,tool_count INTEGER NOT NULL DEFAULT 0,input_tokens INTEGER NOT NULL DEFAULT 0,cached_input_tokens INTEGER NOT NULL DEFAULT 0,output_tokens INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS ef_telemetry_metric_points(point_id TEXT PRIMARY KEY,name TEXT NOT NULL,timestamp INTEGER NOT NULL,data TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS ef_telemetry_metric_time ON ef_telemetry_metric_points(timestamp DESC);
-        CREATE INDEX IF NOT EXISTS ef_telemetry_metric_name ON ef_telemetry_metric_points(name,timestamp DESC);
-        UPDATE ef_telemetry_traces SET abandoned=1,ended_at=COALESCE((SELECT MAX(ended_at) FROM ef_telemetry_spans s WHERE s.trace_id=ef_telemetry_traces.trace_id),started_at) WHERE ended_at IS NULL;")}).await.map_err(error)?;
+        CREATE INDEX IF NOT EXISTS ef_telemetry_spans_order ON ef_telemetry_spans(trace_id,json_extract(data,'$.startedAt'),span_id);
+        CREATE INDEX IF NOT EXISTS ef_telemetry_metric_time ON ef_telemetry_metric_points(timestamp DESC,point_id DESC);
+        CREATE INDEX IF NOT EXISTS ef_telemetry_metric_name ON ef_telemetry_metric_points(name,timestamp DESC,point_id DESC);
+        CREATE TABLE IF NOT EXISTS ef_telemetry_metric_attributes(point_id TEXT NOT NULL REFERENCES ef_telemetry_metric_points(point_id) ON DELETE CASCADE,attribute TEXT NOT NULL,value TEXT NOT NULL,name TEXT NOT NULL,timestamp INTEGER NOT NULL,PRIMARY KEY(attribute,value,point_id));
+        CREATE INDEX IF NOT EXISTS ef_telemetry_metric_attribute_page ON ef_telemetry_metric_attributes(attribute,value,name,timestamp DESC,point_id DESC);
+        CREATE INDEX IF NOT EXISTS ef_telemetry_metric_attribute_time ON ef_telemetry_metric_attributes(attribute,value,timestamp DESC,point_id DESC);
+        CREATE INDEX IF NOT EXISTS ef_telemetry_metric_attribute_point ON ef_telemetry_metric_attributes(point_id);
+        CREATE TRIGGER IF NOT EXISTS ef_telemetry_metric_attribute_insert AFTER INSERT ON ef_telemetry_metric_points BEGIN
+          INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT NEW.point_id,key,value,NEW.name,NEW.timestamp FROM json_each(NEW.data,'$.resource') WHERE type='text';
+          INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT NEW.point_id,json_extract(value,'$.key'),json_extract(value,'$.value.stringValue'),NEW.name,NEW.timestamp FROM json_each(NEW.data,'$.data.attributes') WHERE json_type(value,'$.value.stringValue')='text';
+        END;
+        UPDATE ef_telemetry_traces SET abandoned=1,ended_at=COALESCE((SELECT MAX(ended_at) FROM ef_telemetry_spans s WHERE s.trace_id=ef_telemetry_traces.trace_id),started_at) WHERE ended_at IS NULL;")?;
+        if !had_span_attributes {c.execute_batch("INSERT OR IGNORE INTO ef_telemetry_span_attributes SELECT s.trace_id,s.span_id,json_extract(s.data,'$.name'),a.key,CAST(a.value AS REAL) FROM ef_telemetry_spans s,json_each(s.data,'$.attributes') a;")?;}
+        if !had_trace_attributes {c.execute_batch("INSERT OR IGNORE INTO ef_telemetry_trace_attributes SELECT t.trace_id,a.key,a.value FROM ef_telemetry_traces t,json_each(t.attributes) a WHERE a.type='text';")?;}
+        if !had_attributes {
+            c.execute_batch("INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT p.point_id,a.key,a.value,p.name,p.timestamp FROM ef_telemetry_metric_points p,json_each(p.data,'$.resource') a WHERE a.type='text';
+            INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT p.point_id,json_extract(a.value,'$.key'),json_extract(a.value,'$.value.stringValue'),p.name,p.timestamp FROM ef_telemetry_metric_points p,json_each(p.data,'$.data.attributes') a WHERE json_type(a.value,'$.value.stringValue')='text';")?;
+        }
+        Ok(())}).await.map_err(error)?;
         database.call(rollups::backfill).await.map_err(error)?;
         let store = Self {
             database,
@@ -143,6 +172,22 @@ impl TelemetryStore for SqliteTelemetryStore {
     ) -> Result<TelemetryPage<TelemetryTrace>, TelemetryError> {
         query::traces(self, f, offset, limit).await
     }
+    async fn query_spans(
+        &self,
+        ids: Vec<String>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<TelemetryPage<TelemetrySpan>, TelemetryError> {
+        query::span_page(self, ids, offset, limit).await
+    }
+    async fn aggregate_traces(
+        &self,
+        filter: TelemetryTraceFilter,
+        classifications: std::collections::BTreeMap<String, TelemetryTracePredicate>,
+        buckets: Option<TelemetryBucketQuery>,
+    ) -> Result<TelemetryTraceStatistics, TelemetryError> {
+        aggregate::query(self, filter, classifications, buckets).await
+    }
     async fn spans(&self, id: String) -> Result<Vec<TelemetrySpan>, TelemetryError> {
         query::spans(self, id).await
     }
@@ -156,11 +201,11 @@ impl TelemetryStore for SqliteTelemetryStore {
     }
     async fn metric_points(
         &self,
-        name: Option<String>,
+        filter: TelemetryMetricFilter,
         offset: usize,
         limit: usize,
     ) -> Result<TelemetryPage<TelemetryMetricPoint>, TelemetryError> {
-        query::points(self, name, offset, limit).await
+        query::points(self, filter, offset, limit).await
     }
     async fn count_metric_points_by_attribute(
         &self,

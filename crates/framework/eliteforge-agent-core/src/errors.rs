@@ -133,6 +133,7 @@ impl ModelError {
             Self::State(_) => "state",
             Self::Transient(_) => "transient",
             Self::ContextOverflow(_) => "context_overflow",
+            Self::InvalidOutput(_) => "model_invalid_output",
             Self::Fatal(_) => "model_fatal",
         }
     }

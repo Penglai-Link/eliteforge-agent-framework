@@ -464,6 +464,10 @@ impl Adapter {
         if call.id.is_empty() || call.call_name.is_empty() {
             return Err("AGUI_INVALID_TOOL");
         }
+        // Gateway envelopes present the inner tool, not the wrapper: the
+        // human sees the real tool name and its actual arguments.
+        let presented = presented_call(call);
+        let call = presented.as_ref().unwrap_or(call);
         let mut start = ag_ui::ToolCallStartEvent::new(id, call.call_name.clone());
         start.parent_message_id = parent.map(Into::into);
         out.push(start.into());
@@ -509,7 +513,14 @@ impl Adapter {
                         };
                         let mut interrupt = ag_ui::Interrupt::new(request.id.to_string(), reason);
                         if let InteractionKind::Approval { invocation_id } = request.kind {
-                            interrupt.tool_call_id = Some(tool_id(invocation_id)?.into());
+                            let details = request.presentation.clone().and_then(|value| {
+                                serde_json::from_value::<ToolApprovalDetails>(value).ok()
+                            });
+                            let visible_id = details
+                                .as_ref()
+                                .and_then(|d| d.batch.as_ref())
+                                .map_or(invocation_id, |batch| batch.parent_invocation_id);
+                            interrupt.tool_call_id = Some(tool_id(visible_id)?.into());
                         }
                         interrupt.message = Some(request.prompt.text());
                         interrupt.response_schema = request.response_schema.as_object().cloned();

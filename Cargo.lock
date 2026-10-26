@@ -1063,6 +1063,7 @@ dependencies = [
  "eliteforge-agent-core",
  "eliteforge-agent-official-plugin-tools-mcp",
  "eliteforge-agent-plugin-core",
+ "eliteforge-agent-test-support",
  "fs2",
  "futures",
  "jsonschema",
@@ -1287,6 +1288,7 @@ dependencies = [
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
  "eliteforge-agent-official-plugin-storage-local",
+ "eliteforge-agent-official-plugin-tools-discovery",
  "eliteforge-agent-test-support",
  "futures",
  "serde",
@@ -1553,6 +1555,7 @@ dependencies = [
  "eliteforge-agent-official-plugin-storage-local",
  "serde_json",
  "tempfile",
+ "tokio",
  "uuid",
 ]
 

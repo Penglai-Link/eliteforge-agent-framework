@@ -1,15 +1,20 @@
-//! Defers model-visible schemas while preserving the original executors, leases
-//! and policy chain. Only explicitly supplied providers enter this catalog.
+//! Installs the stable two-tool gateway: `tool_search` discovers the wrapped
+//! inventory as plain output; `tool_execute` addresses any wrapped tool as
+//! arguments, and the execution loop unwraps envelopes at admission so wrapped
+//! tools keep their own schemas, policies, middleware and executors.
+//!
+//! With no explicit providers the plugin wraps the host's whole tool catalog
+//! (the execution loop re-mints the search binding with the complete leased
+//! inventory). With explicit providers the plugin additionally leases those
+//! providers' bindings as wrapped inventory. Provider `lease` still runs at
+//! run setup; schemas are discovered on demand. The model-visible tool list
+//! stays stable for the whole run, which preserves provider prompt caches.
 use std::{collections::BTreeSet, sync::Arc};
 
 use async_trait::async_trait;
 use eliteforge_agent_core::*;
-use serde::Deserialize;
-use serde_json::{Value, json};
 
 /// Wrap providers instead of installing the same providers a second time.
-/// Provider `lease` still runs at run setup; schemas are exposed on demand.
-/// This reduces model context, not provider connection/discovery cost.
 #[derive(Clone, Default)]
 pub struct ToolDiscoveryPlugin {
     providers: Vec<Arc<dyn ToolProvider>>,
@@ -48,9 +53,11 @@ impl Plugin for ToolDiscoveryPlugin {
 impl ToolProvider for ToolDiscoveryPlugin {
     async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError> {
         let mut tools = Vec::new();
-        let mut descriptors = Vec::new();
-        let mut ids = BTreeSet::from(["framework.tools.search".to_owned()]);
-        let mut names = BTreeSet::from(["tool_search".to_owned()]);
+        let mut ids = BTreeSet::from([TOOL_SEARCH_ID.to_owned(), TOOL_EXECUTE_ID.to_owned()]);
+        let mut names = BTreeSet::from([
+            TOOL_SEARCH_CALL_NAME.to_owned(),
+            TOOL_EXECUTE_CALL_NAME.to_owned(),
+        ]);
         let mut bytes = 0usize;
         if self.providers.len() > 64 {
             return Err(AgentError::ToolSetup(
@@ -61,7 +68,7 @@ impl ToolProvider for ToolDiscoveryPlugin {
             context.check_cancelled()?;
             let mut lease = provider.lease(context).await?;
             context.own_resources(std::mem::take(&mut lease.resources));
-            for mut binding in lease.tools {
+            for binding in lease.tools {
                 if !ids.insert(binding.descriptor.id.clone())
                     || !names.insert(binding.descriptor.call_name.clone())
                 {
@@ -79,82 +86,31 @@ impl ToolProvider for ToolDiscoveryPlugin {
                         "discovery catalog exceeds 1024 tools or 2 MiB of schemas".into(),
                     ));
                 }
-                // Already-hidden bindings remain private to their provider's own
-                // activation flow. The wrapper only defers originally exposed tools.
-                if binding.exposed {
-                    descriptors.push(binding.descriptor.clone());
-                }
-                binding.exposed = false;
                 tools.push(binding);
             }
         }
-        descriptors.sort_by(|a, b| a.id.cmp(&b.id));
-        tools.push(ToolBinding::new(ToolDescriptor::new("framework.tools.search", "tool_search",
-            "Find authorized tools by words in their ID, name or description. Returns full schemas and enables the matching tools for this run. Uses AND matching; choose a specific name to narrow results. Execution still requires normal tool policy checks.",
-            json!({"type":"object","additionalProperties":false,"required":["query"],"properties":{
-                "query":{"type":"string","minLength":1,"maxLength":512},
-                "limit":{"type":"integer","minimum":1,"maximum":20}
-            }})).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query), Search { descriptors }));
-        Ok(ToolLease::new(tools))
-    }
-}
-
-struct Search {
-    descriptors: Vec<ToolDescriptor>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SearchInput {
-    query: String,
-    limit: Option<usize>,
-}
-
-#[async_trait]
-impl Tool for Search {
-    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
-        let input: SearchInput =
-            serde_json::from_value(arguments).map_err(|e| ToolError::Failed(e.to_string()))?;
-        let terms: Vec<_> = input
-            .query
-            .split_whitespace()
-            .map(str::to_lowercase)
+        // Contribute the gateway pair. The execution loop re-mints the search
+        // binding with the complete leased inventory, so the fallback executor
+        // here only covers hosts that dispatch it without the loop's help.
+        let entries = tools
+            .iter()
+            .filter(|binding| binding.exposed)
+            .map(|binding| {
+                let entry = GatewayInventoryEntry::new(
+                    eliteforge_agent_core::batch_tool_descriptor(&binding.descriptor),
+                )
+                .with_summary_description(binding.descriptor.description.clone());
+                match &binding.domain_code {
+                    Some(code) => entry.with_domain_code(code.clone()),
+                    None => entry,
+                }
+            })
             .collect();
-        let limit = input.limit.unwrap_or(5);
-        if terms.is_empty() || input.query.len() > 2048 || !(1..=20).contains(&limit) {
-            return Err(ToolError::Failed("invalid query or limit".into()));
-        }
-        let mut selected = Vec::new();
-        let mut matches = 0usize;
-        let mut bytes = 0usize;
-        for descriptor in &self.descriptors {
-            if context.is_cancelled() {
-                return Err(ToolError::Failed("tool discovery cancelled".into()));
-            }
-            if context.is_tool_revoked(&descriptor.id) {
-                continue;
-            }
-            let haystack = format!(
-                "{} {} {}",
-                descriptor.id, descriptor.call_name, descriptor.description
-            )
-            .to_lowercase();
-            if !terms.iter().all(|term| haystack.contains(term)) {
-                continue;
-            }
-            matches += 1;
-            let size = serde_json::to_vec(descriptor)
-                .map_err(|e| ToolError::Failed(e.to_string()))?
-                .len();
-            if selected.len() < limit && bytes.saturating_add(size) <= 64 * 1024 {
-                bytes += size;
-                selected.push(descriptor.clone());
-            }
-        }
-        let ids = selected.iter().map(|d| d.id.clone()).collect();
-        let data = json!({"tools":selected,"matched":matches,"truncated":matches>selected.len()});
-        let mut output = ToolOutput::text(data.to_string()).expose_tools(ids);
-        output.structured = Some(data);
-        Ok(output)
+        tools.push(ToolBinding::new(
+            search_descriptor(),
+            GatewaySearch { entries },
+        ));
+        tools.push(ToolBinding::new(execute_descriptor(), GatewayExecute));
+        Ok(ToolLease::new(tools))
     }
 }

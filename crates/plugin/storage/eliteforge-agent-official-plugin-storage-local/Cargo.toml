@@ -32,6 +32,7 @@ tempfile = "3"
 sha2 = "0.10"
 
 [dev-dependencies]
+rusqlite = { version = "0.37", features = ["trace"] }
 eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
 eliteforge-agent-official-plugin-tools-human = { path = "../../tool/eliteforge-agent-official-plugin-tools-human" }
 eliteforge-agent-official-plugin-agui = { path = "../../protocol/eliteforge-agent-official-plugin-agui" }

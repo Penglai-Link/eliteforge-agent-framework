@@ -343,7 +343,9 @@ async fn block_and_global_pressure_coordinate_once_and_never_call_instruction_st
         let window = execute(fixture(
             assembler,
             Provider::default(),
-            vec![Message::system("trusted prefix")],
+            vec![
+                Message::system("trusted prefix").with_instruction_origin(InstructionOrigin::Agent),
+            ],
             false,
         ))
         .await

@@ -238,41 +238,20 @@ pub trait SessionLifecycleStore: Send + Sync {
         after: u64,
         limit: usize,
     ) -> Result<Vec<SessionEvent>, StateError>;
-    /// Kind-filtered listing. Storage adapters with a filterable event index
-    /// should push the filter into SQL; the default pages `list_events` and
-    /// filters in memory.
+    /// Kind-filtered bounded listing. Every adapter must filter in storage.
     async fn list_events_by_kind(
         &self,
         session: &str,
         kind: &str,
         after: u64,
         limit: usize,
-    ) -> Result<Vec<SessionEvent>, StateError> {
-        let mut result = Vec::new();
-        let mut cursor = after;
-        loop {
-            let page = self.list_events(session, cursor, limit).await?;
-            let last = page.last().map(|event| event.sequence);
-            let complete = page.len() < limit;
-            result.extend(page.into_iter().filter(|event| event.kind == kind));
-            match last {
-                Some(sequence) if !complete => cursor = sequence,
-                _ => break,
-            }
-        }
-        Ok(result)
-    }
-    /// Latest snapshot of one kind. Indexed stores should override this fallback.
-    async fn latest_event_by_kind(&self, session: &str, kind: &str) -> Result<Option<SessionEvent>, StateError> {
-        let mut cursor = 0;
-        let mut latest = None;
-        loop {
-            let page = self.list_events_by_kind(session, kind, cursor, 100).await?;
-            let Some(last) = page.last() else { return Ok(latest) };
-            cursor = last.sequence;
-            latest = page.into_iter().max_by_key(|event| event.sequence);
-        }
-    }
+    ) -> Result<Vec<SessionEvent>, StateError>;
+    /// Latest snapshot of one kind, without scanning all event pages.
+    async fn latest_event_by_kind(
+        &self,
+        session: &str,
+        kind: &str,
+    ) -> Result<Option<SessionEvent>, StateError>;
     async fn recover_expired_runs(&self) -> Result<usize, StateError>;
     async fn read_context(
         &self,
@@ -549,7 +528,11 @@ impl RunQueryService {
 #[derive(Clone)]
 pub struct EventQueryService(pub Arc<dyn SessionLifecycleStore>);
 impl EventQueryService {
-    pub async fn latest_by_kind(&self, session: &str, kind: &str) -> Result<Option<SessionEvent>, StateError> {
+    pub async fn latest_by_kind(
+        &self,
+        session: &str,
+        kind: &str,
+    ) -> Result<Option<SessionEvent>, StateError> {
         self.0.latest_event_by_kind(session, kind).await
     }
 
@@ -568,6 +551,8 @@ impl EventQueryService {
         after: u64,
         limit: usize,
     ) -> Result<Vec<SessionEvent>, StateError> {
-        self.0.list_events_by_kind(session, kind, after, limit).await
+        self.0
+            .list_events_by_kind(session, kind, after, limit)
+            .await
     }
 }

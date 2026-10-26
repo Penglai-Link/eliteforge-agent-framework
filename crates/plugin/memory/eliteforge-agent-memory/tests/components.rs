@@ -216,7 +216,7 @@ async fn explicit_memory_tools_use_fixed_scope_and_report_version_errors() {
 }
 
 #[derive(Clone, Default)]
-struct SummaryProvider(Arc<Mutex<Vec<Value>>>);
+struct SummaryProvider(Arc<Mutex<Vec<Value>>>, Arc<Mutex<Vec<ChatRequest>>>);
 #[async_trait]
 impl ChatModel for SummaryProvider {
     async fn generate(
@@ -237,6 +237,7 @@ impl ChatModel for SummaryProvider {
                 ..Default::default()
             });
         }
+        self.1.lock().unwrap().push(request);
         Ok(ChatResponse::text("answer"))
     }
 }
@@ -313,8 +314,24 @@ async fn agent_reopen_reuses_summary_from_persisted_conversation_generation() {
         summaries.close().await.unwrap();
     }
     let calls = provider.0.lock().unwrap();
-    assert_eq!(calls.len(), 2);
+    // Reopening must reuse the persisted projection while the appended suffix
+    // still fits, rather than spending another model call on the same history.
+    assert_eq!(calls.len(), 1);
     assert_eq!(calls[0]["history"].as_array().unwrap().len(), 8);
-    assert_eq!(calls[1]["history"].as_array().unwrap().len(), 1);
-    assert_eq!(calls[1]["previous_summary"], "Prior task facts");
+    let main_requests = provider.1.lock().unwrap();
+    assert_eq!(main_requests.len(), 2);
+    for request in main_requests.iter() {
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message.content.text().contains("Prior task facts"))
+        );
+        assert!(
+            request
+                .messages
+                .iter()
+                .any(|message| message.role == Role::User && message.content.text() == "next")
+        );
+    }
 }

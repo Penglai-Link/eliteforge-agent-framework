@@ -2,38 +2,44 @@ use super::*;
 use rusqlite::{OptionalExtension, params_from_iter, types::Value};
 use std::collections::BTreeMap;
 
+pub(super) fn bind(values: &mut Vec<Value>, value: impl Into<Value>) -> String {
+    values.push(value.into());
+    format!("?{}", values.len())
+}
 fn json_path(prefix: &str, key: &str) -> String {
     format!("{prefix}.{}", serde_json::to_string(key).unwrap())
 }
-
-fn filter(f: TelemetryTraceFilter) -> (String, Vec<Value>) {
+pub(super) fn trace_filter(f: TelemetryTraceFilter, values: &mut Vec<Value>) -> String {
     let mut sql = "1=1".to_owned();
-    let mut values = Vec::new();
     if let Some(id) = f.trace_id {
-        sql.push_str(" AND t.trace_id=?");
-        values.push(Value::Text(id));
+        sql.push_str(&format!(" AND t.trace_id={}", bind(values, id)));
     }
     for (key, value) in f.attributes {
-        if key == "tron.workspace.code" {
-            sql.push_str(" AND json_extract(t.attributes,'$.\"tron.workspace.code\"')=?");
-        } else {
-            sql.push_str(" AND json_extract(t.attributes,?)=?");
-            values.push(Value::Text(json_path("$", &key)));
-        }
-        values.push(Value::Text(value));
+        let key = bind(values, key);
+        let value = bind(values, value);
+        sql.push_str(&format!(" AND t.trace_id IN (SELECT trace_id FROM ef_telemetry_trace_attributes WHERE attribute={key} AND value={value})"));
     }
-    (sql, values)
+    sql
 }
-
-fn valid(limit: usize) -> Result<(), TelemetryError> {
-    if limit == 0 || limit > 50_000 {
+pub(super) fn valid(limit: usize) -> Result<(), TelemetryError> {
+    if !(1..=50_000).contains(&limit) {
         return Err(TelemetryError::Invalid(
             "page limit must be 1..50000".into(),
         ));
     }
     Ok(())
 }
-
+pub(super) fn snapshot(
+    c: &mut Connection,
+) -> rusqlite::Result<crate::database::RequiredTransaction<'_>> {
+    Ok(if c.is_autocommit() {
+        crate::database::RequiredTransaction::Owned(
+            c.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?,
+        )
+    } else {
+        crate::database::RequiredTransaction::Joined(c)
+    })
+}
 fn decode_json<T: serde::de::DeserializeOwned>(
     row: &rusqlite::Row<'_>,
     index: usize,
@@ -41,7 +47,6 @@ fn decode_json<T: serde::de::DeserializeOwned>(
     let json: String = row.get(index)?;
     serde_json::from_str(&json).map_err(|_| rusqlite::Error::InvalidQuery)
 }
-
 pub(super) async fn traces(
     store: &SqliteTelemetryStore,
     f: TelemetryTraceFilter,
@@ -49,119 +54,135 @@ pub(super) async fn traces(
     limit: usize,
 ) -> Result<TelemetryPage<TelemetryTrace>, TelemetryError> {
     valid(limit)?;
-    let (sql, mut values) = filter(f);
-    store.database.call(move |c| -> rusqlite::Result<_> {
-        let total = c.query_row(
-            &format!("SELECT COUNT(*) FROM ef_telemetry_traces t WHERE {sql}"),
-            params_from_iter(&values), |r| r.get(0),
-        )?;
-        values.push(Value::Integer(limit as i64));
-        values.push(Value::Integer(offset.try_into().map_err(|_| rusqlite::Error::InvalidQuery)?));
-        let mut stmt = c.prepare(&format!(
-            "SELECT trace_id,started_at,ended_at,status_code,attributes,abandoned FROM ef_telemetry_traces t WHERE {sql} ORDER BY started_at DESC,trace_id DESC LIMIT ? OFFSET ?"
-        ))?;
-        let records = stmt.query_map(params_from_iter(&values), |r| {
-            Ok(TelemetryTrace {
-                trace_id:r.get(0)?,started_at:r.get(1)?,ended_at:r.get(2)?,status_code:r.get(3)?,
-                attributes:decode_json(r,4)?,abandoned:r.get(5)?,
-            })
-        })?.collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(TelemetryPage { total, records })
+    let mut args = Vec::new();
+    let filter = trace_filter(f, &mut args);
+    let offset = i64::try_from(offset)
+        .map_err(|_| TelemetryError::Invalid("offset exceeds storage range".into()))?;
+    store.database.call_read(move |c| ->rusqlite::Result<_> {
+        let tx=snapshot(c)?;
+        let total=tx.query_row(&format!("SELECT count(*) FROM ef_telemetry_traces t WHERE {filter}"),params_from_iter(&args),|r|r.get(0))?;
+        let limit=bind(&mut args,limit as i64);let offset=bind(&mut args,offset);
+        let records={let mut q=tx.prepare(&format!("SELECT trace_id,started_at,ended_at,status_code,attributes,abandoned FROM ef_telemetry_traces t WHERE {filter} ORDER BY started_at DESC,trace_id DESC LIMIT {limit} OFFSET {offset}"))?;
+            q.query_map(params_from_iter(args),|r|Ok(TelemetryTrace {trace_id:r.get(0)?,started_at:r.get(1)?,ended_at:r.get(2)?,status_code:r.get(3)?,attributes:decode_json(r,4)?,abandoned:r.get(5)?}))?.collect::<rusqlite::Result<_>>()?};
+        tx.commit()?;Ok(TelemetryPage{total,records})
     }).await.map_err(error)
 }
-
 pub(super) async fn spans(
     store: &SqliteTelemetryStore,
     id: String,
 ) -> Result<Vec<TelemetrySpan>, TelemetryError> {
-    store.database.call(move |c| -> rusqlite::Result<_> {
-        let mut stmt = c.prepare(
-            "SELECT data FROM ef_telemetry_spans WHERE trace_id=?1 ORDER BY json_extract(data,'$.startedAt'),span_id"
-        )?;
-        stmt.query_map([id], |r| decode_json(r,0))?.collect()
+    store.database.call_read(move |c| ->rusqlite::Result<_> {
+        let mut q=c.prepare("SELECT data FROM ef_telemetry_spans WHERE trace_id=?1 ORDER BY json_extract(data,'$.startedAt'),span_id")?;
+        q.query_map([id],|r|decode_json(r,0))?.collect()
     }).await.map_err(error)
 }
-
+pub(super) async fn span_page(
+    store: &SqliteTelemetryStore,
+    ids: Vec<String>,
+    offset: usize,
+    limit: usize,
+) -> Result<TelemetryPage<TelemetrySpan>, TelemetryError> {
+    valid(limit)?;
+    let ids = serde_json::to_string(&ids).map_err(error)?;
+    let offset = i64::try_from(offset)
+        .map_err(|_| TelemetryError::Invalid("offset exceeds storage range".into()))?;
+    store.database.call_read(move |c| ->rusqlite::Result<_> {
+        let tx=snapshot(c)?;
+        let total=tx.query_row("SELECT count(*) FROM ef_telemetry_spans WHERE trace_id IN (SELECT value FROM json_each(?1))",[&ids],|r|r.get(0))?;
+        let records={let mut q=tx.prepare("SELECT data FROM ef_telemetry_spans WHERE trace_id IN (SELECT value FROM json_each(?1)) ORDER BY trace_id,json_extract(data,'$.startedAt'),span_id LIMIT ?2 OFFSET ?3")?;
+            q.query_map(params![ids,limit,offset],|r|decode_json(r,0))?.collect::<rusqlite::Result<_>>()?};
+        tx.commit()?;Ok(TelemetryPage{total,records})
+    }).await.map_err(error)
+}
 pub(super) async fn sums(
     store: &SqliteTelemetryStore,
     f: TelemetryTraceFilter,
     name: String,
     attrs: Vec<String>,
 ) -> Result<BTreeMap<String, u64>, TelemetryError> {
-    let (filter, mut values) = filter(f);
-    values.push(Value::Text(name));
-    store.database.call(move |c| -> rusqlite::Result<_> {
-        let mut out = BTreeMap::new();
-        let sql = format!(
-            "SELECT COALESCE(SUM(CAST(json_extract(s.data,?) AS REAL)),0) FROM ef_telemetry_spans s JOIN ef_telemetry_traces t ON t.trace_id=s.trace_id WHERE {filter} AND json_extract(s.data,'$.name')=?"
-        );
-        let mut stmt = c.prepare(&sql)?;
-        for key in attrs {
-            let mut args = vec![Value::Text(json_path("$.attributes", &key))];
-            args.extend(values.clone());
-            let sum:f64 = stmt.query_row(params_from_iter(args), |r| r.get(0))?;
-            out.insert(key, sum.max(0.) as u64);
-        }
+    if attrs.len() > 128 {
+        return Err(TelemetryError::Invalid(
+            "at most 128 aggregate attributes".into(),
+        ));
+    }
+    if attrs.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let mut args = Vec::new();
+    let filter = trace_filter(f, &mut args);
+    let name = bind(&mut args, name);
+    let requested = bind(&mut args, serde_json::to_string(&attrs).map_err(error)?);
+    store.database.call_read(move |c| ->rusqlite::Result<_> {
+        let sql=format!("SELECT a.attribute,SUM(a.value) FROM ef_telemetry_span_attributes a WHERE a.name={name} AND a.attribute IN (SELECT value FROM json_each({requested})) AND a.trace_id IN (SELECT t.trace_id FROM ef_telemetry_traces t WHERE {filter}) GROUP BY a.attribute");
+        let mut out=attrs.into_iter().map(|key|(key,0)).collect::<BTreeMap<_,_>>();
+        let mut q=c.prepare(&sql)?;
+        let rows=q.query_map(params_from_iter(args),|r|Ok((r.get::<_,String>(0)?,r.get::<_,f64>(1)?.max(0.) as u64)))?;
+        for row in rows {let (key,value)=row?;out.insert(key,value);}
         Ok(out)
     }).await.map_err(error)
 }
 
+fn metric_selection(f: TelemetryMetricFilter, args: &mut Vec<Value>) -> (String, String) {
+    let mut attrs = f.attributes.into_iter();
+    let (source, mut sql) = if let Some((key, value)) = attrs.next() {
+        let key = bind(args, key);
+        let value = bind(args, value);
+        (
+            "ef_telemetry_metric_attributes p".to_owned(),
+            format!("p.attribute={key} AND p.value={value}"),
+        )
+    } else {
+        ("ef_telemetry_metric_points p".to_owned(), "1=1".into())
+    };
+    if let Some(name) = f.name {
+        sql.push_str(&format!(" AND p.name={}", bind(args, name)));
+    }
+    for (key, value) in attrs {
+        let key = bind(args, key);
+        let value = bind(args, value);
+        sql.push_str(&format!(" AND p.point_id IN (SELECT point_id FROM ef_telemetry_metric_attributes WHERE attribute={key} AND value={value})"));
+    }
+    (source, sql)
+}
 pub(super) async fn points(
     store: &SqliteTelemetryStore,
-    name: Option<String>,
+    f: TelemetryMetricFilter,
     offset: usize,
     limit: usize,
 ) -> Result<TelemetryPage<TelemetryMetricPoint>, TelemetryError> {
     valid(limit)?;
-    store.database.call(move |c| -> rusqlite::Result<_> {
-        let total = c.query_row(
-            "SELECT COUNT(*) FROM ef_telemetry_metric_points WHERE (?1 IS NULL OR name=?1)",
-            [&name], |r| r.get(0),
-        )?;
-        let mut stmt = c.prepare(
-            "SELECT data FROM ef_telemetry_metric_points WHERE (?1 IS NULL OR name=?1) ORDER BY timestamp DESC,point_id DESC LIMIT ?2 OFFSET ?3"
-        )?;
-        let records = stmt.query_map(params![name,limit,offset], |r| decode_json(r,0))?
-            .collect::<rusqlite::Result<_>>()?;
-        Ok(TelemetryPage { total, records })
+    let mut args = Vec::new();
+    let (source, filter) = metric_selection(f, &mut args);
+    let offset = i64::try_from(offset)
+        .map_err(|_| TelemetryError::Invalid("offset exceeds storage range".into()))?;
+    store.database.call_read(move |c| ->rusqlite::Result<_> {
+        let tx=snapshot(c)?;
+        let total=tx.query_row(&format!("SELECT count(*) FROM {source} WHERE {filter}"),params_from_iter(&args),|r|r.get(0))?;
+        let limit=bind(&mut args,limit as i64);let offset=bind(&mut args,offset);
+        // Select ordered IDs from a covering attribute/time index before loading JSON.
+        let records={let mut q=tx.prepare(&format!("WITH page AS MATERIALIZED (SELECT p.point_id FROM {source} WHERE {filter} ORDER BY p.timestamp DESC,p.point_id DESC LIMIT {limit} OFFSET {offset}) SELECT p.data FROM page JOIN ef_telemetry_metric_points p ON p.point_id=page.point_id ORDER BY p.timestamp DESC,p.point_id DESC"))?;
+            q.query_map(params_from_iter(args),|r|decode_json(r,0))?.collect::<rusqlite::Result<_>>()?};
+        tx.commit()?;Ok(TelemetryPage{total,records})
     }).await.map_err(error)
 }
-
 pub(super) async fn count_points_by_attribute(
     store: &SqliteTelemetryStore,
     attribute: String,
     value: String,
 ) -> Result<usize, TelemetryError> {
-    let resource_path = json_path("$.resource", &attribute);
-    store
-        .database
-        .call(move |c| {
-            c.query_row(
-                "SELECT COUNT(*) FROM ef_telemetry_metric_points p WHERE json_extract(p.data,?1)=?2 OR EXISTS (SELECT 1 FROM json_each(json_extract(p.data,'$.data.attributes')) a WHERE json_extract(a.value,'$.key')=?3 AND json_extract(a.value,'$.value.stringValue')=?2)",
-                rusqlite::params![resource_path, value, attribute],
-                |row| row.get(0),
-            )
-        })
-        .await
-        .map_err(error)
+    store.database.call_read(move |c|c.query_row("SELECT count(*) FROM ef_telemetry_metric_attributes WHERE attribute=?1 AND value=?2",params![attribute,value],|r|r.get(0))).await.map_err(error)
 }
-
 pub(super) async fn latest(
     store: &SqliteTelemetryStore,
     name: String,
     resource: BTreeMap<String, String>,
 ) -> Result<Option<TelemetryMetricPoint>, TelemetryError> {
-    let mut sql = "name=?".to_owned();
-    let mut args = vec![Value::Text(name)];
+    let mut args = Vec::new();
+    let mut filter = format!("name={}", bind(&mut args, name));
     for (key, value) in resource {
-        sql.push_str(" AND json_extract(data,?)=?");
-        args.push(Value::Text(json_path("$.resource", &key)));
-        args.push(Value::Text(value));
+        let path = bind(&mut args, json_path("$.resource", &key));
+        let value = bind(&mut args, value);
+        filter.push_str(&format!(" AND json_extract(data,{path})={value}"));
     }
-    store.database.call(move |c| -> rusqlite::Result<_> {
-        c.query_row(
-            &format!("SELECT data FROM ef_telemetry_metric_points WHERE {sql} ORDER BY timestamp DESC,point_id DESC LIMIT 1"),
-            params_from_iter(args), |r| decode_json(r,0),
-        ).optional()
-    }).await.map_err(error)
+    store.database.call_read(move |c|c.query_row(&format!("SELECT data FROM ef_telemetry_metric_points WHERE {filter} ORDER BY timestamp DESC,point_id DESC LIMIT 1"),params_from_iter(args),|r|decode_json(r,0)).optional()).await.map_err(error)
 }

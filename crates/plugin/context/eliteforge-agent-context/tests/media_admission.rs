@@ -480,7 +480,14 @@ fn local_pdf_rasterization_preserves_orientation_and_bounds() {
     assert_eq!(rendered.len(), 1);
     assert_eq!((rendered[0].width, rendered[0].height), (200, 100));
     let image = image::load_from_memory(&rendered[0].png).unwrap().to_rgb8();
-    assert_eq!(image.get_pixel(10, 10).0, [255, 0, 0], "corners {:?} {:?} {:?}", image.get_pixel(10,90),image.get_pixel(190,10),image.get_pixel(190,90));
+    assert_eq!(
+        image.get_pixel(10, 10).0,
+        [255, 0, 0],
+        "corners {:?} {:?} {:?}",
+        image.get_pixel(10, 90),
+        image.get_pixel(190, 10),
+        image.get_pixel(190, 90)
+    );
     assert_eq!(image.get_pixel(190, 90).0, [0, 0, 255]);
     assert!(render_pdf_evidence(b"bad pdf", Default::default()).is_err());
     assert!(
@@ -493,4 +500,37 @@ fn local_pdf_rasterization_preserves_orientation_and_bounds() {
         )
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn structured_data_shares_the_configured_text_budget() {
+    let source = ContextBlock::data(
+        "runtime",
+        Content::from(vec![ContentBlock::Json {
+            value: serde_json::json!({"kind":"application_context", "text":"scope-A", "payload":"x".repeat(2000)}),
+        }]),
+    );
+    let model = ModelRef::new("mock", "text");
+    for cap in [128, 4096] {
+        let result = project_multimodal_data(
+            &source,
+            ContextBudget {
+                max_tokens: cap,
+                max_messages: 1,
+            },
+            &model,
+            &ConservativeTokenEstimator,
+            0,
+            cap,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(result.report.final_tokens <= cap);
+        assert!(!result.messages.is_empty());
+        assert!(result.messages.iter().all(|m| m.role == Role::User));
+        if cap == 4096 {
+            assert!(result.messages[0].content.text().contains("scope-A"));
+        }
+    }
 }

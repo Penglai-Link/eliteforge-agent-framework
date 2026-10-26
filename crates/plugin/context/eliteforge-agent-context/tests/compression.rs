@@ -347,6 +347,7 @@ struct CachedProjection {
     generation: &'static str,
     branch: &'static str,
     policy: &'static str,
+    force: bool,
 }
 #[async_trait]
 impl AgentLoop for CachedProjection {
@@ -386,7 +387,10 @@ impl AgentLoop for CachedProjection {
                 models: services.models.as_deref().unwrap(),
                 limits: &request.limits,
                 overflow_recoveries: 0,
-                compression: None,
+                compression: self.force.then_some(ContextCompressionDirective {
+                    trigger: ContextCompressionTrigger::Global,
+                    target_tokens: 5_000,
+                }),
             })
             .await?;
         assert!(projected.iter().any(|m| m.role == Role::User
@@ -453,6 +457,7 @@ async fn persisted_summary_survives_reopen_and_only_summarizes_new_complete_turn
             generation: "g1",
             branch: "main",
             policy: "v1",
+            force: false,
         },
     )
     .await;
@@ -478,6 +483,7 @@ async fn persisted_summary_survives_reopen_and_only_summarizes_new_complete_turn
             generation: "g1",
             branch: "main",
             policy: "v1",
+            force: false,
         },
     )
     .await;
@@ -496,6 +502,24 @@ async fn persisted_summary_survives_reopen_and_only_summarizes_new_complete_turn
             generation: "g1",
             branch: "main",
             policy: "v1",
+            force: false,
+        },
+    )
+    .await;
+    assert_eq!(
+        provider.requests.lock().unwrap().len(),
+        1,
+        "a fitting summary plus appended turns does not need another model call"
+    );
+    cached_projection(
+        provider.clone(),
+        CachedProjection {
+            messages: messages.clone(),
+            store: store.clone(),
+            generation: "g1",
+            branch: "main",
+            policy: "v1",
+            force: true,
         },
     )
     .await;
@@ -517,6 +541,7 @@ async fn persisted_summary_survives_reopen_and_only_summarizes_new_complete_turn
             generation: "g1",
             branch: "main",
             policy: "v1",
+            force: false,
         },
     )
     .await;
@@ -560,6 +585,7 @@ async fn summary_identity_separates_branch_generation_and_policy_version() {
                 generation,
                 branch,
                 policy,
+                force: false,
             },
         )
         .await;
@@ -656,7 +682,9 @@ async fn summary_packing_uses_its_connection_estimator_and_output_reservation() 
         .build()
         .await
         .unwrap();
-    agent.run(RunRequest::new("small", "unused")).await.unwrap();
+    let mut request = RunRequest::new("small", "unused");
+    request.limits.max_model_output_tokens = 512;
+    agent.run(request).await.unwrap();
     {
         let calls = provider.requests.lock().unwrap().clone();
         assert!(
@@ -664,6 +692,11 @@ async fn summary_packing_uses_its_connection_estimator_and_output_reservation() 
             "summary-model capacity requires multiple bounded calls"
         );
         for (_, request) in calls.iter() {
+            assert_eq!(
+                request.options.max_output_tokens,
+                Some(512),
+                "a small summary must retain the configured generation allowance for provider reasoning"
+            );
             assert!(
                 DoubleEstimate
                     .request(&ModelRef::new("shared", "summary"), request)

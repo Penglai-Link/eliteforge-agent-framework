@@ -63,7 +63,7 @@ pub fn expand_descriptor() -> ToolDescriptor {
         A2UI_EXPAND_TOOL,
         "Expand the A2UI interface domain for this run: expose publish and request-input tools with complete schemas. Use for interactive cards, reports or forms after loading the a2ui-interface skill. Does not publish UI or grant business permissions.",
         json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
-    )
+    ).with_single_input()
 }
 pub(crate) struct Expand;
 #[async_trait]

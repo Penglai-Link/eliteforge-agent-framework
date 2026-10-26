@@ -169,6 +169,7 @@ fn write_text_descriptor() -> ToolDescriptor {
             }
         }),
     )
+    .with_single_input()
     .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
@@ -196,7 +197,7 @@ fn patch_descriptor() -> ToolDescriptor {
                 "expectedVersion":{"type":"string", "minLength":1}
             }
         }),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    ).with_single_input().with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_descriptor() -> ToolDescriptor {
@@ -266,7 +267,7 @@ fn system_command_task_write_descriptor() -> ToolDescriptor {
             "closeStdin":{"type":"boolean"}, "stdoutCursor":{"type":"integer", "minimum":0},
             "stderrCursor":{"type":"integer", "minimum":0}, "waitMs":{"type":"integer", "minimum":0, "maximum":10000}
         }}),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    ).with_single_input().with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_list_descriptor() -> ToolDescriptor {

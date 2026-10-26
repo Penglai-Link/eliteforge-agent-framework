@@ -71,7 +71,8 @@ impl SqliteStateStore {
                 CREATE TABLE IF NOT EXISTS ef_session_heads (session_id TEXT NOT NULL, scope TEXT NOT NULL DEFAULT 'main', run_id TEXT NOT NULL REFERENCES ef_checkpoints(run_id), PRIMARY KEY(session_id,scope));
                 CREATE INDEX IF NOT EXISTS ef_checkpoint_sessions ON ef_checkpoints(session_id);
                 CREATE TABLE IF NOT EXISTS ef_interactions (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, run_id TEXT NOT NULL, answered INTEGER NOT NULL, record TEXT NOT NULL);
-                CREATE INDEX IF NOT EXISTS ef_interactions_pending ON ef_interactions(session_id,answered);").map_err(database_error)?;
+                CREATE INDEX IF NOT EXISTS ef_interactions_pending ON ef_interactions(session_id,answered);
+                CREATE TABLE IF NOT EXISTS ef_closed_interaction_runs (session_id TEXT NOT NULL, run_id TEXT NOT NULL, PRIMARY KEY(session_id,run_id));").map_err(database_error)?;
             crate::lifecycle::initialize(&tx)?;
             let version: i64 = tx.query_row("SELECT value FROM ef_core_metadata WHERE key='schema_version'", [], |row| row.get(0)).map_err(database_error)?;
             if version != 1 { return Err(StateError::UnsupportedVersion); }
@@ -99,6 +100,24 @@ impl SqliteStateStore {
         Ok(())
     }
 
+    pub(crate) async fn execute_read<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, StateError> + Send + 'static,
+    ) -> Result<T, StateError> {
+        let permit = self
+            .admission
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| StateError::Backend("SQLite store is closed".into()))?;
+        self.connection
+            .call_read(move |connection| {
+                let _permit = permit;
+                operation(connection)
+            })
+            .await
+            .map_err(worker_error)
+    }
     pub(crate) async fn execute<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&mut rusqlite::Connection) -> Result<T, StateError> + Send + 'static,
@@ -393,6 +412,10 @@ impl StateStore for SqliteStateStore {
                 crate::lifecycle::append_journal(&tx, event)?;
             }
             crate::history::checkpoint(&tx, &next, Some(&previous))?;
+            // The terminal checkpoint, history and interaction closure commit together.
+            if next.status.is_terminal() {
+                interactions::close_run(&tx, &next.session_id, next.run_id)?;
+            }
             tx.commit().map_err(database_error)?;
             Ok(next)
         })

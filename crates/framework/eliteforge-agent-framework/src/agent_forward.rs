@@ -110,6 +110,14 @@ impl Agent {
         let (generation, _lease) = self.admit("operation", "checkpoint")?;
         generation.checkpoint(run_id).await
     }
+    pub async fn interactions(
+        &self,
+        session: &str,
+        interaction_ids: &[RunId],
+    ) -> Result<Vec<InteractionRecord>, AgentError> {
+        let (generation, _lease) = self.admit("operation", "interactions")?;
+        generation.interactions(session, interaction_ids).await
+    }
     pub async fn latest_checkpoint(&self, session: &str) -> Result<Option<Checkpoint>, AgentError> {
         let (generation, _lease) = self.admit("operation", "latest_checkpoint")?;
         generation.latest_checkpoint(session).await

@@ -376,10 +376,9 @@ pub fn validate_model_response(
         && let Some(output) = &options.output_schema
     {
         let value = if response.content.is_empty() {
-            response
-                .structured
-                .clone()
-                .ok_or_else(|| ModelError::Fatal("model did not return structured output".into()))?
+            response.structured.clone().ok_or_else(|| {
+                ModelError::InvalidOutput("model did not return structured output".into())
+            })?
         } else {
             match response.content.0.as_slice() {
                 [ContentBlock::Json { value }] => value.clone(),
@@ -388,11 +387,12 @@ pub fn validate_model_response(
                         .iter()
                         .all(|b| matches!(b, ContentBlock::Text { .. })) =>
                 {
-                    serde_json::from_str(&response.content.text())
-                        .map_err(|_| ModelError::Fatal("model did not return valid JSON".into()))?
+                    serde_json::from_str(&response.content.text()).map_err(|_| {
+                        ModelError::InvalidOutput("model did not return valid JSON".into())
+                    })?
                 }
                 _ => {
-                    return Err(ModelError::Fatal(
+                    return Err(ModelError::InvalidOutput(
                         "structured output contains unsupported mixed content".into(),
                     ));
                 }
@@ -403,7 +403,7 @@ pub fn validate_model_response(
             .as_ref()
             .is_some_and(|structured| structured != &value)
         {
-            return Err(ModelError::Fatal(
+            return Err(ModelError::InvalidOutput(
                 "structured output disagrees with JSON content".into(),
             ));
         }
@@ -411,7 +411,7 @@ pub fn validate_model_response(
             .map_err(|e| ModelError::Fatal(e.to_string()))?
             .is_valid(&value)
         {
-            return Err(ModelError::Fatal(
+            return Err(ModelError::InvalidOutput(
                 "model output does not match output schema".into(),
             ));
         }
@@ -534,9 +534,12 @@ pub struct ToolInvocationContext<'a> {
 }
 
 /// Host projection of a confirmed result, including rejected/invalid calls.
-/// Called in model-call order before the result enters durable history. On
-/// recovery it can run again; implementations must use invocation_id for
-/// idempotent external persistence. It cannot turn a failure into success.
+/// Called at each completion before the result enters durable history; parallel
+/// calls may complete out of model-call order. Native tool effects have already
+/// been resolved, so a rejected exposure is observed as a failure. Effects added
+/// by this processor are checked again before persistence. On recovery it can
+/// run again; implementations must use invocation_id for idempotent external
+/// persistence. It cannot turn a failure into success.
 #[async_trait]
 pub trait ToolResultProcessor: Send + Sync {
     async fn process(

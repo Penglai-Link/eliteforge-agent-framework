@@ -159,6 +159,25 @@ pub struct GetInteraction {
     pub session_id: String,
     pub interaction_id: RunId,
 }
+pub struct GetInteractions {
+    pub session_id: String,
+    pub interaction_ids: Vec<RunId>,
+}
+#[async_trait]
+impl AgentOperation for GetInteractions {
+    type Service = InteractionStoreService;
+    type Output = Vec<InteractionRecord>;
+    async fn execute(
+        self,
+        service: Arc<Self::Service>,
+        _: CancellationToken,
+    ) -> Result<Self::Output, AgentError> {
+        Ok(service
+            .0
+            .get_many(&self.session_id, &self.interaction_ids)
+            .await?)
+    }
+}
 #[async_trait]
 impl AgentOperation for GetInteraction {
     type Service = InteractionStoreService;

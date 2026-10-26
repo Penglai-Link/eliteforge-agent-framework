@@ -64,6 +64,9 @@ impl AgentLoop for ReactAgentLoop {
 pub(crate) struct ToolSet {
     pub(crate) by_name: HashMap<String, ToolBinding>,
     id_to_name: HashMap<String, String>,
+    /// The `tool_execute` gateway binding is installed: the model sees only
+    /// the two stable gateway tools and inner tools run through envelopes.
+    pub(crate) gateway: bool,
 }
 
 impl ToolSet {
@@ -74,6 +77,7 @@ impl ToolSet {
         let mut result = Self {
             by_name: HashMap::new(),
             id_to_name: HashMap::new(),
+            gateway: false,
         };
         let invoker = context
             .extensions
@@ -99,6 +103,17 @@ impl ToolSet {
                 {
                     return Err(AgentError::ToolSetup("tool IDs must be nonempty and call names must use ASCII letters, digits, underscores or hyphens".into()));
                 }
+                // Distinct provider IDs may contribute the same gateway pair;
+                // merge their descriptors here. Registering the same plugin ID
+                // twice is still an assembly error.
+                if is_gateway_descriptor(descriptor)
+                    && result
+                        .by_name
+                        .get(&descriptor.call_name)
+                        .is_some_and(|existing| existing.descriptor.id == descriptor.id)
+                {
+                    continue;
+                }
                 if result.by_name.contains_key(&descriptor.call_name)
                     || result.id_to_name.contains_key(&descriptor.id)
                 {
@@ -115,13 +130,97 @@ impl ToolSet {
                     .insert(descriptor.id.clone(), descriptor.call_name.clone());
             }
         }
+        // Gateway detection: the presence of the `tool_execute` binding turns
+        // every other binding into gateway-wrapped inventory. The model sees
+        // only the two stable tools; inner tools are addressed as arguments of
+        // `tool_execute` and unwrapped at admission.
+        result.gateway = result
+            .by_name
+            .get(TOOL_EXECUTE_CALL_NAME)
+            .is_some_and(|binding| binding.descriptor.id == TOOL_EXECUTE_ID);
+        if result.gateway {
+            // Preserve host exposure as activation state for inner tools.
+            // Only descriptors() projects that state to the stable gateway pair.
+            let host_labels = context.extensions.get::<ToolGroupLabels>();
+            for binding in result.by_name.values_mut() {
+                if binding.domain_code.is_none() {
+                    binding.domain_code = host_labels
+                        .as_ref()
+                        .and_then(|labels| {
+                            labels.label_for(&binding.descriptor.id, &binding.descriptor.call_name)
+                        })
+                        .map(str::to_owned);
+                }
+            }
+            for name in [TOOL_SEARCH_CALL_NAME, TOOL_EXECUTE_CALL_NAME] {
+                if let Some(binding) = result.by_name.remove(name) {
+                    result.id_to_name.remove(&binding.descriptor.id);
+                }
+            }
+            result.by_name.insert(
+                TOOL_SEARCH_CALL_NAME.into(),
+                ToolBinding::new(
+                    search_descriptor(),
+                    GatewaySearch {
+                        entries: Vec::new(),
+                    },
+                ),
+            );
+            result
+                .id_to_name
+                .insert(TOOL_SEARCH_ID.into(), TOOL_SEARCH_CALL_NAME.into());
+            result.by_name.insert(
+                TOOL_EXECUTE_CALL_NAME.into(),
+                ToolBinding::new(execute_descriptor(), GatewayExecute),
+            );
+            result
+                .id_to_name
+                .insert(TOOL_EXECUTE_ID.into(), TOOL_EXECUTE_CALL_NAME.into());
+            result.refresh_gateway_search();
+        }
         let mut admitted: Vec<_> = result.by_name.values().cloned().collect();
         admitted.sort_by(|a, b| a.descriptor.call_name.cmp(&b.descriptor.call_name));
         invoker.catalog_ready(&admitted, context).await?;
         Ok(result)
     }
 
+    /// Rebuild discovery after activation or checkpoint restoration. Search
+    /// and dispatch use the same host exposure state; model schemas stay fixed.
+    pub(crate) fn refresh_gateway_search(&mut self) {
+        if !self.gateway {
+            return;
+        }
+        let mut entries: Vec<_> = self
+            .by_name
+            .values()
+            .filter(|binding| binding.exposed && !is_gateway_descriptor(&binding.descriptor))
+            .map(|binding| GatewayInventoryEntry {
+                descriptor: batch_tool_descriptor(&binding.descriptor),
+                domain_code: binding.domain_code.clone(),
+                summary_description: Some(binding.descriptor.description.clone()),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.descriptor.call_name.cmp(&b.descriptor.call_name));
+        self.by_name.insert(
+            TOOL_SEARCH_CALL_NAME.into(),
+            ToolBinding::new(search_descriptor(), GatewaySearch { entries }),
+        );
+    }
+
     pub(crate) fn descriptors(&self) -> Vec<ToolDescriptor> {
+        if self.gateway {
+            // Cache-stable invariant: gateway mode always shows exactly the
+            // two stable tools, even after inner tools (e.g. A2UI expand)
+            // produce exposure effects. Inner tools never re-enter the
+            // model-visible list.
+            let mut tools: Vec<_> = [TOOL_SEARCH_CALL_NAME, TOOL_EXECUTE_CALL_NAME]
+                .into_iter()
+                .filter_map(|name| self.by_name.get(name))
+                .map(|binding| batch_tool_descriptor(&binding.descriptor))
+                .collect();
+            tools.sort_by(|left, right| left.call_name.cmp(&right.call_name));
+            return tools;
+        }
         let mut tools: Vec<_> = self
             .by_name
             .values()
@@ -143,8 +242,14 @@ impl ToolSet {
             return Err("Tool exposure contains an unauthorized ID".into());
         }
         for binding in self.by_name.values_mut() {
+            // The gateway pair is structural: exposure replacement from inner
+            // tool effects must never hide the stable catalog.
+            if self.gateway && is_gateway_descriptor(&binding.descriptor) {
+                continue;
+            }
             binding.exposed = ids.contains(&binding.descriptor.id);
         }
+        self.refresh_gateway_search();
         Ok(())
     }
     pub(crate) fn apply_exposure(&mut self, ids: &[String]) -> Result<(), String> {
@@ -155,11 +260,15 @@ impl ToolSet {
         }
         for id in ids {
             let call_name = &self.id_to_name[id];
-            self.by_name
+            let binding = self
+                .by_name
                 .get_mut(call_name)
-                .expect("authorized tool binding")
-                .exposed = true;
+                .expect("authorized tool binding");
+            // Activation enables discovery and execution of this inner tool;
+            // descriptors() still exposes only the stable gateway pair.
+            binding.exposed = true;
         }
+        self.refresh_gateway_search();
         Ok(())
     }
 }

@@ -133,14 +133,34 @@ fn put<T: Serialize>(
     }
     Ok(())
 }
-fn annotation_sources(c: &rusqlite::Connection, session: &str, annotations: &[MessageAnnotation]) -> Result<(), StateError> {
+fn annotation_sources(
+    c: &rusqlite::Connection,
+    session: &str,
+    annotations: &[MessageAnnotation],
+) -> Result<(), StateError> {
     validate_annotations(annotations).map_err(StateError::Invalid)?;
-    for annotation in annotations {
-        let valid: bool = c.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ef_history_messages WHERE id=?1 AND session_id=?2)",
-            params![annotation.message_id, session], |row| row.get(0),
-        ).map_err(sql)?;
-        if !valid { return Err(StateError::Invalid("annotation source is not in this session history".into())); }
+    let ids = annotations
+        .iter()
+        .map(|a| &a.message_id)
+        .collect::<Vec<_>>();
+    annotation_source_ids(c, session, &ids)
+}
+fn annotation_source_ids(
+    c: &rusqlite::Connection,
+    session: &str,
+    ids: &[&String],
+) -> Result<(), StateError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let invalid: bool = c.query_row(
+        "SELECT EXISTS(SELECT 1 FROM json_each(?1) a WHERE NOT EXISTS(SELECT 1 FROM ef_history_messages m WHERE m.id=a.value AND m.session_id=?2))",
+        params![encode(&ids)?, session], |row| row.get(0),
+    ).map_err(sql)?;
+    if invalid {
+        return Err(StateError::Invalid(
+            "annotation source is not in this session history".into(),
+        ));
     }
     Ok(())
 }
@@ -151,12 +171,20 @@ pub(crate) fn checkpoint(
     next: &Checkpoint,
     previous: Option<&Checkpoint>,
 ) -> Result<(), StateError> {
+    let mut annotation_ids = Vec::new();
     for message in &next.history.messages {
-        if previous.is_some_and(|old| old.history.messages.iter().any(|record| record.id == message.id && record.annotations == message.annotations)) {
+        if previous.is_some_and(|old| {
+            old.history
+                .messages
+                .iter()
+                .any(|record| record.id == message.id && record.annotations == message.annotations)
+        }) {
             continue;
         }
-        annotation_sources(c, &next.session_id, &message.annotations)?;
+        validate_annotations(&message.annotations).map_err(StateError::Invalid)?;
+        annotation_ids.extend(message.annotations.iter().map(|a| &a.message_id));
     }
+    annotation_source_ids(c, &next.session_id, &annotation_ids)?;
     let old: Option<String> = c
         .query_row(
             "SELECT record FROM ef_history_runs WHERE id=?1",
@@ -222,19 +250,11 @@ pub(crate) fn checkpoint(
     for (i, record) in next.history.interactions.iter().enumerate() {
         // Answers are owned by InteractionStore; a later checkpoint must not
         // replace its already committed answer with the original pending row.
-        let existing: Option<String> = c
-            .query_row(
-                "SELECT run_id FROM ef_history_interactions WHERE id=?1",
-                [record.id.to_string()],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(sql)?;
-        if existing.is_some_and(|run| run != next.run_id.to_string()) {
+        let changed = c.execute("INSERT INTO ef_history_interactions(id,run_id,session_id,position,answered,record) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET answered=CASE WHEN ef_history_interactions.answered=0 THEN excluded.answered ELSE ef_history_interactions.answered END,record=CASE WHEN ef_history_interactions.answered=0 THEN excluded.record ELSE ef_history_interactions.record END WHERE ef_history_interactions.run_id=excluded.run_id AND ef_history_interactions.session_id=excluded.session_id",
+            params![record.id.to_string(),next.run_id.to_string(),next.session_id,i,record.response.is_some(),encode(record)?]).map_err(sql)?;
+        if changed != 1 {
             return Err(StateError::Conflict);
         }
-        c.execute("INSERT INTO ef_history_interactions(id,run_id,session_id,position,answered,record) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(id) DO UPDATE SET answered=excluded.answered,record=excluded.record WHERE ef_history_interactions.answered=0",
-            params![record.id.to_string(),next.run_id.to_string(),next.session_id,i,record.response.is_some(),encode(record)?]).map_err(sql)?;
     }
     Ok(())
 }
@@ -278,16 +298,35 @@ fn records<T: DeserializeOwned>(
         .map(|r| decode(r.map_err(sql)?))
         .collect()
 }
+fn page_records<T: DeserializeOwned>(
+    c: &rusqlite::Connection,
+    table: &str,
+    session: &str,
+    roots: &str,
+) -> Result<Vec<T>, StateError> {
+    let mut q = c.prepare(&format!(
+        "SELECT item.record FROM json_each(?2) page JOIN ef_history_runs r ON r.root_run_id=page.value AND r.session_id=?1 JOIN {table} item ON item.run_id=r.id ORDER BY CAST(page.key AS INTEGER),r.ordinal,item.position"
+    )).map_err(sql)?;
+    q.query_map(params![session, roots], |row| row.get(0))
+        .map_err(sql)?
+        .map(|row| decode(row.map_err(sql)?))
+        .collect()
+}
 #[async_trait]
 impl HistoryStore for SqliteStateStore {
-    async fn validate_annotation_sources(&self, session: &str, annotations: &[MessageAnnotation]) -> Result<(), StateError> {
+    async fn validate_annotation_sources(
+        &self,
+        session: &str,
+        annotations: &[MessageAnnotation],
+    ) -> Result<(), StateError> {
         let session = session.to_owned();
         let annotations = annotations.to_vec();
-        self.execute(move |connection| annotation_sources(connection, &session, &annotations)).await
+        self.execute_read(move |connection| annotation_sources(connection, &session, &annotations))
+            .await
     }
 
     async fn run(&self, run_id: RunId) -> Result<HistoryRun, StateError> {
-        self.execute(move |c| {
+        self.execute_read(move |c| {
             let record = c
                 .query_row(
                     "SELECT record FROM ef_history_runs WHERE id=?1",
@@ -300,6 +339,19 @@ impl HistoryStore for SqliteStateStore {
             decode(record)
         })
         .await
+    }
+    async fn runs(&self, run_ids: &[RunId]) -> Result<Vec<HistoryRun>, StateError> {
+        if run_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = encode(&run_ids.iter().map(ToString::to_string).collect::<Vec<_>>())?;
+        self.execute_read(move |c| {
+            let mut q = c.prepare(
+                "SELECT r.record FROM json_each(?1) requested LEFT JOIN ef_history_runs r ON r.id=requested.value ORDER BY CAST(requested.key AS INTEGER)"
+            ).map_err(sql)?;
+            q.query_map([ids], |row| row.get::<_, Option<String>>(0)).map_err(sql)?
+                .map(|row| decode(row.map_err(sql)?.ok_or(StateError::NotFound)?)).collect()
+        }).await
     }
     async fn read_session(
         &self,
@@ -318,7 +370,7 @@ impl HistoryStore for SqliteStateStore {
             ));
         }
         let session_id = session_id.to_owned();
-        self.execute(move |c| {
+        self.execute_read(move |c| {
             // A deferred SQLite read transaction fixes one WAL snapshot across
             // version, run, message, tool and pending-interaction reads.
             let tx = if c.is_autocommit() {
@@ -354,25 +406,22 @@ impl HistoryStore for SqliteStateStore {
                 })
             } else { None };
             roots.reverse();
-            let mut runs = Vec::new();
-            let mut history = HistoryRecords::default();
-            for (_, root) in roots {
-                let rows: Vec<String> = {
-                    let mut q = tx.prepare(
-                        "SELECT record FROM ef_history_runs WHERE session_id=?1 AND root_run_id=?2 ORDER BY ordinal"
-                    ).map_err(sql)?;
-                    q.query_map(params![session_id, root], |r| r.get(0))
-                        .map_err(sql)?.collect::<Result<_, _>>().map_err(sql)?
-                };
-                for row in rows {
-                    let run: HistoryRun = decode(row)?;
-                    history.steps.extend(records::<HistoryStep>(&tx, "ef_history_steps", run.id)?);
-                    history.messages.extend(records::<HistoryMessage>(&tx, "ef_history_messages", run.id)?);
-                    history.tool_invocations.extend(records::<HistoryToolInvocation>(&tx, "ef_history_tools", run.id)?);
-                    history.interactions.extend(records::<HistoryInteraction>(&tx, "ef_history_interactions", run.id)?);
-                    runs.push(run);
-                }
-            }
+            // Page roots bound every collection query. Never load an entire
+            // session or issue four more SELECTs for each run in the page.
+            let roots = encode(&roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>())?;
+            let runs = {
+                let mut q = tx.prepare(
+                    "SELECT r.record FROM json_each(?2) page JOIN ef_history_runs r ON r.root_run_id=page.value AND r.session_id=?1 ORDER BY CAST(page.key AS INTEGER),r.ordinal"
+                ).map_err(sql)?;
+                q.query_map(params![session_id, roots], |row| row.get(0)).map_err(sql)?
+                    .map(|row| decode(row.map_err(sql)?)).collect::<Result<Vec<HistoryRun>, _>>()?
+            };
+            let history = HistoryRecords {
+                steps: page_records(&tx, "ef_history_steps", &session_id, &roots)?,
+                messages: page_records(&tx, "ef_history_messages", &session_id, &roots)?,
+                tool_invocations: page_records(&tx, "ef_history_tools", &session_id, &roots)?,
+                interactions: page_records(&tx, "ef_history_interactions", &session_id, &roots)?,
+            };
             let pending_interactions = {
                 let mut q = tx.prepare(
                     "SELECT i.record FROM ef_history_interactions i JOIN ef_history_runs r ON r.id=i.run_id WHERE r.session_id=?1 AND r.active=1 AND i.answered=0 ORDER BY r.ordinal,i.position"

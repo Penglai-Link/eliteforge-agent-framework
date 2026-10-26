@@ -596,7 +596,12 @@ async fn plugin_enforces_selection_and_resource_paths() {
         ProbeAction::ContextOnly,
     )
     .await;
-    assert!(no_skills.context.is_empty());
+    assert!(
+        no_skills
+            .context
+            .iter()
+            .all(|message| !message.contains("<available_skills>"))
+    );
     assert!(no_skills.tools.is_empty());
 }
 
@@ -1102,7 +1107,11 @@ async fn custom_skill_provider_can_replace_the_filesystem_implementation() {
         },
     )
     .await;
-    assert!(probe.context[1].contains("rag://skills/rag-backed"));
+    assert!(probe.context[1].contains("rag-backed"));
+    assert!(
+        !probe.context[1].contains("rag://"),
+        "catalog exposes names and descriptions, not provider storage locations"
+    );
     assert_eq!(probe.values[0]["skillMarkdown"], "RAG-backed instructions");
     assert_eq!(probe.values[1]["content"], "RAG-backed resource");
 }

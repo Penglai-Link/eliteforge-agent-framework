@@ -145,6 +145,13 @@ pub struct HistoryStep {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryToolInvocation {
+    /// Monotonic revision of this parent's batch state, shared with live snapshots.
+    /// Decimal string avoids loss of precision in clients. Absent for atomic calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_revision: Option<String>,
+    /// Batch parent displayed in conversation; children retain independent audit/approval identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<ToolBatchItem>,
     pub id: RunId,
     pub run_id: RunId,
     pub step_id: String,
@@ -222,6 +229,24 @@ impl HistoryRecords {
                 ));
             }
         }
+        let mut batch_positions = std::collections::HashSet::new();
+        for tool in &self.tool_invocations {
+            if let Some(batch) = &tool.batch {
+                if batch.invocation_id != tool.id
+                    || batch.call_id != tool.call_id
+                    || batch.index >= MAX_TOOL_BATCH_ITEMS
+                    || !batch_positions.insert((batch.parent_invocation_id, batch.index))
+                    || !self.tool_invocations.iter().any(|parent| {
+                        parent.id == batch.parent_invocation_id
+                            && parent.call_id == batch.parent_call_id
+                            && parent.batch.is_none()
+                            && parent.message_id == tool.message_id
+                    })
+                {
+                    return Err(StateError::Invalid("invalid batch history identity".into()));
+                }
+            }
+        }
         invocations.clear();
         for interaction in &self.interactions {
             if interaction.id.is_nil()
@@ -266,6 +291,7 @@ impl HistoryRecords {
                 || old.step_id != new.step_id
                 || old.message_id != new.message_id
                 || old.call_id != new.call_id
+                || old.batch != new.batch
                 || (old.status != HistoryStatus::Planned
                     && (old.tool_id != new.tool_id || old.tool_name != new.tool_name))
                 || old.arguments != new.arguments
@@ -385,17 +411,17 @@ pub struct SessionHistory {
 #[async_trait]
 pub trait HistoryStore: Send + Sync {
     /// Check references before admission; writers repeat this under their transaction.
-    async fn validate_annotation_sources(&self, _session_id: &str, annotations: &[MessageAnnotation]) -> Result<(), StateError> {
-        if annotations.is_empty() { return Ok(()); }
-        Err(StateError::Invalid("annotation source validation is unavailable".into()))
-    }
+    async fn validate_annotation_sources(
+        &self,
+        _session_id: &str,
+        annotations: &[MessageAnnotation],
+    ) -> Result<(), StateError>;
 
     /// Metadata only; does not read messages, tools or recovery checkpoints.
-    async fn run(&self, _run_id: RunId) -> Result<HistoryRun, StateError> {
-        Err(StateError::Invalid(
-            "history run summary query is unavailable".into(),
-        ))
-    }
+    async fn run(&self, _run_id: RunId) -> Result<HistoryRun, StateError>;
+    /// Metadata in requested order, including duplicates. A missing run fails
+    /// the lookup, just like `run`. All stores must implement one batch operation.
+    async fn runs(&self, run_ids: &[RunId]) -> Result<Vec<HistoryRun>, StateError>;
     /// Reads only the requested session. Lineage is metadata, not permission to
     /// merge another session's transcript into this one.
     async fn read_session(
@@ -408,12 +434,21 @@ pub struct HistoryStoreService(pub Arc<dyn HistoryStore>);
 #[derive(Clone)]
 pub struct HistoryService(pub Arc<dyn HistoryStore>);
 impl HistoryService {
-    pub async fn validate_annotation_sources(&self, session_id: &str, annotations: &[MessageAnnotation]) -> Result<(), StateError> {
-        self.0.validate_annotation_sources(session_id, annotations).await
+    pub async fn validate_annotation_sources(
+        &self,
+        session_id: &str,
+        annotations: &[MessageAnnotation],
+    ) -> Result<(), StateError> {
+        self.0
+            .validate_annotation_sources(session_id, annotations)
+            .await
     }
 
     pub async fn run(&self, run_id: RunId) -> Result<HistoryRun, StateError> {
         self.0.run(run_id).await
+    }
+    pub async fn runs(&self, run_ids: &[RunId]) -> Result<Vec<HistoryRun>, StateError> {
+        self.0.runs(run_ids).await
     }
     pub async fn read_session(
         &self,
@@ -423,10 +458,15 @@ impl HistoryService {
         self.0.read_session(session_id, query).await
     }
 }
+/// Reserved history step for context maintenance, independent of model attempts.
+pub const CONTEXT_COMPACTION_STEP: &str = "framework.context.compaction";
 /// Execution-local writer sharing the checkpoint's fencing and revision lock.
 #[doc(hidden)]
 #[async_trait]
 pub trait HistoryCommitter: Send + Sync {
+    async fn context_compaction(&self, _status: HistoryStatus) -> Result<(), StateError> {
+        Ok(())
+    }
     async fn model_attempt(
         &self,
         step: HistoryStep,

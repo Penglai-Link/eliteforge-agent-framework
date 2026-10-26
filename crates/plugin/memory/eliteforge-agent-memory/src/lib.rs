@@ -18,10 +18,17 @@ pub use history::*;
 pub use policy::*;
 pub use short_term::*;
 
-pub use eliteforge_agent_context::{BoundMultimodalData, MediaContextAudit, MediaContextReport, MediaAdmissionOutcome, project_multimodal_data};
+pub use eliteforge_agent_context::{
+    BoundMultimodalData, MediaAdmissionOutcome, MediaContextAudit, MediaContextReport,
+    project_multimodal_data,
+};
 
+pub use eliteforge_agent_context::summary_byte_guard;
 pub use eliteforge_agent_context::{BorrowHistoryForData, required_recent_turn_tokens};
 
-pub use eliteforge_agent_context::{prepare_inline_image_evidence, ImageEvidenceOptions};
+pub use eliteforge_agent_context::{ImageEvidenceOptions, prepare_inline_image_evidence};
 
-pub use eliteforge_agent_context::{render_pdf_evidence, PdfEvidenceOptions, RenderedPdfPage};
+pub use eliteforge_agent_context::{PdfEvidenceOptions, RenderedPdfPage, render_pdf_evidence};
+
+mod reduction_cache;
+pub use reduction_cache::*;

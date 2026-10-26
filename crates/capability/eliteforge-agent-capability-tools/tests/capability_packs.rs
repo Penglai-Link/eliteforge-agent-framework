@@ -565,12 +565,14 @@ async fn media_domain_pack_recreates_reader_and_exposes_image_and_pdf_tools() {
 
 #[cfg(feature = "discovery")]
 #[tokio::test]
-async fn discovery_domain_pack_retains_host_providers_and_exposes_search() {
+async fn discovery_domain_pack_retains_host_providers_and_exposes_the_gateway_pair() {
     use eliteforge_agent_capability_tools::{ToolDiscoveryPlugin, tool_discovery_pack};
 
     let pack = tool_discovery_pack(ToolDiscoveryPlugin::new());
     assert_eq!(plugin_ids(&pack), ["framework.tools.discovery"]);
-    assert_eq!(listed_tools(pack).await, ["tool_search"]);
+    // With no explicitly wrapped providers the gateway pair is the whole
+    // model-visible catalog: search plus the execution envelope.
+    assert_eq!(listed_tools(pack).await, ["tool_execute", "tool_search"]);
 }
 
 #[tokio::test]

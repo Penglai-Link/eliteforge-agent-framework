@@ -211,11 +211,13 @@ impl AgentLoop for DagWorkflowLoop {
                 cp.transcript = previous.transcript.clone();
             }
             cp.transcript.push(
-                Message::user(&request.input).with_annotations(request.annotations.clone()).with_provenance(request.message_provenance.clone()),
+                Message::user(&request.input)
+                    .with_annotations(request.annotations.clone())
+                    .with_provenance(request.message_provenance.clone()),
             );
             cp.history.messages.push(
                 HistoryMessage::user(context.run_id, &request.input)
-                        .with_annotations(request.annotations.clone())
+                    .with_annotations(request.annotations.clone())
                     .with_provenance(request.message_provenance.clone()),
             );
             store.create(cp, previous.map(|p| p.run_id)).await?
@@ -276,7 +278,18 @@ impl AgentLoop for DagWorkflowLoop {
                 context: run.clone(),
             });
             run.budget_journal = Some(journal.clone());
-            self.execute(request, run, services, journal).await
+            let result = self.execute(request, run, services, journal.clone()).await;
+            let terminal = journal.current.lock().await.status.is_terminal();
+            let cleanup = if terminal && let Some(manager) = &services.interactions {
+                manager
+                    .0
+                    .close_run(&request.session_id, context.run_id)
+                    .await
+                    .map_err(Into::into)
+            } else {
+                Ok(())
+            };
+            finish_with_cleanup(result, cleanup)
         }
         .await;
         finish_with_cleanup(result, guard.close().await.map_err(Into::into))
@@ -330,29 +343,31 @@ impl DagWorkflowLoop {
         if request.resume.is_some()
             && let Some(manager) = &services.interactions
         {
+            let mut owners = Vec::new();
+            let mut ids = Vec::new();
             for (id, node) in journal.state().await?.nodes {
                 if node.status != WorkflowNodeStatus::Suspended {
                     continue;
                 }
-                let interactions = node
-                    .result
-                    .as_ref()
-                    .map(|r| r.interactions.clone())
-                    .unwrap_or_default();
-                for interaction in interactions {
-                    match manager.0.get(&run.session_id, interaction.id).await {
-                        Ok(record) if record.response.is_some() => {
-                            if record.run_id != run.run_id {
-                                return Err(invalid("interaction belongs to another run"));
-                            }
-                            resumes.entry(id.clone()).or_insert_with(|| ResumeRequest {
-                                run_id: run.run_id,
-                                response: record.response,
-                            });
-                        }
-                        Ok(_) | Err(StateError::NotFound) => {}
-                        Err(error) => return Err(error.into()),
+                if let Some(result) = node.result {
+                    for interaction in result.interactions {
+                        owners.push(id.clone());
+                        ids.push(interaction.id);
                     }
+                }
+            }
+            let records = manager.0.find_many(&run.session_id, &ids).await?;
+            for (id, record) in owners.into_iter().zip(records) {
+                if let Some(record) = record
+                    && record.response.is_some()
+                {
+                    if record.run_id != run.run_id {
+                        return Err(invalid("interaction belongs to another run"));
+                    }
+                    resumes.entry(id).or_insert_with(|| ResumeRequest {
+                        run_id: run.run_id,
+                        response: record.response,
+                    });
                 }
             }
         }

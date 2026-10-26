@@ -330,7 +330,23 @@ impl ModelInvoker {
     ) -> Result<ChatResponse, AgentError> {
         let context = self.control_context(context);
         let limits = self.control_limits(call.limits, &context);
-        self.scoped(&context)
+        let manual = context
+            .extensions
+            .get::<ContextCompactionRequest>()
+            .is_some();
+        if manual {
+            if let Some(history) = context.extensions.get::<HistoryCommitterService>() {
+                history.0.context_compaction(HistoryStatus::Running).await?;
+            }
+        }
+        if manual {
+            context.emit_output(OutputEvent::Custom {
+                name: "agent.memory.compaction.started".into(),
+                value: serde_json::json!({}),
+            });
+        }
+        let result = self
+            .scoped(&context)
             .invoke_in_scope(
                 ModelCall {
                     limits: &limits,
@@ -339,7 +355,24 @@ impl ModelInvoker {
                 memory,
                 &context,
             )
-            .await
+            .await;
+        if manual {
+            context.emit_output(OutputEvent::Custom {
+                name: if result.is_ok() {
+                    "agent.memory.compaction.completed"
+                } else {
+                    "agent.memory.compaction.failed"
+                }
+                .into(),
+                value: serde_json::json!({}),
+            });
+        }
+        if result.is_err() {
+            if let Some(history) = context.extensions.get::<HistoryCommitterService>() {
+                let _ = history.0.context_compaction(HistoryStatus::Failed).await;
+            }
+        }
+        result
     }
 
     async fn invoke_in_scope(
@@ -525,6 +558,19 @@ impl ModelInvoker {
             context
                 .emit(AgentEvent::ContextAssembled(window.report))
                 .await;
+            if let Some(history) = context.extensions.get::<HistoryCommitterService>() {
+                history
+                    .0
+                    .context_compaction(HistoryStatus::Completed)
+                    .await?;
+            }
+            if context
+                .extensions
+                .get::<ContextCompactionRequest>()
+                .is_some()
+            {
+                return Ok(ChatResponse::text(""));
+            }
             models.reserve(false)?;
             let attempted_messages = messages.clone();
             context

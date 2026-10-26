@@ -46,3 +46,5 @@ pub use framework::*;
 
 mod goals;
 pub use goals::{GOAL_LOOP_ID, GoalPlugin, ModelGoalPolicy};
+
+mod tool_batches;

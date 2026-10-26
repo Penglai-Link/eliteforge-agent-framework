@@ -33,6 +33,8 @@ async fn transcript_state_and_events_survive_close_and_reopen_together() {
         descriptor: ToolDescriptor::new("transfer", "transfer", "Transfer", json!({})),
         call: ToolCall::new("provider-call", "transfer", json!({"amount":17})),
         state: ToolExecutionState::Started,
+        via_gateway: false,
+        batch_item: None,
     };
     snapshot.state = serde_json::to_value(&invocation).unwrap();
     snapshot.status = ExecutionStatus::Failed;
@@ -332,4 +334,71 @@ fn interaction_responses_bind_identity_schema_expiry_and_explicit_approval() {
             0,
         )
         .unwrap();
+}
+
+#[tokio::test]
+async fn terminal_commit_closes_interactions_atomically_and_survives_republication() {
+    for status in [
+        ExecutionStatus::Failed,
+        ExecutionStatus::Cancelled,
+        ExecutionStatus::Completed,
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.db");
+        let database = store(&path).await;
+        let mut cp = database.create(checkpoint("closed"), None).await.unwrap();
+        let lease = database
+            .claim(cp.run_id, RunId::new_v4(), Duration::from_secs(30))
+            .await
+            .unwrap();
+        let record = InteractionRecord {
+            session_id: "closed".into(),
+            run_id: cp.run_id,
+            node_invocation_id: None,
+            request: InteractionRequest::input("Continue?", json!({"type":"boolean"})).unwrap(),
+            tool_call: None,
+            response: None,
+            response_provenance: None,
+            created_at_unix_ms: unix_time_ms(),
+            answered_at_unix_ms: None,
+        };
+        database.publish(&record).await.unwrap();
+        assert_eq!(database.pending("closed").await.unwrap().len(), 1);
+        cp.status = status;
+        database.commit(&lease, cp.revision, cp).await.unwrap();
+        // No separate close_run call: emulate process loss immediately after commit.
+        database.release(&lease).await.unwrap();
+        database.close().await.unwrap();
+        let reopened = store(&path).await;
+        assert!(reopened.pending("closed").await.unwrap().is_empty());
+        reopened.publish(&record).await.unwrap();
+        let mut late = record.clone();
+        late.request =
+            InteractionRequest::input("Late request", json!({"type":"boolean"})).unwrap();
+        reopened.publish(&late).await.unwrap();
+        assert!(reopened.pending("closed").await.unwrap().is_empty());
+        assert_eq!(
+            reopened.get("closed", record.request.id).await.unwrap(),
+            record
+        );
+        assert!(
+            reopened
+                .answer(
+                    "closed",
+                    &InteractionResponse {
+                        interaction_id: record.request.id,
+                        value: json!(true)
+                    }
+                )
+                .await
+                .is_err()
+        );
+        // Closing one run never suppresses another run's requests in the session.
+        let mut other = late;
+        other.run_id = RunId::new_v4();
+        other.request = InteractionRequest::input("Other run", json!({"type":"boolean"})).unwrap();
+        reopened.publish(&other).await.unwrap();
+        assert_eq!(reopened.pending("closed").await.unwrap(), vec![other]);
+        reopened.close().await.unwrap();
+    }
 }

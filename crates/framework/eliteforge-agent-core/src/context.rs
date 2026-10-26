@@ -18,10 +18,16 @@ pub const HISTORY_BLOCK: &str = "framework.history";
 pub struct ManagedDeveloperPrompts(pub BTreeMap<String, String>);
 
 impl ManagedDeveloperPrompts {
-    pub fn resolve(run: &RunContext, key: &str, standalone_default: &str) -> Result<String, AgentError> {
+    pub fn resolve(
+        run: &RunContext,
+        key: &str,
+        standalone_default: &str,
+    ) -> Result<String, AgentError> {
         match run.extensions.get::<Self>() {
             Some(prompts) => prompts.0.get(key).cloned().ok_or_else(|| {
-                AgentError::InvalidConfiguration(format!("managed developer prompt is unavailable: {key}"))
+                AgentError::InvalidConfiguration(format!(
+                    "managed developer prompt is unavailable: {key}"
+                ))
             }),
             None => Ok(standalone_default.to_owned()),
         }
@@ -61,7 +67,12 @@ impl ContextBlock {
         }
     }
     pub fn instructions_with_data(id: impl Into<String>, messages: Vec<Message>) -> Self {
-        Self { id: id.into(), messages, trust: ContextTrust::Mixed, source_version: None }
+        Self {
+            id: id.into(),
+            messages,
+            trust: ContextTrust::Mixed,
+            source_version: None,
+        }
     }
 }
 pub struct ContextInput<'a> {
@@ -94,6 +105,10 @@ pub trait ContextContributor: Send + Sync {
         ContextSourceKind::Data
     }
     fn block_id(&self) -> &str;
+    /// Standalone layout declaration. Explicit host layouts must still name this block.
+    fn default_block_config(&self) -> Option<ContextBlockConfig> {
+        None
+    }
     /// Bound upstream queries by the supplied quota and cancellation signal.
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError>;
 }
@@ -313,9 +328,52 @@ pub struct ContextReductionInput<'a> {
     pub overflow_recoveries: usize,
     pub compression: Option<ContextCompressionDirective>,
 }
+/// A history projection has two independent quotas and one immutable source.
+/// `recent` retains native messages; summaries are lower-trust user data.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryProjection {
+    pub summary: Vec<Message>,
+    pub recent: Vec<Message>,
+}
+impl HistoryProjection {
+    pub fn into_messages(self) -> Vec<Message> {
+        let prefix = self
+            .recent
+            .iter()
+            .take_while(|m| m.role == Role::System)
+            .count();
+        let mut messages = self.recent;
+        messages.splice(prefix..prefix, self.summary);
+        messages
+    }
+}
 #[crate::extension_point(select, adapter = crate::ContextReducerPlugin)]
 #[async_trait]
 pub trait ContextReducer: Send + Sync {
+    /// Coupled history/summary admission. Cache-only reads must not call models.
+    async fn project_history(
+        &self,
+        _input: &ContextReductionInput<'_>,
+        _summary_budget: ContextBudget,
+        _recent_turns: usize,
+        cached_only: bool,
+    ) -> Result<Option<HistoryProjection>, AgentError> {
+        if cached_only {
+            Ok(None)
+        } else {
+            Err(AgentError::InvalidConfiguration(
+                "history reducer does not support a separate summary block".into(),
+            ))
+        }
+    }
+    /// Read an existing valid projection without generating or saving a summary.
+    /// Thresholds use its current size while reduction retains the full source.
+    async fn cached_projection(
+        &self,
+        _input: &ContextReductionInput<'_>,
+    ) -> Result<Option<Vec<Message>>, AgentError> {
+        Ok(None)
+    }
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError>;
 }
 pub struct KeepContext;
@@ -544,10 +602,9 @@ impl BuiltinInstructions<'_> {
                     ..*input
                 };
             let addition = source.contribute(&request).await?;
-            if addition.id != source.block_id()
-                || !matches!(addition.trust, ContextTrust::Instruction | ContextTrust::Mixed) {
+            if addition.id != source.block_id() || addition.trust != ContextTrust::Instruction {
                 return Err(AgentError::InvalidConfiguration(
-                    "instruction source changed its identity or trust".into(),
+                    "instruction sources must contain fixed instructions only; register dynamic data as a separate contributor".into(),
                 ));
             }
             validate_contribution(&addition, max_messages, max_bytes)?;
@@ -555,21 +612,15 @@ impl BuiltinInstructions<'_> {
                 id: addition.id,
                 source_version: addition.source_version,
             });
-            if addition.trust == ContextTrust::Mixed {
-                block.trust = ContextTrust::Mixed;
-            }
-            block.messages.extend(
-                addition
-                    .messages
-                    .into_iter()
-                    .map(|message| {
-                        if message.role == Role::System {
-                            message.with_instruction_origin(InstructionOrigin::Plugin)
-                        } else {
-                            message
-                        }
-                    }),
-            );
+            block
+                .messages
+                .extend(addition.messages.into_iter().map(|message| {
+                    if message.role == Role::System {
+                        message.with_instruction_origin(InstructionOrigin::Plugin)
+                    } else {
+                        message
+                    }
+                }));
             if block.messages.len() > input.budget.max_messages
                 || context_tokens(&block.messages, input.model, input.estimator).await?
                     > input.budget.max_tokens
@@ -597,14 +648,112 @@ impl ContextContributor for BuiltinInstructions<'_> {
         Ok(block)
     }
 }
+/// Host-admitted context maintenance; auxiliary model calls are unaffected.
+#[derive(Clone, Copy, Default)]
+pub struct ContextCompactionRequest;
+
+pub trait ContextCompactionObserver: Send + Sync {
+    fn state_changed(&self, active: bool);
+}
+#[derive(Clone)]
+pub struct ContextCompactionObserverBinding(pub Arc<dyn ContextCompactionObserver>);
+struct CompactionProgress<'a> {
+    run: &'a RunContext,
+    active: bool,
+}
+impl CompactionProgress<'_> {
+    async fn start(&mut self) -> Result<(), AgentError> {
+        if self.active {
+            return Ok(());
+        }
+        if let Some(history) = self.run.extensions.get::<crate::HistoryCommitterService>() {
+            history
+                .0
+                .context_compaction(crate::HistoryStatus::Running)
+                .await?;
+        }
+        self.active = true;
+        if let Some(observer) = self
+            .run
+            .extensions
+            .get::<ContextCompactionObserverBinding>()
+        {
+            observer.0.state_changed(true);
+        }
+        self.run.emit_output(OutputEvent::Custom {
+            name: "agent.memory.compaction.started".into(),
+            value: serde_json::json!({}),
+        });
+        Ok(())
+    }
+    fn finish(&mut self) {
+        if !self.active {
+            return;
+        }
+        self.active = false;
+        if let Some(observer) = self
+            .run
+            .extensions
+            .get::<ContextCompactionObserverBinding>()
+        {
+            observer.0.state_changed(false);
+        }
+        self.run.emit_output(OutputEvent::Custom {
+            name: "agent.memory.compaction.completed".into(),
+            value: serde_json::json!({}),
+        });
+    }
+}
+impl Drop for CompactionProgress<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            if let Some(observer) = self
+                .run
+                .extensions
+                .get::<ContextCompactionObserverBinding>()
+            {
+                observer.0.state_changed(false);
+            }
+            self.run.emit_output(OutputEvent::Custom {
+                name: "agent.memory.compaction.failed".into(),
+                value: serde_json::json!({"errorCode":"ContextCompressionFailed"}),
+            });
+        }
+    }
+}
+
+pub struct ContextReductionCacheInput<'a> {
+    pub history: &'a ConversationSnapshot,
+    pub model: &'a ModelRef,
+    pub block: &'a ContextBlock,
+    pub config: &'a ContextBlockConfig,
+}
+/// Only data reductions are cached. Source/configuration identity and storage
+/// are supplied by a memory plugin; Framework validates every loaded projection.
+#[async_trait]
+pub trait ContextReductionCache: Send + Sync {
+    async fn load(
+        &self,
+        input: &ContextReductionCacheInput<'_>,
+    ) -> Result<Option<Vec<Message>>, AgentError>;
+    async fn save(
+        &self,
+        input: &ContextReductionCacheInput<'_>,
+        messages: &[Message],
+    ) -> Result<(), AgentError>;
+}
+
 pub struct DefaultContextAssembler {
     contributors: HashMap<String, Arc<dyn ContextContributor>>,
     instruction_sources: Vec<Arc<dyn ContextContributor>>,
     layout: ContextLayout,
     policy: Arc<dyn ContextBudgetPolicy>,
     history_reducer: Arc<dyn ContextReducer>,
+    reduction_cache: Option<Arc<dyn ContextReductionCache>>,
+    history_summary: Option<(String, usize)>,
     pub global_compression_ratio_bps: Option<u16>,
     pub force_global_compression: bool,
+    /// Contributor reads are bounded independently of model-backed reductions.
     pub source_timeout: Duration,
     pub max_source_messages: usize,
     pub max_source_bytes: usize,
@@ -617,6 +766,8 @@ impl Default for DefaultContextAssembler {
             layout: ContextLayout::default(),
             policy: Arc::new(IndependentBlockBudget),
             history_reducer: Arc::new(RecentConversation),
+            reduction_cache: None,
+            history_summary: None,
             global_compression_ratio_bps: None,
             force_global_compression: false,
             source_timeout: Duration::from_secs(30),
@@ -665,7 +816,12 @@ impl DefaultContextAssembler {
                 ));
             }
         }
-        if !result.contributors.is_empty() && result.layout.0.is_empty() {
+        if result.layout.0.is_empty()
+            && result
+                .contributors
+                .values()
+                .any(|source| source.default_block_config().is_none())
+        {
             return Err(AgentError::InvalidConfiguration(
                 "contributors require explicit block quotas and order".into(),
             ));
@@ -702,6 +858,30 @@ impl DefaultContextAssembler {
             }
         }
         Ok(result)
+    }
+    pub fn with_reduction_cache(mut self, cache: Arc<dyn ContextReductionCache>) -> Self {
+        self.reduction_cache = Some(cache);
+        self
+    }
+    /// Route the history reducer's typed summary into an existing empty data block.
+    /// The destination retains its configured quota and its position in the prompt.
+    pub fn with_history_summary_block(
+        mut self,
+        id: impl Into<String>,
+        recent_turns: usize,
+    ) -> Result<Self, AgentError> {
+        let id = id.into();
+        let summary = self.layout.0.iter().position(|b| b.id == id);
+        let history = self.layout.0.iter().position(|b| b.id == HISTORY_BLOCK);
+        if recent_turns == 0
+            || is_builtin(&id)
+            || summary.zip(history).is_none_or(|(a, b)| a >= b)
+            || self.layout.0[summary.unwrap()].failure != BlockFailure::Error
+        {
+            return Err(AgentError::InvalidConfiguration("history summary requires a preceding required data block and positive recent-turn retention".into()));
+        }
+        self.history_summary = Some((id, recent_turns));
+        Ok(self)
     }
     pub fn with_global_compression(
         mut self,
@@ -750,6 +930,42 @@ impl DefaultContextAssembler {
         // Simple Agents have two known sources. Their quotas are fixed once,
         // before reduction. Explicit multi-block layouts always own their quotas.
         let implicit_layout = self.layout.0.is_empty();
+        let mut contributors = self.contributors.clone();
+        if implicit_layout {
+            if let Some(services) = input.run.extensions.get::<ScopedAgentServices>() {
+                for source in services
+                    .0
+                    .context_sources
+                    .iter()
+                    .filter(|source| source.kind() == ContextSourceKind::Data)
+                {
+                    if let Some(existing) = contributors.get(source.block_id()) {
+                        if !Arc::ptr_eq(existing, source) {
+                            return Err(AgentError::InvalidConfiguration(
+                                "duplicate context contributor identity".into(),
+                            ));
+                        }
+                    } else {
+                        contributors.insert(source.block_id().into(), source.clone());
+                    }
+                }
+            }
+            for source in contributors.values() {
+                let declared = source.default_block_config().ok_or_else(|| {
+                    AgentError::InvalidConfiguration(
+                        "contributors require explicit block quotas and order".into(),
+                    )
+                })?;
+                if declared.id != source.block_id()
+                    || declared.id.trim().is_empty()
+                    || is_builtin(&declared.id)
+                {
+                    return Err(AgentError::InvalidConfiguration(
+                        "contributor layout declaration must retain its identity".into(),
+                    ));
+                }
+            }
+        }
         let mut layout = if implicit_layout {
             vec![
                 ContextBlockConfig::new(
@@ -767,6 +983,21 @@ impl DefaultContextAssembler {
         } else {
             self.layout.0.clone()
         };
+        if implicit_layout {
+            let mut defaults = contributors
+                .values()
+                .filter_map(|source| source.default_block_config())
+                .collect::<Vec<_>>();
+            defaults.sort_by(|a, b| a.id.cmp(&b.id));
+            for block in &defaults {
+                if !contributors.contains_key(&block.id) || is_builtin(&block.id) {
+                    return Err(AgentError::InvalidConfiguration(
+                        "invalid contributor layout declaration".into(),
+                    ));
+                }
+            }
+            layout.extend(defaults);
+        }
         let scoped = input.run.extensions.get::<ScopedAgentServices>();
         let mut instruction_sources = self.instruction_sources.clone();
         if let Some(services) = &scoped {
@@ -799,6 +1030,7 @@ impl DefaultContextAssembler {
             .find(|message| message.role == Role::User)
             .map_or(&empty, |message| &message.content);
         let mut sources = Vec::new();
+        let mut cache_sources = Vec::new();
         let mut reports = Vec::new();
         // Phase one: each provider is read exactly once, under its own query cap.
         for (position, config) in layout.iter().enumerate() {
@@ -816,7 +1048,15 @@ impl DefaultContextAssembler {
                 position,
                 source_version: None,
                 original_tokens: None,
-                configured_tokens: Some(query_budget.max_tokens),
+                // A full-window ratio without a token cap has no independent
+                // block ceiling. Allocation remains bounded by model capacity.
+                configured_tokens: if config.budget.max_tokens.is_none()
+                    && config.budget.max_ratio_bps == Some(10_000)
+                {
+                    None
+                } else {
+                    Some(query_budget.max_tokens)
+                },
                 allocated_tokens: query_budget.max_tokens,
                 reduction_budget_tokens: None,
                 final_tokens: 0,
@@ -839,6 +1079,7 @@ impl DefaultContextAssembler {
                 )
                 .collect();
             }
+            let mut cache_source = None;
             let load = async {
                 let request = ContextInput {
                     stage: input.stage,
@@ -863,9 +1104,9 @@ impl DefaultContextAssembler {
                 } else if config.id == HISTORY_BLOCK {
                     &history
                 } else {
-                    self.contributors[&config.id].as_ref()
+                    contributors[&config.id].as_ref()
                 };
-                let block = source.contribute(&request).await?;
+                let mut block = source.contribute(&request).await?;
                 match report.kind {
                     ContextSourceKind::Instruction => {
                         if !matches!(block.trust, ContextTrust::Instruction | ContextTrust::Mixed) {
@@ -915,9 +1156,79 @@ impl DefaultContextAssembler {
                         "instruction providers cannot be compressed".into(),
                     ));
                 }
+                if config.compression.is_some()
+                    && config.id != HISTORY_BLOCK
+                    && self
+                        .history_summary
+                        .as_ref()
+                        .is_none_or(|(id, _)| *id != config.id)
+                {
+                    cache_source = Some(block.clone());
+                    if let Some(cache) = &self.reduction_cache {
+                        if let Some(messages) = cache
+                            .load(&ContextReductionCacheInput {
+                                history: input.history,
+                                model: input.model,
+                                block: &block,
+                                config,
+                            })
+                            .await?
+                        {
+                            validate_messages(&messages).map_err(ContextError::from)?;
+                            if messages.iter().any(|message| {
+                                message.role != Role::User
+                                    || !message.tool_calls.is_empty()
+                                    || message.tool_call_id.is_some()
+                                    || message.tool_result.is_some()
+                                    || message.model_context.is_some()
+                            }) {
+                                return Err(AgentError::InvalidConfiguration(
+                                    "cached context must remain data".into(),
+                                ));
+                            }
+                            block.messages = messages;
+                            validate_contribution(
+                                &block,
+                                self.max_source_messages,
+                                self.max_source_bytes,
+                            )?;
+                        }
+                    }
+                }
                 report.source_version = block.source_version.clone();
-                report.original_tokens =
-                    Some(context_tokens(&block.messages, input.model, input.estimator).await?);
+                let projection = if config.id == HISTORY_BLOCK && self.history_summary.is_none() {
+                    config
+                        .reducer
+                        .cached_projection(&ContextReductionInput {
+                            block: &block,
+                            budget: query_budget,
+                            model: input.model,
+                            estimator: input.estimator,
+                            history: input.history,
+                            run: input.run,
+                            models: input.models,
+                            limits: input.limits,
+                            overflow_recoveries: 0,
+                            compression: None,
+                        })
+                        .await?
+                } else {
+                    None
+                };
+                if let Some(messages) = &projection {
+                    validate_messages(messages).map_err(ContextError::from)?;
+                    validate_history_projection(&block.messages, messages)?;
+                    ensure_context_fits(messages, query_budget, input.model, input.estimator)
+                        .await?;
+                }
+                report.original_tokens = Some(
+                    context_tokens(
+                        projection.as_deref().unwrap_or(&block.messages),
+                        input.model,
+                        input.estimator,
+                    )
+                    .await?,
+                );
                 Ok(block)
             };
             let deadline =
@@ -943,27 +1254,104 @@ impl DefaultContextAssembler {
                     return Err(context_assembly_failure(input, reports, error));
                 }
             }
+            cache_sources.push(cache_source);
             reports.push(report);
+        }
+        let summary_position = self.history_summary.as_ref().map(|(id, _)| {
+            layout
+                .iter()
+                .position(|b| b.id == *id)
+                .expect("validated summary layout")
+        });
+        if let Some(position) = summary_position {
+            if sources[position]
+                .as_ref()
+                .is_none_or(|block| !block.messages.is_empty())
+            {
+                return Err(AgentError::InvalidConfiguration(
+                    "history summary destination must be an empty data contributor".into(),
+                ));
+            }
+            let history_position = layout
+                .iter()
+                .position(|b| b.id == HISTORY_BLOCK)
+                .expect("validated history layout");
+            let block = sources[history_position]
+                .as_ref()
+                .expect("required history source");
+            let summary_budget = configured_block_budget(&layout[position], available)?;
+            let cached = layout[history_position]
+                .reducer
+                .project_history(
+                    &ContextReductionInput {
+                        block,
+                        budget: configured_block_budget(&layout[history_position], available)?,
+                        model: input.model,
+                        estimator: input.estimator,
+                        history: input.history,
+                        run: input.run,
+                        models: input.models,
+                        limits: input.limits,
+                        overflow_recoveries: 0,
+                        compression: None,
+                    },
+                    summary_budget,
+                    self.history_summary.as_ref().unwrap().1,
+                    true,
+                )
+                .await?;
+            if let Some(cached) = cached {
+                validate_history_split(&block.messages, &cached)?;
+                ensure_context_fits(
+                    &cached.summary,
+                    summary_budget,
+                    input.model,
+                    input.estimator,
+                )
+                .await?;
+                reports[position].original_tokens =
+                    Some(context_tokens(&cached.summary, input.model, input.estimator).await?);
+                reports[history_position].original_tokens =
+                    Some(context_tokens(&cached.recent, input.model, input.estimator).await?);
+            }
         }
         if implicit_layout {
             let fixed = reports[0].original_tokens.unwrap_or(0);
+            let mut reserved = fixed;
+            let mut reserved_messages = sources[0].as_ref().map_or(0, |b| b.messages.len());
+            for index in 2..layout.len() {
+                let cap = configured_block_budget(&layout[index], available)?;
+                let tokens = reports[index]
+                    .original_tokens
+                    .unwrap_or(0)
+                    .min(cap.max_tokens);
+                let messages = sources[index]
+                    .as_ref()
+                    .map_or(0, |b| b.messages.len())
+                    .min(cap.max_messages);
+                layout[index].budget = BlockBudget {
+                    max_tokens: Some(tokens),
+                    max_ratio_bps: None,
+                    max_messages: Some(messages),
+                };
+                reserved = reserved.saturating_add(tokens);
+                reserved_messages = reserved_messages.saturating_add(messages);
+            }
             layout[0].budget = BlockBudget {
                 max_messages: Some(sources[0].as_ref().map_or(0, |b| b.messages.len())),
                 ..BlockBudget::tokens(fixed)
             };
             layout[1].budget = BlockBudget {
-                max_messages: Some(
-                    available
-                        .max_messages
-                        .saturating_sub(sources[0].as_ref().map_or(0, |b| b.messages.len())),
-                ),
-                ..BlockBudget::tokens(available.max_tokens.checked_sub(fixed).ok_or_else(|| {
-                    context_assembly_failure(
-                        input,
-                        reports.clone(),
-                        context_budget_error("instructions exceed input capacity"),
-                    )
-                })?)
+                max_messages: Some(available.max_messages.saturating_sub(reserved_messages)),
+                ..BlockBudget::tokens(available.max_tokens.checked_sub(reserved).ok_or_else(
+                    || {
+                        context_assembly_failure(
+                            input,
+                            reports.clone(),
+                            context_budget_error("instructions exceed input capacity"),
+                        )
+                    },
+                )?)
             };
         }
         let mut source_tokens: Vec<_> = reports
@@ -973,17 +1361,33 @@ impl DefaultContextAssembler {
         let original_total = source_tokens
             .iter()
             .fold(protocol, |total, tokens| total.saturating_add(*tokens));
-        let global = self.force_global_compression
+        let manual = input
+            .run
+            .extensions
+            .get::<ContextCompactionRequest>()
+            .is_some();
+        let global = manual
+            || self.force_global_compression
             || self.global_compression_ratio_bps.is_some_and(|ratio| {
                 original_total
                     >= ((input.budget.max_tokens as u128 * ratio as u128) / 10_000) as usize
             });
-        let mut allocations = self
-            .policy
-            .allocate_sources(&layout, available, &source_tokens)
-            .await?;
+        let mut allocations = allocate_for_reduction(
+            self.policy.as_ref(),
+            &layout,
+            available,
+            &source_tokens,
+            &sources,
+            input,
+            global,
+        )
+        .await?;
         validate_allocations(&allocations, layout.len(), available)?;
         let mut outputs = vec![Vec::new(); layout.len()];
+        let mut progress = CompactionProgress {
+            run: input.run,
+            active: false,
+        };
         // Reduction order is independent of prompt order. Reducing fixed data first
         // lets history borrow newly freed capacity without reading sources again.
         let reduction_order: Vec<_> = (0..layout.len())
@@ -991,11 +1395,19 @@ impl DefaultContextAssembler {
             .chain((0..layout.len()).filter(|index| layout[*index].id == HISTORY_BLOCK))
             .collect();
         for position in reduction_order {
+            if Some(position) == summary_position {
+                continue;
+            }
             let config = &layout[position];
             let Some(block) = &sources[position] else {
                 continue;
             };
             if config.id == HISTORY_BLOCK {
+                if let Some(summary) = summary_position {
+                    // Reserve the summary's own quota before lending the rest to raw history.
+                    source_tokens[summary] =
+                        configured_block_budget(&layout[summary], available)?.max_tokens;
+                }
                 allocations = self
                     .policy
                     .allocate_sources(&layout, available, &source_tokens)
@@ -1010,26 +1422,68 @@ impl DefaultContextAssembler {
             } else {
                 configured_block_budget(config, available)?
             };
+            // A cached history projection is the footprint for pressure and
+            // allocation, not the source from which a fresh summary is derived.
+            // Repeated manual compression must not geometrically shrink that
+            // summary until protected messages leave only one token for facts.
+            let compression_source_tokens =
+                if global && config.id == HISTORY_BLOCK && config.compression.is_some() {
+                    let tokens =
+                        context_tokens(&block.messages, input.model, input.estimator).await?;
+                    reports[position].original_tokens = Some(tokens);
+                    tokens
+                } else {
+                    source_tokens[position]
+                };
+            let summary_pressure = if config.id == HISTORY_BLOCK {
+                summary_position
+                    .and_then(|summary| layout[summary].compression.map(|policy| (summary, policy)))
+                    .filter(|(summary, policy)| {
+                        reports[*summary].original_tokens.unwrap_or(0) > 0
+                            && reports[*summary].original_tokens.unwrap_or(0)
+                                >= configured_block_budget(&layout[*summary], available).map_or(
+                                    usize::MAX,
+                                    |b| {
+                                        b.max_tokens
+                                            .saturating_mul(policy.trigger_ratio_bps as usize)
+                                            / 10_000
+                                    },
+                                )
+                    })
+            } else {
+                None
+            };
             let trigger = config.compression.and_then(|policy| {
                 let reached = source_tokens[position]
                     >= ((nominal.max_tokens as u128 * policy.trigger_ratio_bps as u128) / 10_000)
                         as usize;
-                (global || reached).then_some(ContextCompressionDirective {
-                    trigger: if global {
-                        ContextCompressionTrigger::Global
-                    } else {
-                        ContextCompressionTrigger::Block
+                (global || reached || summary_pressure.is_some()).then_some(
+                    ContextCompressionDirective {
+                        trigger: if global {
+                            ContextCompressionTrigger::Global
+                        } else {
+                            ContextCompressionTrigger::Block
+                        },
+                        target_tokens: (((if global {
+                            compression_source_tokens.min(nominal.max_tokens)
+                        } else {
+                            nominal.max_tokens
+                        }) as u128
+                            * policy.target_ratio_bps as u128)
+                            / 10_000) as usize,
                     },
-                    target_tokens: ((nominal.max_tokens as u128 * policy.target_ratio_bps as u128)
-                        / 10_000) as usize,
-                })
+                )
             });
+            if trigger.is_some() && !block.messages.is_empty() {
+                progress.start().await?;
+            }
             reports[position].allocated_tokens = budget.max_tokens;
             reports[position].reduction_budget_tokens = Some(budget.max_tokens);
             reports[position].compression_trigger = trigger
                 .map_or(ContextCompressionTrigger::None, |directive| {
                     directive.trigger
                 });
+            let mut history_summary_output = None;
             let process = async {
                 let reduction = ContextReductionInput {
                     block,
@@ -1049,6 +1503,54 @@ impl DefaultContextAssembler {
                 };
                 let mut output = if block.trust != ContextTrust::Data {
                     KeepContext.reduce(&reduction).await?
+                } else if config.id == HISTORY_BLOCK && summary_position.is_some() {
+                    let summary = summary_position.unwrap();
+                    let summary_budget = configured_block_budget(&layout[summary], available)?;
+                    let summary_target =
+                        summary_pressure.map_or(summary_budget.max_tokens, |(_, policy)| {
+                            summary_budget
+                                .max_tokens
+                                .saturating_mul(policy.target_ratio_bps as usize)
+                                / 10_000
+                        });
+                    let projected = config
+                        .reducer
+                        .project_history(
+                            &ContextReductionInput {
+                                compression: trigger.map(|directive| ContextCompressionDirective {
+                                    target_tokens: summary_target,
+                                    ..directive
+                                }),
+                                ..reduction
+                            },
+                            summary_budget,
+                            self.history_summary.as_ref().unwrap().1,
+                            false,
+                        )
+                        .await?
+                        .ok_or_else(|| {
+                            AgentError::InvalidConfiguration(
+                                "history reducer omitted its projection".into(),
+                            )
+                        })?;
+                    validate_history_split(&block.messages, &projected)?;
+                    validate_contribution(
+                        &ContextBlock {
+                            messages: projected.summary.clone(),
+                            ..sources[summary].as_ref().unwrap().clone()
+                        },
+                        self.max_source_messages,
+                        self.max_source_bytes,
+                    )?;
+                    ensure_context_fits(
+                        &projected.summary,
+                        summary_budget,
+                        input.model,
+                        input.estimator,
+                    )
+                    .await?;
+                    history_summary_output = Some(projected.summary);
+                    projected.recent
                 } else {
                     config.reducer.reduce(&reduction).await?
                 };
@@ -1071,7 +1573,8 @@ impl DefaultContextAssembler {
                         self.max_source_bytes,
                     )?;
                 }
-                if trigger.is_some()
+                if !(config.id == HISTORY_BLOCK && summary_position.is_some())
+                    && trigger.is_some()
                     && reports[position]
                         .original_tokens
                         .unwrap_or(0)
@@ -1085,10 +1588,29 @@ impl DefaultContextAssembler {
                     output = block.messages.clone();
                 }
                 ensure_context_fits(&output, budget, input.model, input.estimator).await?;
+                if output != block.messages {
+                    if let (Some(cache), Some(source)) =
+                        (&self.reduction_cache, &cache_sources[position])
+                    {
+                        cache
+                            .save(
+                                &ContextReductionCacheInput {
+                                    history: input.history,
+                                    model: input.model,
+                                    block: source,
+                                    config,
+                                },
+                                &output,
+                            )
+                            .await?;
+                    }
+                }
                 Ok(output)
             };
+            // Reduction can invoke the configured summary model; its timeout
+            // must not be shortened by the contributor's I/O read allowance.
             let deadline =
-                (tokio::time::Instant::now() + self.source_timeout).min(input.run.deadline);
+                (tokio::time::Instant::now() + input.limits.model_timeout).min(input.run.deadline);
             let processed = tokio::select! {
                 biased;
                 _ = input.run.cancelled() => Err(AgentError::Cancelled),
@@ -1096,6 +1618,25 @@ impl DefaultContextAssembler {
             };
             match processed {
                 Ok(output) => {
+                    if let (Some(summary), Some(messages)) =
+                        (summary_position, history_summary_output.take())
+                    {
+                        let tokens =
+                            context_tokens(&messages, input.model, input.estimator).await?;
+                        reports[summary].reduction_budget_tokens =
+                            Some(configured_block_budget(&layout[summary], available)?.max_tokens);
+                        reports[summary].final_tokens = tokens;
+                        reports[summary].final_message_count = messages.len();
+                        reports[summary].compression_trigger =
+                            trigger.map_or(ContextCompressionTrigger::None, |d| d.trigger);
+                        reports[summary].outcome = if trigger.is_some() {
+                            ContextBlockOutcome::Reduced
+                        } else {
+                            ContextBlockOutcome::Kept
+                        };
+                        source_tokens[summary] = tokens;
+                        outputs[summary] = messages;
+                    }
                     let tokens = context_tokens(&output, input.model, input.estimator).await?;
                     reports[position].final_tokens = tokens;
                     reports[position].final_message_count = output.len();
@@ -1145,6 +1686,7 @@ impl DefaultContextAssembler {
         let total = context_tokens(&messages, input.model, input.estimator)
             .await?
             .saturating_add(protocol);
+        progress.finish();
         Ok(ContextWindow {
             messages,
             report: ContextAssemblyReport {
@@ -1210,6 +1752,89 @@ pub fn configured_block_budget(
             .min(available.max_messages),
     })
 }
+// When raw fixed data alone fills the window, reserve configured reduction
+// targets before admitting it. Protected instructions and the newest history
+// turn retain their full cost; only compressible data shares the remaining room.
+async fn allocate_for_reduction(
+    policy: &dyn ContextBudgetPolicy,
+    layout: &[ContextBlockConfig],
+    available: ContextBudget,
+    tokens: &[usize],
+    sources: &[Option<ContextBlock>],
+    input: &ContextAssemblyInput<'_>,
+    global: bool,
+) -> Result<Vec<ContextBudget>, AgentError> {
+    let error = match policy.allocate_sources(layout, available, tokens).await {
+        Ok(budgets) => return Ok(budgets),
+        Err(error) => error,
+    };
+    if !matches!(
+        error.primary(),
+        AgentError::Context(ContextError::BudgetExceeded(_))
+    ) {
+        return Err(error);
+    }
+    let mut reserved = 0usize;
+    let mut weights = vec![0usize; layout.len()];
+    let mut eligible = vec![false; layout.len()];
+    let mut planned = tokens.to_vec();
+    for (index, config) in layout.iter().enumerate() {
+        let nominal = configured_block_budget(config, available)?;
+        let trigger = config.compression.filter(|p| {
+            global
+                || tokens[index]
+                    >= nominal
+                        .max_tokens
+                        .saturating_mul(p.trigger_ratio_bps as usize)
+                        / 10_000
+        });
+        if config.id == HISTORY_BLOCK && trigger.is_some() {
+            let protected = if let Some(source) = &sources[index] {
+                let newest = source
+                    .messages
+                    .iter()
+                    .rposition(|m| m.role == Role::User)
+                    .unwrap_or(0);
+                let messages = source
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, m)| *i >= newest || m.role == Role::System)
+                    .map(|(_, m)| m.clone())
+                    .collect::<Vec<_>>();
+                context_tokens(&messages, input.model, input.estimator).await?
+            } else {
+                0
+            };
+            let target = tokens[index]
+                .min(nominal.max_tokens)
+                .saturating_mul(trigger.unwrap().target_ratio_bps as usize)
+                / 10_000;
+            reserved = reserved.saturating_add(protected.max(target));
+        } else if let Some(trigger) = trigger {
+            eligible[index] = true;
+            weights[index] = tokens[index]
+                .min(nominal.max_tokens)
+                .saturating_mul(trigger.target_ratio_bps as usize)
+                / 10_000;
+        } else {
+            reserved = reserved.saturating_add(tokens[index].min(nominal.max_tokens));
+        }
+    }
+    let room = available.max_tokens.checked_sub(reserved).ok_or(error)?;
+    let total = weights.iter().fold(0usize, |sum, n| sum.saturating_add(*n));
+    for (index, weight) in weights.into_iter().enumerate() {
+        if eligible[index] {
+            planned[index] = if total > room {
+                ((weight as u128 * room as u128) / total as u128) as usize
+            } else {
+                weight
+            };
+        }
+    }
+    policy.allocate_sources(layout, available, &planned).await
+}
+
 fn validate_allocations(
     allocations: &[ContextBudget],
     count: usize,
@@ -1280,8 +1905,14 @@ fn validate_contribution(
     max_bytes: usize,
 ) -> Result<(), AgentError> {
     if block.trust == ContextTrust::Mixed
-        && (block.messages.first().is_none_or(|message| message.role != Role::System)
-            || !block.messages.iter().any(|message| message.role == Role::User))
+        && (block
+            .messages
+            .first()
+            .is_none_or(|message| message.role != Role::System)
+            || !block
+                .messages
+                .iter()
+                .any(|message| message.role == Role::User))
     {
         return Err(AgentError::InvalidConfiguration(
             "mixed context must start with an instruction and contain lower-trust data".into(),
@@ -1310,15 +1941,32 @@ fn validate_contribution(
     }
     Ok(())
 }
+fn validate_history_split(
+    source: &[Message],
+    projection: &HistoryProjection,
+) -> Result<(), AgentError> {
+    validate_history_projection(source, &projection.clone().into_messages())?;
+    if projection.summary.is_empty() && projection.recent == source {
+        return Ok(());
+    }
+    let prefix = projection
+        .recent
+        .iter()
+        .take_while(|m| m.role == Role::System)
+        .count();
+    let tail = &projection.recent[prefix..];
+    if (!source.is_empty() && tail.first().is_none_or(|m| m.role != Role::User))
+        || !source.ends_with(tail)
+    {
+        return Err(AgentError::InvalidConfiguration(
+            "recent history must be an unchanged suffix starting at a complete user turn".into(),
+        ));
+    }
+    Ok(())
+}
 fn validate_history_projection(source: &[Message], output: &[Message]) -> Result<(), AgentError> {
-    let fixed: Vec<_> = source
-        .iter()
-        .filter(|m| m.role == Role::System)
-        .collect();
-    let projected: Vec<_> = output
-        .iter()
-        .filter(|m| m.role == Role::System)
-        .collect();
+    let fixed: Vec<_> = source.iter().filter(|m| m.role == Role::System).collect();
+    let projected: Vec<_> = output.iter().filter(|m| m.role == Role::System).collect();
     if fixed != projected {
         return Err(AgentError::InvalidConfiguration(
             "reduction changed trusted instructions".into(),

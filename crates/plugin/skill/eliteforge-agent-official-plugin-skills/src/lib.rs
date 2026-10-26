@@ -22,11 +22,10 @@ use std::{
 use async_trait::async_trait;
 use eliteforge_agent_core::{
     AgentError, CapabilitySkillSource, ContextBlock, ContextContributor, ContextContributorService,
-    ContextInput, ContextSourceKind, Message, Plugin, PluginContext, PluginError,
-    PluginReadyContext, Role, RunContext, RunMiddleware, RunNext, RunResult, SkillCatalog,
-    SkillDetail, SkillProvider, SkillResource, SkillSummary, StateStore, ToolLease, ToolProvider,
-    ToolProviderService,
-    ManagedDeveloperPrompts,
+    ContextInput, ContextSourceKind, ManagedDeveloperPrompts, Message, Plugin, PluginContext,
+    PluginError, PluginReadyContext, Role, RunContext, RunMiddleware, RunNext, RunResult,
+    SkillCatalog, SkillDetail, SkillProvider, SkillResource, SkillSummary, StateStore, ToolLease,
+    ToolProvider, ToolProviderService,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -140,6 +139,9 @@ impl Plugin for SkillsPlugin {
         let context_provider: Arc<dyn ContextContributor> = endpoint.clone();
         let tool_provider: Arc<dyn ToolProvider> = endpoint.clone();
         let run_middleware: Arc<dyn RunMiddleware> = endpoint;
+        let guidance: Arc<dyn ContextContributor> = Arc::new(SkillsGuidance);
+        context.contribute(ContextContributorService(guidance.clone()))?;
+        context.contribute_extension(guidance)?;
         context.contribute(ContextContributorService(context_provider.clone()))?;
         context.contribute_extension(context_provider)?;
         context.contribute(ToolProviderService(tool_provider.clone()))?;
@@ -973,33 +975,89 @@ fn successful_loaded_skill_names(transcript: &[Message]) -> BTreeSet<String> {
     let mut calls = HashMap::new();
     let mut loaded = BTreeSet::new();
     for message in transcript {
-        for call in &message.tool_calls {
+        for original in &message.tool_calls {
+            let presented = eliteforge_agent_core::presented_call(original);
+            let call = presented.as_ref().unwrap_or(original);
             if call.call_name != "skill_load" {
                 continue;
             }
-            let Some(name) = call.arguments.get("name").and_then(|value| value.as_str()) else {
-                continue;
-            };
-            if !name.is_empty() {
-                calls.insert(call.id.clone(), name.to_owned());
-            }
+            let batch = call
+                .arguments
+                .get("items")
+                .and_then(serde_json::Value::as_array);
+            let names: Vec<_> = batch
+                .map_or_else(|| vec![&call.arguments], |items| items.iter().collect())
+                .into_iter()
+                .map(|input| {
+                    input
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                })
+                .collect();
+            calls.insert(call.id.clone(), (batch.is_some(), names));
         }
-        if message.role != Role::Tool
-            || message
-                .tool_result
-                .as_ref()
-                .is_none_or(|result| result.is_error)
-        {
+        if message.role != Role::Tool {
             continue;
         }
-        let Some(call_id) = message.tool_call_id.as_deref() else {
+        let Some((batch, names)) = message
+            .tool_call_id
+            .as_deref()
+            .and_then(|id| calls.remove(id))
+        else {
             continue;
         };
-        if let Some(name) = calls.remove(call_id) {
-            loaded.insert(name);
+        let Some(result) = &message.tool_result else {
+            continue;
+        };
+        if batch {
+            // A partially failed batch can still have successfully loaded skills.
+            if let Some(rows) = result
+                .structured
+                .as_ref()
+                .and_then(|v| v.get("results"))
+                .and_then(serde_json::Value::as_array)
+            {
+                for (index, name) in names.into_iter().enumerate() {
+                    if rows
+                        .get(index)
+                        .is_some_and(|row| row["index"] == index && row["isError"] == false)
+                    {
+                        loaded.extend(name);
+                    }
+                }
+            }
+        } else if !result.is_error {
+            loaded.extend(names.into_iter().flatten());
         }
     }
     loaded
+}
+
+#[cfg(test)]
+#[test]
+fn restores_only_successful_items_from_gateway_skill_batches() {
+    let mut assistant = Message::assistant("");
+    assistant.tool_calls = vec![eliteforge_agent_core::ToolCall::new(
+        "skills",
+        "tool_execute",
+        serde_json::json!({
+            "tool":"skill_load", "arguments":{"items":[{"name":"ready"},{"name":"failed"}]}
+        }),
+    )];
+    let mut result = Message::tool("skills", "");
+    result.tool_result = Some(eliteforge_agent_core::ToolResultMetadata {
+        is_error: true,
+        result_reference: None,
+        structured: Some(
+            serde_json::json!({"results":[{"index":0,"isError":false},{"index":1,"isError":true}]}),
+        ),
+    });
+    assert_eq!(
+        successful_loaded_skill_names(&[assistant, result]),
+        BTreeSet::from(["ready".into()])
+    );
 }
 
 fn validate_resource_path(path: &str) -> Result<(), AgentError> {
@@ -1027,6 +1085,28 @@ struct ContextSkill<'a> {
 }
 
 #[derive(Clone)]
+struct SkillsGuidance;
+#[async_trait]
+impl ContextContributor for SkillsGuidance {
+    fn kind(&self) -> ContextSourceKind {
+        ContextSourceKind::Instruction
+    }
+    fn block_id(&self) -> &str {
+        "skills.guidance"
+    }
+    async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
+        let guidance = ManagedDeveloperPrompts::resolve(
+            input.run,
+            "skills.guidance",
+            DEFAULT_SKILLS_GUIDANCE.trim(),
+        )?;
+        Ok(ContextBlock::instructions(
+            self.block_id(),
+            vec![Message::system(guidance)],
+        ))
+    }
+}
+
 struct SkillsEndpoint {
     runtime: Arc<SkillsRuntime>,
 }
@@ -1037,10 +1117,16 @@ impl ContextContributor for SkillsEndpoint {
         true
     }
     fn kind(&self) -> ContextSourceKind {
-        ContextSourceKind::Instruction
+        ContextSourceKind::Data
     }
     fn block_id(&self) -> &str {
         "skills.catalog"
+    }
+    fn default_block_config(&self) -> Option<eliteforge_agent_core::ContextBlockConfig> {
+        Some(eliteforge_agent_core::ContextBlockConfig::new(
+            self.block_id(),
+            eliteforge_agent_core::BlockBudget::tokens(8192),
+        ))
     }
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let context = input.run;
@@ -1060,7 +1146,12 @@ impl ContextContributor for SkillsEndpoint {
             explicit.push(self.runtime.load(context, name).await?);
         }
         if snapshot.skills.is_empty() && explicit.is_empty() {
-            return Ok(ContextBlock::instructions(self.block_id(), Vec::new()));
+            return Ok(ContextBlock {
+                id: self.block_id().into(),
+                messages: Vec::new(),
+                trust: eliteforge_agent_core::ContextTrust::Data,
+                source_version: None,
+            });
         }
         let skills = snapshot
             .skills
@@ -1071,24 +1162,25 @@ impl ContextContributor for SkillsEndpoint {
             })
             .collect::<Vec<_>>();
         let metadata = serialize_catalog_for_context(&skills)?;
-        let guidance = ManagedDeveloperPrompts::resolve(
-            context,
-            "skills.guidance",
-            DEFAULT_SKILLS_GUIDANCE.trim(),
-        )?;
-        let mut messages = vec![
-            Message::system(guidance),
-            Message::user(format!("<available_skills>{metadata}</available_skills>")),
-        ];
+        let mut messages = vec![Message::user(format!(
+            "<available_skills>{metadata}</available_skills>"
+        ))];
         if !explicit.is_empty() {
             let explicit = serde_json::to_string(&explicit)
                 .map_err(|_| AgentError::Run("serialize requested skills failed".into()))?
                 .replace('&', "\\u0026")
                 .replace('<', "\\u003c")
                 .replace('>', "\\u003e");
-            messages.push(Message::user(format!("<requested_skills>{explicit}</requested_skills>")));
+            messages.push(Message::user(format!(
+                "<requested_skills>{explicit}</requested_skills>"
+            )));
         }
-        Ok(ContextBlock::instructions_with_data(self.block_id(), messages))
+        Ok(ContextBlock {
+            id: self.block_id().into(),
+            messages,
+            trust: eliteforge_agent_core::ContextTrust::Data,
+            source_version: None,
+        })
     }
 }
 

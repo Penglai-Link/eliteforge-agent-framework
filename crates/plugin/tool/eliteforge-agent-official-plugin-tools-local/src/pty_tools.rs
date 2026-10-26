@@ -240,7 +240,10 @@ pub fn terminal_tool_catalog() -> Vec<ToolDescriptor> {
         eliteforge_agent_core::ToolOperationKind::Query
     } else {
         eliteforge_agent_core::ToolOperationKind::Command
-    })).collect()
+    })).map(|descriptor| {
+        if descriptor.call_name == "terminal_write" { descriptor.with_single_input() }
+        else { descriptor }
+    }).collect()
 }
 // Scope of one awaited invocation, distinct from the persistent terminal owner.
 #[derive(Default)]
