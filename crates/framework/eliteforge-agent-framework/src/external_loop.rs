@@ -260,6 +260,10 @@ impl AgentLoop for ExternalAgentLoop {
         } else {
             None
         };
+        let mut external_extensions = request.extensions.clone();
+        if let Some(directory) = &request.working_directory {
+            external_extensions.insert(ExternalWorkingDirectory(directory.clone()));
+        }
         let result = tokio::select! {
             biased;
             _=context.cancellation.cancelled()=>Err(if tokio::time::Instant::now() >= context.deadline {AgentError::Run("external run deadline exceeded".into())} else {AgentError::Cancelled}),
@@ -273,11 +277,18 @@ impl AgentLoop for ExternalAgentLoop {
                         .as_ref()
                         .map(|model| format!("{}/{}", model.connection, model.model)),
                     session,
-                    extensions: request.extensions.clone(),
+                    extensions: external_extensions,
                 },
                 &events,
             )=>result,
         };
+        // Only a typed, certain pre-dispatch failure may release the reservation.
+        // Cancellation and transport failures after dispatch remain conservative.
+        if matches!(&result, Err(error) if matches!(error.primary(), AgentError::ExternalNotStarted(_)))
+        {
+            permit.release_unspent();
+            context.persist_budget().await?;
+        }
         if let Some((store, mut checkpoint, lease, guard)) = durable.take() {
             let message = &mut checkpoint.history.messages[1];
             let reasoning = events

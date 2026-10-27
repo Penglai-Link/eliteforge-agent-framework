@@ -528,6 +528,9 @@ pub enum AgentError {
     ToolSetup(String),
     #[error(transparent)]
     State(#[from] crate::StateError),
+    /// The external process/request was definitely not dispatched; no usage is owed.
+    #[error("external agent did not start: {0}")]
+    ExternalNotStarted(String),
     #[error("run failed: {0}")]
     Run(String),
     /// Execution failed and its cleanup also failed. Both errors remain typed;
@@ -631,6 +634,8 @@ pub struct RunLimits {
     pub model_timeout: std::time::Duration,
     pub tool_timeout: std::time::Duration,
     pub run_timeout: std::time::Duration,
+    /// Cumulative usage ceiling, independent of the context window.
+    /// `UNLIMITED_TOKENS` (the default) disables this optional ceiling.
     pub max_total_tokens: u64,
     pub max_model_output_tokens: u32,
     pub cleanup_timeout: std::time::Duration,
@@ -658,7 +663,7 @@ impl Default for RunLimits {
             model_timeout: std::time::Duration::from_secs(120),
             tool_timeout: std::time::Duration::from_secs(60),
             run_timeout: std::time::Duration::from_secs(3 * 24 * 60 * 60),
-            max_total_tokens: 1_000_000,
+            max_total_tokens: Self::UNLIMITED_TOKENS,
             max_model_output_tokens: 4096,
             cleanup_timeout: std::time::Duration::from_secs(5),
             max_child_runs: default_child_runs(),
@@ -675,6 +680,9 @@ fn default_child_depth() -> usize {
 }
 
 impl RunLimits {
+    /// No cumulative token ceiling. Context and output limits still apply.
+    pub const UNLIMITED_TOKENS: u64 = u64::MAX;
+
     #[doc(hidden)]
     pub fn validate(&self) -> Result<(), AgentError> {
         if [
@@ -726,6 +734,10 @@ pub struct RunRequest {
     /// A plain Agent cannot resolve application-owned Agent configuration.
     #[serde(default, rename = "agentCode", skip_serializing_if = "Option::is_none")]
     pub agent_code: Option<String>,
+    /// Requested child working directory. The host resolves relative paths against
+    /// the caller's directory and validates its existing filesystem authority.
+    #[serde(default, rename = "workingDirectory", skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
     /// Host admission identity, shared by control, events and durable run records.
     #[serde(default)]
     pub run_id: Option<RunId>,
@@ -780,6 +792,7 @@ impl RunRequest {
         Self {
             annotations: Vec::new(),
             agent_code: None,
+            working_directory: None,
             host_context: None,
             message_provenance: None,
             assistant_provenance: None,

@@ -476,17 +476,18 @@ fn spawn_tool_uses_host_agent_limits_instead_of_model_step_overrides() {
 }
 
 #[test]
-fn thread_tool_schema_cannot_raise_host_default_limits() {
+fn thread_tool_schema_keeps_step_limits_without_an_implicit_token_ceiling() {
     let defaults = RunLimits::default();
     let schema = compile_schema(&ThreadCreateTool::descriptor().input_schema).unwrap();
     assert!(!schema.is_valid(&json!({
         "task":"too many steps",
         "max_steps":defaults.max_steps + 1
     })));
-    assert!(!schema.is_valid(&json!({
-        "task":"too many tokens",
-        "max_total_tokens":defaults.max_total_tokens + 1
-    })));
+    assert_eq!(defaults.max_total_tokens, RunLimits::UNLIMITED_TOKENS);
+    for tokens in [2_000_000, RunLimits::UNLIMITED_TOKENS] {
+        assert!(schema.is_valid(&json!({"task":"explicit quota", "max_total_tokens":tokens})));
+    }
+    assert!(!schema.is_valid(&json!({"task":"invalid quota", "max_total_tokens":0})));
 }
 
 #[test]
@@ -753,4 +754,18 @@ async fn unresolved_named_agents_never_fall_back_to_the_current_agent() {
     request.agent_code = Some("reviewer".into());
     assert!(agent.run(request).await.is_err());
     assert!(agent.framework().close().await.is_success());
+}
+
+#[test]
+fn delegation_schema_carries_a_directory_independent_of_task_text() {
+    for descriptor in [AgentSpawnTool::descriptor(), ThreadCreateTool::descriptor()] {
+        let schema = compile_schema(&descriptor.input_schema).unwrap();
+        assert!(schema.is_valid(&json!({"task":"small task", "workingDirectory":"tasks/worker"})));
+        assert!(!schema.is_valid(&json!({"task":"small task", "workingDirectory":""})));
+    }
+    let mut request = RunRequest::new("session", "small task");
+    request.working_directory = Some("tasks/worker".into());
+    let decoded: RunRequest =
+        serde_json::from_value(serde_json::to_value(&request).unwrap()).unwrap();
+    assert_eq!(decoded.working_directory, request.working_directory);
 }

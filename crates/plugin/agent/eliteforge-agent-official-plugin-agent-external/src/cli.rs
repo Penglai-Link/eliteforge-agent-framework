@@ -38,6 +38,15 @@ impl ExternalCli {
         }
     }
 
+    pub fn with_working_directory(mut self, directory: String) -> Self {
+        let directory = std::path::PathBuf::from(directory);
+        let directory = if directory.is_relative() {
+            self.working_directory.as_ref().map(|base| Path::new(base).join(&directory)).unwrap_or(directory)
+        } else { directory };
+        self.working_directory = Some(directory.to_string_lossy().into_owned());
+        self
+    }
+
     pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
         self.reasoning_effort = effort;
         self
@@ -72,10 +81,10 @@ impl ExternalCli {
         eliteforge_agent_official_plugin_tools_local::process_tree::prepare(&mut command);
         command.env("NO_COLOR", "1");
         let working_directory = self.working_directory.as_deref().ok_or_else(|| {
-            TransportError::Failed("configured working directory is required".into())
+            TransportError::NotStarted("configured working directory is required".into())
         })?;
         if !Path::new(working_directory).is_absolute() || !Path::new(working_directory).is_dir() {
-            return Err(TransportError::Failed(format!(
+            return Err(TransportError::NotStarted(format!(
                 "configured working directory `{working_directory}` is unavailable"
             )));
         }
@@ -91,13 +100,20 @@ impl ExternalCli {
                 command.arg("--json");
                 if let Some(fast_mode) = self.fast_mode {
                     command.arg("--config");
-                    command.arg(if fast_mode { "service_tier=\"fast\"" } else { "service_tier=\"default\"" });
+                    command.arg(if fast_mode {
+                        "service_tier=\"fast\""
+                    } else {
+                        "service_tier=\"default\""
+                    });
                     command.arg("--config");
                     command.arg(format!("features.fast_mode={fast_mode}"));
                 }
                 if let Some(effort) = &self.reasoning_effort {
                     command.arg("--config");
-                    command.arg(format!("model_reasoning_effort={}", serde_json::to_string(effort).expect("string serialization")));
+                    command.arg(format!(
+                        "model_reasoning_effort={}",
+                        serde_json::to_string(effort).expect("string serialization")
+                    ));
                 }
                 if let Some(model_name) =
                     normalized_value(Some(context.model.clone().unwrap_or_default()))
@@ -157,7 +173,7 @@ impl ExternalCli {
         command.stderr(Stdio::piped());
 
         let mut child = command.spawn().map_err(|error| {
-            TransportError::Failed(format!(
+            TransportError::NotStarted(format!(
                 "{} command failed to start: {error}",
                 system_agent_name(self.kind)
             ))

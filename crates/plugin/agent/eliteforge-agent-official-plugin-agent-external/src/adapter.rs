@@ -52,7 +52,11 @@ impl fw::ExternalAgent for CliExternalAgent {
                 .as_ref()
                 .map(|session| session.session_id.clone()),
         };
-        let invocation = self.cli.invoke(context, Some(observed));
+        let cli = match request.extensions.get::<fw::ExternalWorkingDirectory>() {
+            Some(directory) => self.cli.clone().with_working_directory(directory.0.clone()),
+            None => self.cli.clone(),
+        };
+        let invocation = cli.invoke(context, Some(observed));
         tokio::pin!(invocation);
         let result = loop {
             if overflow.load(std::sync::atomic::Ordering::Acquire) {
@@ -122,7 +126,11 @@ fn usage(value: Option<ExternalAgentUsage>) -> fw::Usage {
 }
 
 fn transport_error(error: TransportError) -> fw::AgentError {
-    fw::AgentError::Run(format!("external agent transport failed: {error}"))
+    match error {
+        TransportError::PromptRequired => fw::AgentError::ExternalNotStarted(error.to_string()),
+        TransportError::NotStarted(message) => fw::AgentError::ExternalNotStarted(message),
+        error => fw::AgentError::Run(format!("external agent transport failed: {error}")),
+    }
 }
 
 /// Product-specific bridges project their authorized request and response

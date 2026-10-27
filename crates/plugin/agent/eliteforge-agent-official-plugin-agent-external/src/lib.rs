@@ -103,13 +103,15 @@ pub type ExternalAgentSink = Arc<dyn Fn(ExternalAgentEvent) + Send + Sync>;
 #[derive(Debug)]
 pub enum TransportError {
     PromptRequired,
+    /// Validation or process spawn failed before the CLI could execute.
+    NotStarted(String),
     Failed(String),
 }
 impl std::fmt::Display for TransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PromptRequired => f.write_str("prompt is required"),
-            Self::Failed(message) => f.write_str(message),
+            Self::NotStarted(message) | Self::Failed(message) => f.write_str(message),
         }
     }
 }

@@ -11,6 +11,10 @@ pub struct ExternalSessionRef {
     pub run_id: Option<String>,
 }
 
+/// Host-authorized process directory supplied for an external execution.
+#[derive(Debug, Clone)]
+pub struct ExternalWorkingDirectory(pub String);
+
 pub struct ExternalAgentRequest {
     pub annotations: Vec<MessageAnnotation>,
     pub input: Content,

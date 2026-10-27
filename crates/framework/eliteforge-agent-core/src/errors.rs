@@ -158,6 +158,7 @@ impl AgentError {
             Self::LongTermMemory(_) => "long_term_memory",
             Self::ToolSetup(_) => "tool_setup",
             Self::State(_) => "state",
+            Self::ExternalNotStarted(_) => "external_not_started",
             Self::Run(_) => "run",
             Self::WithCleanup { primary, .. } => primary.kind(),
         }

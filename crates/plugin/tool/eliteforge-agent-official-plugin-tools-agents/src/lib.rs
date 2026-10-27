@@ -23,6 +23,8 @@ const MAX_READ_MESSAGES: usize = 100;
 struct SpawnInput {
     #[serde(default, rename = "agentCode")]
     agent_code: Option<String>,
+    #[serde(default, rename = "workingDirectory")]
+    working_directory: Option<String>,
     task: String,
     #[serde(default)]
     background: bool,
@@ -35,6 +37,8 @@ struct SpawnInput {
 struct CreateThreadInput {
     #[serde(default, rename = "agentCode")]
     agent_code: Option<String>,
+    #[serde(default, rename = "workingDirectory")]
+    working_directory: Option<String>,
     task: String,
     #[serde(default)]
     title: Option<String>,
@@ -254,6 +258,7 @@ impl AgentSpawnTool {
                     "task":{"type":"string","minLength":1,"maxLength":16384},
                     "agentCode":{"type":"string","minLength":1,"maxLength":256,"description":"Target Agent code from the available Agent directory. Omit to use the current Agent. The host resolves configuration and checks authorization."},
                     "background":{"type":"boolean","description":"Run the child detached and return a child_run_id immediately so work can continue in parallel; collect the result with child_wait. Default: false."},
+                    "workingDirectory":{"type":"string","minLength":1,"maxLength":4096,"description":"Working directory for this task. State it explicitly when delegating coding or command work. Relative paths resolve against your current localDirectory; omit to inherit it. The host validates access and binds the real process cwd; naming a path only in task text does not select it."},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
@@ -273,6 +278,7 @@ impl Tool for AgentSpawnTool {
         let runtime = runtime(context)?;
         let mut run = request(task, limits(None, input.max_total_tokens, context)?);
         run.agent_code = agent_code;
+        run.working_directory = input.working_directory;
         if input.background {
             let summary = runtime
                 .spawn_child_detached(run, context)
@@ -302,6 +308,7 @@ impl ThreadCreateTool {
                     "agentCode":{"type":"string","minLength":1,"maxLength":256,"description":"Target Agent code from the available Agent directory. Omit to use the current Agent. The host resolves configuration and checks authorization."},
                     "title":{"type":"string","minLength":1,"maxLength":200},
                     "max_steps":{"type":"integer","minimum":1,"maximum":ceilings.max_steps},
+                    "workingDirectory":{"type":"string","minLength":1,"maxLength":4096,"description":"Working directory for this task. State it explicitly when delegating coding or command work. Relative paths resolve against your current localDirectory; omit to inherit it. The host validates access and binds the real process cwd; naming a path only in task text does not select it."},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
@@ -329,6 +336,7 @@ impl Tool for ThreadCreateTool {
             limits(input.max_steps, input.max_total_tokens, context)?,
         );
         run.agent_code = agent_code;
+        run.working_directory = input.working_directory;
         Ok(thread_summary(
             runtime
                 .create_thread(run, input.title, context)

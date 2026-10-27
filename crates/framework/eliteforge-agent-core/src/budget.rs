@@ -83,8 +83,9 @@ pub struct UsagePermit {
 }
 
 impl UsagePermit {
-    /// Reserve a child's entire allowance before dispatch. Children own their
-    /// own ledgers; concurrent children cannot spend the same parent capacity.
+    /// With a finite ceiling, reserve a child's entire allowance before dispatch.
+    /// Children own their ledgers; concurrent children cannot spend the same
+    /// limited parent capacity. Unlimited parents only aggregate settled usage.
     pub fn reserve_child(
         ledger: Arc<Mutex<UsageLedger>>,
         requested: u64,
@@ -92,22 +93,30 @@ impl UsagePermit {
     ) -> Result<(Self, u64), ModelError> {
         let mut state = ledger.lock().unwrap_or_else(|e| e.into_inner());
         let charged = state.including_reservations();
+        let unlimited = limit == crate::RunLimits::UNLIMITED_TOKENS;
         let available =
             limit.saturating_sub(charged.input_tokens.saturating_add(charged.output_tokens));
-        let allowance = available.min(requested);
+        let allowance = if unlimited {
+            requested
+        } else {
+            available.min(requested)
+        };
         if allowance == 0 {
             return Err(ModelError::Fatal(
                 "parent budget cannot admit a child run".into(),
             ));
         }
-        state.reserved = state.reserved.saturating_add(allowance);
+        // An unlimited parent has no capacity to partition. Reserving MAX would
+        // otherwise starve its own requests and sibling children.
+        let reserved = if unlimited { 0 } else { allowance };
+        state.reserved = state.reserved.saturating_add(reserved);
         drop(state);
         Ok((
             Self {
                 ledger,
                 reservation: Usage {
                     input_tokens: 0,
-                    output_tokens: allowance,
+                    output_tokens: reserved,
                 },
                 settled: false,
             },

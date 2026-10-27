@@ -99,6 +99,7 @@ async fn missing_directory_fails_before_spawn() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("working directory is required"));
+    assert!(matches!(error, TransportError::NotStarted(_)));
 }
 #[tokio::test]
 async fn cancelling_invocation_terminates_descendants() {
@@ -139,4 +140,70 @@ async fn cancelling_invocation_terminates_descendants() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn only_failures_before_process_spawn_are_known_unspent() {
+    let dir = tempfile::tempdir().unwrap();
+    for kind in [ExternalCliKind::Codex, ExternalCliKind::OpenCode] {
+        let missing = dir
+            .path()
+            .join("no-such-command")
+            .to_string_lossy()
+            .into_owned();
+        let error = ExternalCli::new(kind, missing, Some(dir.path().to_string_lossy().into()))
+            .invoke(request(), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, TransportError::NotStarted(_)), "{error:?}");
+        let command = script(&dir, "exit 91");
+        let error = ExternalCli::new(
+            kind,
+            command.clone(),
+            Some(
+                dir.path()
+                    .join("no-such-directory")
+                    .to_string_lossy()
+                    .into(),
+            ),
+        )
+        .invoke(request(), None)
+        .await
+        .unwrap_err();
+        assert!(matches!(error, TransportError::NotStarted(_)), "{error:?}");
+        let error = ExternalCli::new(kind, command, Some(dir.path().to_string_lossy().into()))
+            .invoke(request(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, TransportError::Failed(_)),
+            "a spawned process is ambiguous: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_directory_override_controls_the_cli_process_cwd() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("task");
+    std::fs::create_dir(&target).unwrap();
+    let command = script(
+        &dir,
+        "pwd -P > actual-cwd\necho '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}'",
+    );
+    ExternalCli::new(
+        ExternalCliKind::Codex,
+        command,
+        Some(dir.path().to_string_lossy().into_owned()),
+    )
+    .with_working_directory("task".into())
+    .invoke(request(), None)
+    .await
+    .unwrap();
+    let actual = std::fs::read_to_string(target.join("actual-cwd")).unwrap();
+    assert_eq!(
+        std::path::Path::new(actual.trim()),
+        target.canonicalize().unwrap()
+    );
+    assert!(!dir.path().join("actual-cwd").exists());
 }
