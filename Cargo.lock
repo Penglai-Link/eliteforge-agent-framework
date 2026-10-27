@@ -1256,6 +1256,7 @@ dependencies = [
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
  "eliteforge-agent-official-plugin-storage-local",
+ "eliteforge-agent-official-plugin-tools-discovery",
  "eliteforge-agent-test-support",
  "jsonschema",
  "serde",

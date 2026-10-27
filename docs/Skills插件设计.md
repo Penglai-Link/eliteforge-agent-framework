@@ -138,6 +138,16 @@ let pack = CapabilityPackBuilder::new("shop", config)
 
 嵌入资源由应用指定的 `capability_skills_root` 准备到内容摘要目录，采用临时目录和原子发布；同一内容可复用，不同内容保留为不同版本。应用管理目录可由能力包直接引用，不会复制到该资源根目录。
 
+### 宿主产品的技能注册表对接
+
+Framework 运行时的 `SkillProvider` 目录和产品维护的技能注册表是两个独立边界。插件在运行时注册 `SkillProvider`，只说明 SkillsPlugin 可以发现和加载它；这不会自动在宿主的技能中心创建记录，也不会自动给 Agent 分配技能。只测试 `skill_load` 或上下文目录，无法证明技能已安装到产品注册表。
+
+产品安装或启动能力包时，宿主应遍历每个实际安装的能力包，读取 `CapabilityPack::registry_skill_sources()`，将每个来源中的技能及配套资源同步到自己的注册表，并按既有规则处理来源、版本、禁用、更新、卸载和 Agent 分配。该方法默认返回 `skill_sources()`；普通能力包用 `.skills(capability_skills!())` 或目录来源即可同时提供运行时和登记来源。嵌套包也必须逐个遍历；不能只读取外层包。对外部分发包还要在 manifest 中声明技能目录，并验证打包产物中确实包含 `SKILL.md` 和被引用的资源。
+
+如果插件已经提供动态 `SkillProvider`（例如 A2UI 需要动态生成协议资源），应单独实现 `registry_skill_sources()` 提供可登记的技能文件，不要再通过 `skill_sources()` 把同一技能加入第二个运行时 Provider，否则聚合时会因技能重名失败。注册表中的文件须与运行时 Provider 的技能名称一致；动态资源仍由该 Provider 负责。客户端能力协商影响技能是否适用于一次运行，不应成为产品安装登记或绕过 Agent 授权的条件。
+
+对接验收至少覆盖：安装后产品注册表可查到技能和正确来源；分配后 Agent 的真实运行目录可见且可以加载；取消分配、禁用和重启后按宿主规则生效；重新同步不覆盖用户的分配变更。动态 Provider 还应验证资源读取和没有重复注册。检查产品数据库或产品 API 以及真实模型请求上下文，分别证明产品登记和运行时可见；不要把其中一项当作另一项的证据。
+
 ## 7. 聚合、选择与重复名称
 
 Skills 插件在 `install` 阶段注册统一运行时、上下文 Provider、工具 Provider 和运行中间件；在 `ready` 阶段收集所有已注册的 `SkillProvider`，建立聚合 Provider。能力包技能来源也会参与该聚合，因此系统目录、工作目录、自定义 Provider 和选中能力包共用同一份技能清单及工具。
@@ -161,8 +171,8 @@ let skills = SkillsPlugin::filesystem(FileSystemSkillsConfig::new())
 
 1. 首次需要技能目录时调用所有 Provider 的 `catalog`，建立运行级快照。
 2. 上下文只包含选中技能的名称、描述、来源和位置等摘要，不包含完整技能正文。
-3. 模型调用 `skill_load` 后，插件读取完整 `SKILL.md` 并返回资源清单。
-4. 模型调用 `skill_read_resource` 后，插件只读取 `skill_load` 清单中列出的单个文本资源。
+3. 模型需要技能正文或资源路径时，可以调用 `skill_load`，插件返回完整 `SKILL.md` 和资源清单。
+4. 模型调用 `skill_read_resource` 时，插件按当前运行的权限和资源清单验证路径；如尚未建立清单，在后台按需加载，不将技能正文额外返回模型。
 5. 运行完成或取消时，插件清理运行快照，并调用各 Provider 的 `release`。
 
 ```mermaid
@@ -173,11 +183,17 @@ sequenceDiagram
     Runtime->>Provider: catalog(run_id)
     Provider-->>Runtime: 技能摘要与诊断
     Runtime-->>Model: 注入已选技能摘要
-    Model->>Runtime: skill_load(name)
-    Runtime->>Provider: load(run_id, name)
-    Provider-->>Runtime: SKILL.md 与资源路径
-    Runtime-->>Model: 技能正文与资源清单
+    opt 需要技能正文或资源路径
+        Model->>Runtime: skill_load(name)
+        Runtime->>Provider: load(run_id, name)
+        Provider-->>Runtime: SKILL.md 与资源路径
+        Runtime-->>Model: 技能正文与资源清单
+    end
     Model->>Runtime: skill_read_resource(name, path)
+    opt 尚未建立资源清单
+        Runtime->>Provider: load(run_id, name)
+        Provider-->>Runtime: 资源清单（后台使用）
+    end
     Runtime->>Provider: read_resource(run_id, name, path)
     Provider-->>Runtime: UTF-8 文本
     Runtime-->>Model: 资源内容
@@ -186,14 +202,14 @@ sequenceDiagram
 
 每个 `run_id` 只发现一次目录。文件系统 Provider 会记录入口文件和资源的大小、修改时间及清单；加载或读取时若内容与发现快照不一致，会返回错误并要求开启新的逻辑运行。成功读取的正文和资源会在当前快照中缓存，因此同一次运行不会混用发现前后的文件内容。
 
-同一 Agent 内暂停并恢复会复用运行快照。进程重建后，文件系统 Provider 会重新发现目录；框架不会承诺跨进程保存旧文件快照。对于持久化工具批次中断恢复的 `skill_read_resource`，框架只会根据已保存的成功 `skill_load` 结果重新验证资源清单。
+同一 Agent 内暂停并恢复会复用运行快照。进程重建后，文件系统 Provider 会重新发现目录；框架不会承诺跨进程保存旧文件快照。恢复时的 `skill_read_resource` 会重新检查当前运行的技能权限和资源清单，无需此前成功调用 `skill_load`。
 
 ## 9. 工具行为与诊断
 
 | 工具 | 行为 |
 | --- | --- |
 | `skill_load` | 仅加载本次运行中已选中的技能，返回摘要、完整正文和资源路径清单 |
-| `skill_read_resource` | 要求先成功执行 `skill_load`，且路径必须出现在对应技能的清单中；仅返回 UTF-8 文本 |
+| `skill_read_resource` | 无需先调用 `skill_load`；技能必须已启用，路径必须出现在其资源清单中；仅返回 UTF-8 文本 |
 | `skill_diagnostics` | 在当前运行发现目录后，返回非致命发现问题；Skills 来源未报告诊断时该工具不公开 |
 
 无效 YAML、frontmatter 不合规、名称与目录不匹配、符号链接或非普通文件等单项问题会作为诊断保留，并跳过受影响条目；不影响同一来源中的其他有效技能。目录不可读、配置目录类型错误、超出全局技能数上限或 Provider 返回重复技能名称会使该运行配置失败。

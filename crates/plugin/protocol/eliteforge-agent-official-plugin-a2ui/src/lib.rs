@@ -13,7 +13,7 @@ pub const MINIMAL_CATALOG_ID: &str = "https://eliteforge.dev/a2ui/v0.9.1/minimal
 pub const AGENT_CATALOG_ID: &str = "https://eliteforge.dev/a2ui/v0.9.1/agent";
 mod guidance;
 pub use guidance::{
-    A2UI_EXPAND_TOOL, A2UI_PACK_ID, A2UI_SKILL_NAME, A2uiPack, expand_descriptor, is_a2ui_tool,
+    A2UI_PACK_ID, A2UI_SKILL_NAME, A2uiPack, is_a2ui_tool,
     negotiated,
 };
 const KEY: &str = "framework.a2ui.v1";
@@ -737,12 +737,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
 #[async_trait]
 impl ToolProvider for A2uiService {
     fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
-        Some(
-            tool_descriptors()
-                .into_iter()
-                .chain(std::iter::once(expand_descriptor()))
-                .collect(),
-        )
+        Some(tool_descriptors())
     }
     async fn lease(&self, run: &RunContext) -> Result<ToolLease, AgentError> {
         if !negotiated(&run.extensions) {
@@ -763,11 +758,7 @@ impl ToolProvider for A2uiService {
         Ok(ToolLease::new(
             tool_descriptors()
                 .into_iter()
-                .map(|descriptor| ToolBinding::new(descriptor, A2uiTool(self.clone())).hidden())
-                .chain(std::iter::once(ToolBinding::new(
-                    expand_descriptor(),
-                    guidance::Expand,
-                )))
+                .map(|descriptor| ToolBinding::new(descriptor, A2uiTool(self.clone())).with_domain_code("a2ui"))
                 .collect(),
         ))
     }

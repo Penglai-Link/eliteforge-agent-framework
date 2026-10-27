@@ -10,12 +10,13 @@ The plugin contributes:
 
 - `ContextContributor`: a short decision guide for text, native clarification, reports, forms and reusable controls.
 - `SkillProvider`: the `a2ui-interface` instructions and progressive resources: examples, a compact negotiated Catalog index, individual component schemas and protocol/common-type schemas.
-- `a2ui_expand`: initially visible domain entry; exposes the generation tools for the run using Framework's native tool exposure mechanism.
-- `a2ui_publish`: hidden until expansion; creates, updates or deletes Display/Reusable surfaces.
-- `a2ui_request_input`: hidden until expansion; creates a SubmitOnce form backed by the native InteractionStore.
+- `a2ui_publish`: creates, updates or deletes Display/Reusable surfaces.
+- `a2ui_request_input`: creates a SubmitOnce form backed by the native InteractionStore.
+
+Both tools are available in the `a2ui` domain after client capability negotiation and host authorization. Gateway hosts discover them through `tool_search` and call them through `tool_execute`; no separate activation tool is needed.
 
 Native questions and approvals use their original interaction authority. Projecting an approval card does not grant tool execution permission. The host owns authentication, business permissions, client capability declarations, localization and transport mapping. It should not copy plugin tool schemas or protocol guidance into product prompts.
 
 Surface state uses SessionLifecycleStore under `framework.a2ui.v1`; interaction answers remain in InteractionStore. Events are emitted only after persistence. Removing or disabling this optional capability must preserve the host's original chat and interaction paths.
 
-Run the plugin tests with `cargo test -p eliteforge-agent-official-plugin-a2ui`. Tests cover progressive exposure, capability/skill gating, operation with no A2UI installation, native approval outcomes, forms, durable surfaces and action receipts.
+Run the plugin tests with `cargo test -p eliteforge-agent-official-plugin-a2ui`. Tests cover capability/skill gating, operation with no A2UI installation, native approval outcomes, forms, durable surfaces and action receipts.

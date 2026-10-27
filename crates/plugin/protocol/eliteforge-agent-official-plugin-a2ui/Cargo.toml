@@ -14,5 +14,6 @@ jsonschema = { version = "0.52.1", default-features = false }
 tokio.workspace = true
 eliteforge-agent-framework = { path = "../../../framework/eliteforge-agent-framework", default-features = false }
 eliteforge-agent-official-plugin-storage-local = { path = "../../storage/eliteforge-agent-official-plugin-storage-local" }
+eliteforge-agent-official-plugin-tools-discovery = { path = "../../tool/eliteforge-agent-official-plugin-tools-discovery" }
 tempfile = "3"
 eliteforge-agent-test-support = { path = "../../../testing/eliteforge-agent-test-support" }

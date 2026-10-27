@@ -299,6 +299,13 @@ pub trait CapabilityPack: Send + Sync {
     fn skill_sources(&self) -> Vec<CapabilitySkillSource> {
         Vec::new()
     }
+
+    /// Sources for host-side skill registration. A pack with its own dynamic
+    /// SkillProvider can expose its managed files here without registering a
+    /// second runtime provider for the same skill.
+    fn registry_skill_sources(&self) -> Vec<CapabilitySkillSource> {
+        self.skill_sources()
+    }
 }
 
 /// Small, allocation-free-to-use builder for ordinary application packs.

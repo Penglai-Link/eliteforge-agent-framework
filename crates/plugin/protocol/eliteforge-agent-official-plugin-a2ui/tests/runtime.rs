@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_a2ui::*;
 use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
+use eliteforge_agent_official_plugin_tools_discovery::ToolDiscoveryPlugin;
 use eliteforge_agent_test_support::fixture_selection;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -44,10 +45,355 @@ fn messages() -> Value {
     .unwrap();
     examples["form"]["messages"].clone()
 }
+
+#[tokio::test]
+async fn gateway_discovers_and_executes_a2ui_in_each_new_run() {
+    let replies = ["first", "second"].into_iter().flat_map(|id| [
+        ChatResponse::tool_calls(vec![ToolCall::new("search", "tool_search", json!({"items":[{"domainCode":"a2ui"}]}))]),
+        ChatResponse::tool_calls(vec![ToolCall::new("publish", "tool_execute", json!({"tool":"a2ui_publish","arguments":{"mode":"Display","messages":[{"version":VERSION,"createSurface":{"surfaceId":id,"catalogId":AGENT_CATALOG_ID}},{"version":VERSION,"updateComponents":{"surfaceId":id,"components":[{"id":"root","component":"Text","text":"Hello"}]}}]}}))]),
+        ChatResponse::text("done"),
+    ]).collect();
+    let model = Model {
+        replies: Arc::new(Mutex::new(replies)),
+        requests: Arc::default(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = dir.path().join("artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let framework = Framework::builder()
+        .default_models(false)
+        .plugin(LocalStoragePlugin::new(dir.path().join("s.db"), artifacts))
+        .plugin(ReactPlugin)
+        .plugin(ChatModelPlugin::new(model.clone()))
+        .plugin(ToolDiscoveryPlugin::new())
+        .capability_pack(A2uiPack::new().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let session = framework
+        .sessions()
+        .unwrap()
+        .create(SessionRecord::new("gateway"))
+        .await
+        .unwrap();
+    let mut selection = fixture_selection(&framework).unwrap();
+    selection.skills = Some(vec![A2UI_SKILL_NAME.into()]);
+    let agent = framework.agent(selection).build().await.unwrap();
+    for _ in 0..2 {
+        let mut request = RunRequest::new(&session.id, "show a report");
+        request.extensions.insert(options());
+        assert_eq!(
+            agent.run(request).await.unwrap().status,
+            RunStatus::Completed
+        );
+    }
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    for request in requests.iter() {
+        let names: Vec<_> = request.tools.iter().map(|t| t.call_name.as_str()).collect();
+        assert_eq!(names, ["tool_execute", "tool_search"]);
+    }
+    for index in [1, 4] {
+        let history = serde_json::to_string(&requests[index].messages).unwrap();
+        assert!(history.contains("a2ui_publish") && history.contains("a2ui_request_input"));
+        assert!(!history.contains("a2ui_expand"));
+    }
+    drop(requests);
+    let state = framework
+        .services()
+        .unwrap()
+        .get::<A2uiService>()
+        .unwrap()
+        .state(&session.id)
+        .await
+        .unwrap();
+    assert_eq!(state.surfaces.len(), 2);
+    assert!(framework.close().await.is_success());
+}
+
+#[tokio::test]
+async fn gateway_form_suspends_and_resumes_without_activation() {
+    let model = Model {
+        replies: Arc::new(Mutex::new([
+            ChatResponse::tool_calls(vec![ToolCall::new("search", "tool_search", json!({"items":[{"domainCode":"a2ui"}]}))]),
+            ChatResponse::tool_calls(vec![ToolCall::new("form", "tool_execute", json!({"tool":"a2ui_request_input","arguments":{"mode":"SubmitOnce","messages":messages(),"responseSchema":{"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":{"type":"string","minLength":1}}}}}))]),
+            ChatResponse::text("done"),
+        ].into())),
+        requests: Arc::default(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = dir.path().join("artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let framework = Framework::builder()
+        .default_models(false)
+        .plugin(LocalStoragePlugin::new(dir.path().join("s.db"), artifacts))
+        .plugin(ReactPlugin)
+        .plugin(ChatModelPlugin::new(model.clone()))
+        .plugin(ToolDiscoveryPlugin::new())
+        .capability_pack(A2uiPack::new().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let session = framework
+        .sessions()
+        .unwrap()
+        .create(SessionRecord::new("gateway-form"))
+        .await
+        .unwrap();
+    let mut selection = fixture_selection(&framework).unwrap();
+    selection.skills = Some(vec![A2UI_SKILL_NAME.into()]);
+    let agent = framework.agent(selection).build().await.unwrap();
+    let mut request = RunRequest::new(&session.id, "ask my name");
+    request.extensions.insert(options());
+    let waiting = agent.run(request).await.unwrap();
+    assert_eq!(waiting.status, RunStatus::AwaitingInput);
+    assert_eq!(waiting.interactions.len(), 1);
+    let mut resume = agent
+        .answer(
+            &session.id,
+            waiting.interactions[0].id,
+            json!({"name":"Alice"}),
+        )
+        .await
+        .unwrap();
+    resume.extensions.insert(options());
+    assert_eq!(
+        agent.run(resume).await.unwrap().status,
+        RunStatus::Completed
+    );
+    let requests = model.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        serde_json::to_string(&requests[2].messages)
+            .unwrap()
+            .contains("Alice")
+    );
+    assert!(requests.iter().all(|r| {
+        r.tools
+            .iter()
+            .map(|t| t.call_name.as_str())
+            .collect::<Vec<_>>()
+            == ["tool_execute", "tool_search"]
+    }));
+    drop(requests);
+    assert!(framework.close().await.is_success());
+}
+
+#[tokio::test]
+async fn gateway_hides_and_rejects_a2ui_without_client_capability() {
+    let model = Model {
+        replies: Arc::new(Mutex::new(
+            [
+                ChatResponse::tool_calls(vec![ToolCall::new(
+                    "search",
+                    "tool_search",
+                    json!({"items":[{"domainCode":"a2ui"}]}),
+                )]),
+                ChatResponse::tool_calls(vec![ToolCall::new(
+                    "publish",
+                    "tool_execute",
+                    json!({"tool":"a2ui_publish","arguments":{"mode":"Display","messages":[]}}),
+                )]),
+                ChatResponse::text("done"),
+            ]
+            .into(),
+        )),
+        requests: Arc::default(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = dir.path().join("artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let framework = Framework::builder()
+        .default_models(false)
+        .plugin(LocalStoragePlugin::new(dir.path().join("s.db"), artifacts))
+        .plugin(ReactPlugin)
+        .plugin(ChatModelPlugin::new(model.clone()))
+        .plugin(ToolDiscoveryPlugin::new())
+        .capability_pack(A2uiPack::new().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let session = framework
+        .sessions()
+        .unwrap()
+        .create(SessionRecord::new("no a2ui"))
+        .await
+        .unwrap();
+    let agent = framework
+        .agent(fixture_selection(&framework).unwrap())
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        agent
+            .run(RunRequest::new(&session.id, "show a report"))
+            .await
+            .unwrap()
+            .status,
+        RunStatus::Completed
+    );
+    let requests = model.requests.lock().unwrap();
+    let discovery = requests[1]
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .unwrap();
+    assert!(!discovery.content.text().contains("a2ui_publish"));
+    let rejected = requests[2]
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Tool)
+        .unwrap();
+    assert!(rejected.tool_result.as_ref().unwrap().is_error);
+    drop(requests);
+    assert!(
+        framework
+            .services()
+            .unwrap()
+            .get::<A2uiService>()
+            .unwrap()
+            .state(&session.id)
+            .await
+            .unwrap()
+            .surfaces
+            .is_empty()
+    );
+    assert!(framework.close().await.is_success());
+}
+
+struct DenyPublish;
+#[async_trait]
+impl ToolPolicy for DenyPublish {
+    async fn evaluate(
+        &self,
+        _: &ToolInvocationContext<'_>,
+    ) -> Result<ToolPolicyDecision, AgentError> {
+        Ok(ToolPolicyDecision::Allow)
+    }
+    async fn admit_binding(
+        &self,
+        binding: &ToolBinding,
+        _: &RunContext,
+    ) -> Result<ToolBindingAdmission, AgentError> {
+        Ok(if binding.descriptor.call_name == "a2ui_publish" {
+            ToolBindingAdmission::Exclude
+        } else {
+            ToolBindingAdmission::Allow
+        })
+    }
+}
+
+#[tokio::test]
+async fn gateway_respects_tool_policy_during_discovery_and_execution() {
+    let model = Model {
+        replies: Arc::new(Mutex::new(
+            [
+                ChatResponse::tool_calls(vec![ToolCall::new(
+                    "search",
+                    "tool_search",
+                    json!({"items":[{"domainCode":"a2ui"}]}),
+                )]),
+                ChatResponse::tool_calls(vec![ToolCall::new(
+                    "publish",
+                    "tool_execute",
+                    json!({"tool":"a2ui_publish","arguments":{"mode":"Display","messages":[]}}),
+                )]),
+                ChatResponse::text("done"),
+            ]
+            .into(),
+        )),
+        requests: Arc::default(),
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let artifacts = dir.path().join("artifacts");
+    std::fs::create_dir(&artifacts).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let framework = Framework::builder()
+        .default_models(false)
+        .plugin(LocalStoragePlugin::new(dir.path().join("s.db"), artifacts))
+        .plugin(ReactPlugin)
+        .plugin(ChatModelPlugin::new(model.clone()))
+        .plugin(ToolDiscoveryPlugin::new())
+        .plugin(ToolPolicyPlugin::new("test.deny-publish", DenyPublish))
+        .capability_pack(A2uiPack::new().unwrap())
+        .build()
+        .await
+        .unwrap();
+    let session = framework
+        .sessions()
+        .unwrap()
+        .create(SessionRecord::new("policy"))
+        .await
+        .unwrap();
+    let mut selection = fixture_selection(&framework).unwrap();
+    selection.skills = Some(vec![A2UI_SKILL_NAME.into()]);
+    let agent = framework.agent(selection).build().await.unwrap();
+    let mut request = RunRequest::new(&session.id, "show a report");
+    request.extensions.insert(options());
+    assert_eq!(
+        agent.run(request).await.unwrap().status,
+        RunStatus::Completed
+    );
+    let requests = model.requests.lock().unwrap();
+    let discovery = requests[1]
+        .messages
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .unwrap()
+        .content
+        .text();
+    assert!(discovery.contains("a2ui_request_input"));
+    assert!(!discovery.contains("a2ui_publish"));
+    assert!(
+        requests[2]
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::Tool)
+            .unwrap()
+            .tool_result
+            .as_ref()
+            .unwrap()
+            .is_error
+    );
+    drop(requests);
+    assert!(
+        framework
+            .services()
+            .unwrap()
+            .get::<A2uiService>()
+            .unwrap()
+            .state(&session.id)
+            .await
+            .unwrap()
+            .surfaces
+            .is_empty()
+    );
+    assert!(framework.close().await.is_success());
+}
 #[tokio::test]
 async fn form_suspends_resumes_and_publishes_without_duplicate_interaction() {
     let model=Model {replies:Arc::new(Mutex::new([
-  ChatResponse::tool_calls(vec![ToolCall::new("expand","a2ui_expand",json!({}))]),
   ChatResponse::tool_calls(vec![ToolCall::new("form-call","a2ui_request_input",json!({"mode":"SubmitOnce","messages":messages(),"responseSchema":{"type":"object","additionalProperties":false,"required":["name"],"properties":{"name":{"type":"string","minLength":1}}}}))]),
   ChatResponse::tool_calls(vec![ToolCall::new("report-call","a2ui_publish",json!({"mode":"Display","messages":[{"version":VERSION,"createSurface":{"surfaceId":"report","catalogId":AGENT_CATALOG_ID}},{"version":VERSION,"updateComponents":{"surfaceId":"report","components":[{"id":"root","component":"Text","text":"Hello Alice"}]}}]}))]),
   ChatResponse::text("Complete"),
@@ -124,9 +470,9 @@ async fn form_suspends_resumes_and_publishes_without_duplicate_interaction() {
         "Hello Alice"
     );
     let requests = model.requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 3);
     assert!(
-        serde_json::to_string(&requests[2].messages)
+        serde_json::to_string(&requests[1].messages)
             .unwrap()
             .contains("Alice")
     );
@@ -263,7 +609,7 @@ async fn native_approval_projection_preserves_execution_authority() {
 }
 
 #[tokio::test]
-async fn progressive_guidance_skill_domain_and_optional_installation() {
+async fn guidance_skill_tools_and_optional_installation() {
     for (installed, client, selected) in [
         (true, true, true),
         (false, true, true),
@@ -284,7 +630,6 @@ async fn progressive_guidance_skill_domain_and_optional_installation() {
                     "skill_read_resource",
                     json!({"name":A2UI_SKILL_NAME,"path":"catalog.json"}),
                 ),
-                ("expand", A2UI_EXPAND_TOOL, json!({})),
                 ("publish", "a2ui_publish", example["display"].clone()),
             ] {
                 replies.push_back(ChatResponse::tool_calls(vec![ToolCall::new(
@@ -335,16 +680,9 @@ async fn progressive_guidance_skill_domain_and_optional_installation() {
         assert_eq!(result.status, RunStatus::Completed);
         let requests = model.requests.lock().unwrap();
         let first = &requests[0];
-        assert!(
-            !first
-                .tools
-                .iter()
-                .any(|t| t.call_name == "a2ui_publish" || t.call_name == "a2ui_request_input")
-        );
-        assert_eq!(
-            first.tools.iter().any(|t| t.call_name == A2UI_EXPAND_TOOL),
-            enabled
-        );
+        for name in ["a2ui_publish", "a2ui_request_input"] {
+            assert_eq!(first.tools.iter().any(|t| t.call_name == name), enabled);
+        }
         let initial = serde_json::to_string(&first.messages).unwrap();
         assert_eq!(
             initial.contains("a2ui.guidance")
@@ -352,7 +690,7 @@ async fn progressive_guidance_skill_domain_and_optional_installation() {
             enabled
         );
         if enabled {
-            assert_eq!(requests.len(), 5);
+            assert_eq!(requests.len(), 4);
             assert!(initial.contains(A2UI_SKILL_NAME));
             assert!(!initial.contains("Send complete v0.9.1 JSON envelopes"));
             assert!(
@@ -361,13 +699,7 @@ async fn progressive_guidance_skill_domain_and_optional_installation() {
                     .contains("Send complete v0.9.1 JSON envelopes")
             );
             assert!(
-                !requests[2]
-                    .tools
-                    .iter()
-                    .any(|t| t.call_name == "a2ui_publish")
-            );
-            assert!(
-                requests[3]
+                requests[2]
                     .tools
                     .iter()
                     .any(|t| t.call_name == "a2ui_publish")

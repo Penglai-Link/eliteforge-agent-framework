@@ -32,6 +32,9 @@ impl CapabilityPack for BoundCapabilityPack {
     fn skill_sources(&self) -> Vec<CapabilitySkillSource> {
         self.original.skill_sources()
     }
+    fn registry_skill_sources(&self) -> Vec<CapabilitySkillSource> {
+        self.original.registry_skill_sources()
+    }
     fn for_framework_scope(&self, scope: &str) -> Option<Arc<dyn CapabilityPack>> {
         Some(Arc::new(Self {
             original: self

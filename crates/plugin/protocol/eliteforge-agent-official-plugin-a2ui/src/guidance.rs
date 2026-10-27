@@ -1,9 +1,8 @@
-//! Capability-gated instructions, progressive skill resources and domain expansion.
+//! Capability-gated instructions and progressive skill resources.
 use super::*;
 
 pub const A2UI_PACK_ID: &str = "framework.a2ui";
 pub const A2UI_SKILL_NAME: &str = "a2ui-interface";
-pub const A2UI_EXPAND_TOOL: &str = "a2ui_expand";
 const SKILL: &str = include_str!("../skills/a2ui-interface/SKILL.md");
 const EXAMPLES: &str = include_str!("../skills/a2ui-interface/references/examples.json");
 const COMPONENTS: &str = include_str!("../skills/a2ui-interface/references/components.md");
@@ -31,6 +30,14 @@ impl CapabilityPack for A2uiPack {
     fn requires_skills_runtime(&self) -> bool {
         true
     }
+    fn registry_skill_sources(&self) -> Vec<CapabilitySkillSource> {
+        const FILES: &[CapabilitySkillFile] = &[
+            CapabilitySkillFile { path: "a2ui-interface/SKILL.md", contents: SKILL.as_bytes() },
+            CapabilitySkillFile { path: "a2ui-interface/references/components.md", contents: COMPONENTS.as_bytes() },
+            CapabilitySkillFile { path: "a2ui-interface/references/examples.json", contents: EXAMPLES.as_bytes() },
+        ];
+        vec![CapabilitySkillSource::embedded(EmbeddedCapabilitySkills::new(FILES, "a2ui-skill-v1"))]
+    }
     fn plugins(&self) -> Vec<Arc<dyn Plugin>> {
         vec![self.plugin.clone()]
     }
@@ -52,33 +59,9 @@ pub fn negotiated(extensions: &Extensions) -> bool {
 pub fn is_a2ui_tool(descriptor: &ToolDescriptor) -> bool {
     matches!(
         (descriptor.id.as_str(), descriptor.call_name.as_str()),
-        ("a2ui.expand", "a2ui_expand")
-            | ("a2ui.publish", "a2ui_publish")
+        ("a2ui.publish", "a2ui_publish")
             | ("a2ui.request_input", "a2ui_request_input")
     )
-}
-pub fn expand_descriptor() -> ToolDescriptor {
-    ToolDescriptor::new(
-        "a2ui.expand",
-        A2UI_EXPAND_TOOL,
-        "Expand the A2UI interface domain for this run: expose publish and request-input tools with complete schemas. Use for interactive cards, reports or forms after loading the a2ui-interface skill. Does not publish UI or grant business permissions.",
-        json!({"type":"object","properties":{},"required":[],"additionalProperties":false}),
-    ).with_single_input()
-}
-pub(crate) struct Expand;
-#[async_trait]
-impl Tool for Expand {
-    async fn call(&self, _: Value, run: &RunContext) -> Result<ToolOutput, ToolError> {
-        if !negotiated(&run.extensions) {
-            return Err(ToolError::Failed("A2UI not negotiated".into()));
-        }
-        let descriptors = tool_descriptors();
-        let mut output = ToolOutput::text("A2UI domain expanded")
-            .expose_tools(descriptors.iter().map(|d| d.id.clone()).collect());
-        output.structured = Some(json!({"domain":"a2ui","tools":descriptors}));
-        output.content = output.structured.as_ref().unwrap().to_string().into();
-        Ok(output)
-    }
 }
 
 #[derive(Clone)]

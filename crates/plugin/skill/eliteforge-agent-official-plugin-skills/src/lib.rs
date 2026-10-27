@@ -23,9 +23,9 @@ use async_trait::async_trait;
 use eliteforge_agent_core::{
     AgentError, CapabilitySkillSource, ContextBlock, ContextContributor, ContextContributorService,
     ContextInput, ContextSourceKind, ManagedDeveloperPrompts, Message, Plugin, PluginContext,
-    PluginError, PluginReadyContext, Role, RunContext, RunMiddleware, RunNext, RunResult,
-    SkillCatalog, SkillDetail, SkillProvider, SkillResource, SkillSummary, StateStore, ToolLease,
-    ToolProvider, ToolProviderService,
+    PluginError, PluginReadyContext, RunContext, RunMiddleware, RunNext, RunResult, SkillCatalog,
+    SkillDetail, SkillProvider, SkillResource, SkillSummary, ToolLease, ToolProvider,
+    ToolProviderService,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -175,7 +175,6 @@ struct SkillsRuntime {
     provider: RwLock<Option<Arc<dyn SkillProvider>>>,
     selection: SkillSelection,
     snapshots: Mutex<SelectedSkillsSnapshots>,
-    recovering: Mutex<HashMap<eliteforge_agent_core::RunId, RecoveryAttempt>>,
 }
 
 struct SelectedSkills {
@@ -183,11 +182,6 @@ struct SelectedSkills {
     catalog: SkillCatalog,
     skills: BTreeMap<String, SkillSummary>,
     loaded: Mutex<BTreeMap<String, BTreeSet<String>>>,
-}
-
-struct RecoveryAttempt {
-    retained: bool,
-    loaded_skills: BTreeSet<String>,
 }
 
 type SelectedSkillsSlot = Arc<OnceCell<Arc<SelectedSkills>>>;
@@ -199,7 +193,6 @@ impl SkillsRuntime {
             provider: RwLock::new(None),
             selection,
             snapshots: Mutex::new(HashMap::new()),
-            recovering: Mutex::new(HashMap::new()),
         }
     }
 
@@ -250,51 +243,6 @@ impl SkillsRuntime {
             ));
         }
         Ok(snapshot.clone())
-    }
-
-    async fn begin_recovery(
-        &self,
-        context: &RunContext,
-        state: Option<&dyn StateStore>,
-    ) -> Result<(), AgentError> {
-        let retained = self
-            .snapshots
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .contains_key(&context.run_id);
-        let loaded_skills = if retained {
-            BTreeSet::new()
-        } else if let Some(state) = state {
-            successful_loaded_skill_names(&state.load(context.run_id).await?.transcript)
-        } else {
-            BTreeSet::new()
-        };
-        self.recovering
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                context.execution_id(),
-                RecoveryAttempt {
-                    retained,
-                    loaded_skills,
-                },
-            );
-        Ok(())
-    }
-
-    fn finish_recovery(&self, context: &RunContext) {
-        self.recovering
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&context.execution_id());
-    }
-
-    fn needs_recovery_index(&self, context: &RunContext, name: &str) -> bool {
-        self.recovering
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&context.execution_id())
-            .is_some_and(|recovery| !recovery.retained && recovery.loaded_skills.contains(name))
     }
 
     fn select(
@@ -412,10 +360,9 @@ impl SkillsRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .contains_key(name);
-        if !was_loaded && self.needs_recovery_index(context, name) {
-            // A persisted tool batch can resume after this plugin has been
-            // reconstructed. Only a persisted successful skill_load can restore
-            // the resource index; normal calls and in-process missing loads fail.
+        if !was_loaded {
+            // Build the authorized resource index internally without returning
+            // the skill document to the model as an extra tool result.
             self.load(context, name).await?;
         }
         let listed = {
@@ -425,7 +372,7 @@ impl SkillsRuntime {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let Some(files) = loaded.get(name) else {
                 return Err(AgentError::Run(format!(
-                    "load skill `{name}` with skill_load before reading its resources"
+                    "resource index is unavailable for skill `{name}`"
                 )));
             };
             files.contains(path)
@@ -456,7 +403,6 @@ impl SkillsRuntime {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(&context.run_id);
-        self.finish_recovery(context);
         if let Ok(provider) = self.provider() {
             provider.release(context);
         }
@@ -971,95 +917,6 @@ mod embedded_resource_tests {
     }
 }
 
-fn successful_loaded_skill_names(transcript: &[Message]) -> BTreeSet<String> {
-    let mut calls = HashMap::new();
-    let mut loaded = BTreeSet::new();
-    for message in transcript {
-        for original in &message.tool_calls {
-            let presented = eliteforge_agent_core::presented_call(original);
-            let call = presented.as_ref().unwrap_or(original);
-            if call.call_name != "skill_load" {
-                continue;
-            }
-            let batch = call
-                .arguments
-                .get("items")
-                .and_then(serde_json::Value::as_array);
-            let names: Vec<_> = batch
-                .map_or_else(|| vec![&call.arguments], |items| items.iter().collect())
-                .into_iter()
-                .map(|input| {
-                    input
-                        .get("name")
-                        .and_then(|value| value.as_str())
-                        .filter(|name| !name.is_empty())
-                        .map(str::to_owned)
-                })
-                .collect();
-            calls.insert(call.id.clone(), (batch.is_some(), names));
-        }
-        if message.role != Role::Tool {
-            continue;
-        }
-        let Some((batch, names)) = message
-            .tool_call_id
-            .as_deref()
-            .and_then(|id| calls.remove(id))
-        else {
-            continue;
-        };
-        let Some(result) = &message.tool_result else {
-            continue;
-        };
-        if batch {
-            // A partially failed batch can still have successfully loaded skills.
-            if let Some(rows) = result
-                .structured
-                .as_ref()
-                .and_then(|v| v.get("results"))
-                .and_then(serde_json::Value::as_array)
-            {
-                for (index, name) in names.into_iter().enumerate() {
-                    if rows
-                        .get(index)
-                        .is_some_and(|row| row["index"] == index && row["isError"] == false)
-                    {
-                        loaded.extend(name);
-                    }
-                }
-            }
-        } else if !result.is_error {
-            loaded.extend(names.into_iter().flatten());
-        }
-    }
-    loaded
-}
-
-#[cfg(test)]
-#[test]
-fn restores_only_successful_items_from_gateway_skill_batches() {
-    let mut assistant = Message::assistant("");
-    assistant.tool_calls = vec![eliteforge_agent_core::ToolCall::new(
-        "skills",
-        "tool_execute",
-        serde_json::json!({
-            "tool":"skill_load", "arguments":{"items":[{"name":"ready"},{"name":"failed"}]}
-        }),
-    )];
-    let mut result = Message::tool("skills", "");
-    result.tool_result = Some(eliteforge_agent_core::ToolResultMetadata {
-        is_error: true,
-        result_reference: None,
-        structured: Some(
-            serde_json::json!({"results":[{"index":0,"isError":false},{"index":1,"isError":true}]}),
-        ),
-    });
-    assert_eq!(
-        successful_loaded_skill_names(&[assistant, result]),
-        BTreeSet::from(["ready".into()])
-    );
-}
-
 fn validate_resource_path(path: &str) -> Result<(), AgentError> {
     if path.trim() != path || path.is_empty() || Path::new(path).is_absolute() {
         return Err(AgentError::Run(
@@ -1130,10 +987,6 @@ impl ContextContributor for SkillsEndpoint {
     }
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let context = input.run;
-        // The initial tool batch of a resumed workflow runs before the next
-        // model turn. Once a model turn begins, future resource reads must use
-        // the normal skill_load path again.
-        self.runtime.finish_recovery(context);
         let snapshot = self.runtime.snapshot(context).await?;
         let requested = context
             .extensions
@@ -1218,11 +1071,6 @@ impl RunMiddleware for SkillsEndpoint {
         context: &RunContext,
         next: RunNext<'_>,
     ) -> Result<RunResult, AgentError> {
-        if request.resume.is_some() {
-            self.runtime
-                .begin_recovery(context, next.services.state.as_deref())
-                .await?;
-        }
         let admission = async {
             if request.resume.is_some() {
                 if let Some(state) = next.services.state.as_deref() {
@@ -1256,7 +1104,6 @@ impl RunMiddleware for SkillsEndpoint {
             Ok(()) => next.run().await,
             Err(error) => Err(error),
         };
-        self.runtime.finish_recovery(context);
         let retain_snapshot = result.as_ref().is_ok_and(|result| {
             matches!(
                 &result.status,

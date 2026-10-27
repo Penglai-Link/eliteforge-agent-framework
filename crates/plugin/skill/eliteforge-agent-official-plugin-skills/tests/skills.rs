@@ -514,7 +514,9 @@ async fn plugin_exposes_metadata_then_loads_skill_and_resource_on_demand() {
         },
     )
     .await;
-    assert!(before_load.errors[0].contains("skill_load before reading"));
+    assert!(before_load.errors.is_empty());
+    assert_eq!(before_load.values[0]["content"], "Use present tense.");
+    assert!(before_load.values[0].get("skillMarkdown").is_none());
 
     let resource = run_probe(
         plugin,
@@ -581,9 +583,19 @@ async fn plugin_enforces_selection_and_resource_paths() {
     .await;
     assert!(blocked.errors[0].contains("not enabled"));
 
+    let blocked_read = run_probe(
+        plugin.clone(),
+        ProbeAction::Read {
+            name: "excluded".into(),
+            path: "references/style.md".into(),
+        },
+    )
+    .await;
+    assert!(blocked_read.errors[0].contains("not enabled"));
+
     let escaped = run_probe(
         plugin,
-        ProbeAction::LoadThenRead {
+        ProbeAction::Read {
             name: "included".into(),
             path: "../outside.txt".into(),
         },
@@ -1130,6 +1142,30 @@ async fn custom_skill_provider_cannot_read_a_resource_absent_from_its_loaded_det
     assert!(probe.errors[0].contains("not listed by loaded skill"));
 }
 
+#[tokio::test]
+async fn direct_resource_read_checks_the_provider_resource_list() {
+    let plugin = SkillsPlugin::new(StaticSkillProvider);
+    let allowed = run_probe(
+        plugin.clone(),
+        ProbeAction::Read {
+            name: "rag-backed".into(),
+            path: "references/listed.md".into(),
+        },
+    )
+    .await;
+    assert_eq!(allowed.values[0]["content"], "RAG-backed resource");
+    assert!(allowed.values[0].get("skillMarkdown").is_none());
+    let denied = run_probe(
+        plugin,
+        ProbeAction::Read {
+            name: "rag-backed".into(),
+            path: "references/not-listed.md".into(),
+        },
+    )
+    .await;
+    assert!(denied.errors[0].contains("not listed by loaded skill"));
+}
+
 struct LoadSkillModel {
     requests: Arc<Mutex<Vec<ChatRequest>>>,
 }
@@ -1426,12 +1462,11 @@ impl ChatModel for ReadResourceWithoutLoadingModel {
             .iter()
             .any(|message| message.role == Role::Tool)
         {
-            let rejected = request.messages.iter().any(|message| {
-                message.role == Role::Tool
-                    && message.content.text().contains("skill_load before reading")
+            let read = request.messages.iter().any(|message| {
+                message.role == Role::Tool && message.content.text().contains("RESOURCE_OK")
             });
-            return Ok(ChatResponse::text(if rejected {
-                "unloaded resource rejected"
+            return Ok(ChatResponse::text(if read {
+                "resource read"
             } else {
                 "unexpected resource read"
             }));
@@ -1445,7 +1480,7 @@ impl ChatModel for ReadResourceWithoutLoadingModel {
 }
 
 #[tokio::test]
-async fn rebuilt_agent_resume_does_not_bypass_skill_load() {
+async fn rebuilt_agent_resume_reads_resource_without_skill_load() {
     let directory = tempfile::tempdir().unwrap();
     let database = directory.path().join("agent.sqlite");
     let system = directory.path().join("system");
@@ -1501,7 +1536,7 @@ async fn rebuilt_agent_resume_does_not_bypass_skill_load() {
         .await
         .unwrap();
     let result = agent.run(resume).await.unwrap();
-    assert_eq!(result.output, "unloaded resource rejected");
+    assert_eq!(result.output, "resource read");
     assert!(agent.framework().close().await.is_success());
 }
 
@@ -1897,7 +1932,7 @@ async fn explicit_selection_survives_rebuilt_resume_and_rechecks_revocation_befo
         if revoked {
             assert!(result.unwrap_err().to_string().contains("not enabled"));
         } else {
-            assert_eq!(result.unwrap().output, "unexpected resource read");
+            assert_eq!(result.unwrap().output, "resource read");
         }
         assert!(agent.framework().close().await.is_success());
     }

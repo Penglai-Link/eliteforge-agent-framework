@@ -56,7 +56,7 @@ fn read_resource_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "skills.read_resource",
         "skill_read_resource",
-        "Read one UTF-8 resource listed by an enabled skill. Use skill_load first to see available resource paths.",
+        "Read one UTF-8 resource listed by an enabled skill. Use skill_load when you need the skill instructions or resource paths.",
         json!({
             "type":"object", "additionalProperties":false, "required":["name", "path"],
             "properties":{
