@@ -275,6 +275,12 @@ fn observation_detail(value: &Value) -> Value {
             detail.insert(key.into(), Value::String(text.to_owned()));
         }
     }
+    if let Some(code) = item
+        .and_then(|item| item.get("exit_code"))
+        .and_then(Value::as_i64)
+    {
+        detail.insert("exitCode".into(), Value::from(code));
+    }
     Value::Object(detail)
 }
 

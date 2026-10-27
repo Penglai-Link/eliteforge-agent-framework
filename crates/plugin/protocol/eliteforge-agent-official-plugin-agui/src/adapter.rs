@@ -24,6 +24,7 @@ pub(crate) struct Adapter {
     last_text: Option<(usize, [u8; 32])>,
     messages: BTreeMap<String, MessageState>,
     calls: BTreeSet<RunId>,
+    external_calls: BTreeMap<RunId, HistoryStatus>,
     steps: BTreeMap<String, String>,
     activities: BTreeMap<String, String>,
     subagents: BTreeSet<RunId>,
@@ -43,6 +44,7 @@ impl Adapter {
             last_text: None,
             messages: BTreeMap::new(),
             calls: BTreeSet::new(),
+            external_calls: BTreeMap::new(),
             steps: BTreeMap::new(),
             activities: BTreeMap::new(),
             subagents: BTreeSet::new(),
@@ -450,7 +452,75 @@ impl Adapter {
                     serde_json::from_value(patch).map_err(|_| "AGUI_INVALID_PATCH")?;
                 out.push(Event::activity_delta(id, activity_type, patch));
             }
-            OutputEvent::Custom { name, value } => out.push(Event::custom(name, value)),
+            OutputEvent::Custom { name, value } => {
+                if name == "framework.external_agent" {
+                    self.external_tool(&value, out)?;
+                }
+                out.push(Event::custom(name, value));
+            }
+        }
+        Ok(())
+    }
+    fn external_tool(
+        &mut self,
+        value: &serde_json::Value,
+        out: &mut Vec<Event>,
+    ) -> Result<(), &'static str> {
+        let Some(tool) = value.get("Tool") else {
+            return Ok(());
+        };
+        let detail = &tool["detail"];
+        let Some(native_id) = detail
+            .get("callId")
+            .or_else(|| detail.get("id"))
+            .and_then(|id| id.as_str())
+            .filter(|id| !id.is_empty())
+        else {
+            return Ok(());
+        };
+        let Some(id) = detail
+            .get("invocationId")
+            .and_then(|id| id.as_str())
+            .and_then(|id| RunId::parse_str(id).ok())
+        else {
+            return Ok(());
+        };
+        let status: HistoryStatus = serde_json::from_value(detail["historyStatus"].clone())
+            .unwrap_or(HistoryStatus::Unknown);
+        if status == HistoryStatus::Unknown {
+            return Ok(());
+        }
+        let name = tool["name"].as_str().unwrap_or("external");
+        if !self.external_calls.contains_key(&id) {
+            let call = ToolCall {
+                invocation_id: id,
+                id: native_id.to_owned(),
+                call_name: name.to_owned(),
+                arguments: detail.get("arguments").cloned().unwrap_or(json!({})),
+            };
+            self.declare_tool(&tool_id(id)?, &call, detail["messageId"].as_str(), out)?;
+        }
+        let terminal = |status| {
+            matches!(
+                status,
+                HistoryStatus::Completed | HistoryStatus::Failed | HistoryStatus::Interrupted
+            )
+        };
+        let previous = self.external_calls.get(&id).copied();
+        if matches!(status, HistoryStatus::Completed | HistoryStatus::Failed)
+            && !previous.is_some_and(terminal)
+        {
+            let payload =
+                json!({"content":[],"structured":detail,"isError":status == HistoryStatus::Failed});
+            let id = tool_id(id)?;
+            out.push(Event::tool_call_result(
+                format!("{id}/result"),
+                id,
+                payload.to_string(),
+            ));
+        }
+        if !previous.is_some_and(terminal) {
+            self.external_calls.insert(id, status);
         }
         Ok(())
     }

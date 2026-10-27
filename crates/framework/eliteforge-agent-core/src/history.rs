@@ -455,7 +455,14 @@ impl HistoryService {
         session_id: &str,
         query: HistoryQuery,
     ) -> Result<SessionHistory, StateError> {
-        self.0.read_session(session_id, query).await
+        let mut history = self.0.read_session(session_id, query).await?;
+        crate::normalize_external_tool_history(&mut history.records.tool_invocations);
+        for tool in &mut history.records.tool_invocations {
+            if history.runs.iter().any(|run| run.id == tool.run_id && matches!(run.status, HistoryStatus::Completed | HistoryStatus::Failed | HistoryStatus::Interrupted | HistoryStatus::Unknown)) {
+                crate::finalize_external_tool_observation(tool);
+            }
+        }
+        Ok(history)
     }
 }
 /// Reserved history step for context maintenance, independent of model attempts.

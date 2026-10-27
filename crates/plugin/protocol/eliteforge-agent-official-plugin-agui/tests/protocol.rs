@@ -2038,3 +2038,43 @@ async fn batch_approvals_reference_declared_parent_and_preserve_each_child_ident
     }
     assert!(agent.framework().close().await.is_success());
 }
+
+
+struct NativeToolLifecycle;
+#[async_trait]
+impl ExternalAgent for NativeToolLifecycle {
+    async fn run(&self, _: ExternalAgentRequest, sink: &dyn ExternalAgentEventSink) -> Result<ExternalAgentResult, AgentError> {
+        for status in ["in_progress", "completed", "completed"] {
+            sink.emit(ExternalAgentEvent::Tool {
+                name: "command_execution".into(),
+                detail: json!({"event":"item.updated","id":"item-1","status":status}),
+            }).await;
+        }
+        Ok(ExternalAgentResult { content: "NATIVE_TOOL_OK".into(), structured: None, session: None, usage: Usage::default() })
+    }
+}
+#[tokio::test]
+async fn external_native_lifecycle_is_one_agui_tool_and_one_durable_record() {
+    let directory = tempfile::tempdir().unwrap();
+    let sqlite = Arc::new(SqliteStateStore::open(directory.path().join("external.sqlite"), Default::default()).await.unwrap());
+    let agent = TestBuilder::new().default_models(false)
+        .plugin(sqlite.plugin())
+        .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
+        .plugin(ExternalAgentPlugin::new(NativeToolLifecycle))
+        .plugin(AgUiPlugin::new(AgUiOptions::default()).unwrap())
+        .build().await.unwrap();
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("native-tool", "run")).unwrap();
+    let (result, events) = tokio::join!(agent.wait(handle), collect(stream));
+    assert_eq!(result.unwrap().output, "NATIVE_TOOL_OK");
+    assert_eq!(types(&events, EventType::ToolCallStart), 1);
+    assert_eq!(types(&events, EventType::ToolCallEnd), 1);
+    assert_eq!(types(&events, EventType::ToolCallResult), 1);
+    validate_client(&events).await;
+    let history = agent.framework().history().unwrap().read_session("native-tool", HistoryQuery::default()).await.unwrap();
+    assert_eq!(history.records.tool_invocations.len(), 1);
+    assert_eq!(history.records.tool_invocations[0].status, HistoryStatus::Completed);
+    assert_eq!(history.records.tool_invocations[0].call_id, "item-1");
+    let Event::ToolCallStart(start) = events.iter().find(|event| matches!(event, Event::ToolCallStart(_))).unwrap() else { unreachable!() };
+    assert_eq!(start.tool_call_id.to_string(), history.records.tool_invocations[0].id.to_string());
+    let _ = agent.close().await;
+}

@@ -18,6 +18,8 @@ pub mod conversation;
 pub mod dag;
 pub mod errors;
 pub mod external;
+mod external_tools;
+pub use external_tools::*;
 pub mod history;
 pub mod hooks;
 pub mod interaction;

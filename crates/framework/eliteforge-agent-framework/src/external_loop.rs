@@ -92,41 +92,52 @@ impl ExternalAgentEventSink for ExternalEvents<'_> {
                 self.context.reasoning_delta(delta).await;
             }
             ExternalAgentEvent::Tool { name, detail } => {
-                // Opaque runtimes may not provide a reliable tool result. Keep
-                // that uncertainty rather than inventing a completed exchange.
-                let id = RunId::new_v4();
-                self.tools
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(HistoryToolInvocation {
+                let status = external_tool_status(detail);
+                let now = unix_time_ms();
+                let tool = merge_external_tool_observation(
+                    &mut self.tools.lock().unwrap_or_else(|e| e.into_inner()),
+                    HistoryToolInvocation {
                         batch_revision: None,
                         batch: None,
-                        id,
+                        id: RunId::new_v4(),
                         run_id: self.context.run_id,
                         step_id: self.message_id.clone(),
                         message_id: self.message_id.clone(),
-                        call_id: detail
-                            .get("callId")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_owned(),
+                        call_id: String::new(),
                         tool_id: name.clone(),
                         tool_name: name.clone(),
                         arguments: detail
                             .get("arguments")
                             .cloned()
                             .unwrap_or(serde_json::Value::Null),
-                        status: HistoryStatus::Unknown,
+                        status,
                         content: Vec::new(),
                         structured: Some(detail.clone()),
                         is_error: None,
                         result_reference: None,
-                        started_at_ms: None,
-                        finished_at_ms: None,
-                    });
+                        started_at_ms: Some(now),
+                        finished_at_ms: matches!(
+                            status,
+                            HistoryStatus::Completed
+                                | HistoryStatus::Failed
+                                | HistoryStatus::Interrupted
+                        )
+                        .then_some(now),
+                    },
+                );
+                let mut presented = detail.clone();
+                if let Some(object) = presented.as_object_mut() {
+                    object.insert("invocationId".into(), serde_json::json!(tool.id));
+                    object.insert("messageId".into(), serde_json::json!(tool.message_id));
+                    object.insert("historyStatus".into(), serde_json::json!(tool.status));
+                }
                 self.context.emit_output(OutputEvent::Custom {
                     name: "framework.external_agent".into(),
-                    value: serde_json::to_value(&event).expect("serializable observation"),
+                    value: serde_json::to_value(ExternalAgentEvent::Tool {
+                        name: name.clone(),
+                        detail: presented,
+                    })
+                    .expect("serializable observation"),
                 });
             }
             _ => self.context.emit_output(OutputEvent::Custom {
@@ -336,6 +347,9 @@ impl AgentLoop for ExternalAgentLoop {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            for tool in &mut checkpoint.history.tool_invocations {
+                finalize_external_tool_observation(tool);
+            }
             let saved = store.commit(&lease, checkpoint.revision, checkpoint).await;
             let released = guard.close().await;
             saved?;
