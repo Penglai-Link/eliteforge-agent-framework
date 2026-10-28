@@ -189,7 +189,7 @@ async fn anthropic_stream_round_trips_signed_thinking_and_tool_results() {
     ]),anthropic_text("complete",true)]).await;
     let config = config(AgentModelProtocol::Anthropic, &fixture.url);
     let client = client(&config);
-    let mut request = request();
+    let request = request();
     let response = client
         .generate_stream(&config, &request, Arc::new(|_| {}))
         .await
@@ -199,7 +199,13 @@ async fn anthropic_stream_round_trips_signed_thinking_and_tool_results() {
     let usage = response.token_usage.unwrap();
     assert_eq!(usage.output_tokens, 10);
     assert_eq!(usage.cached_input_tokens, Some(3));
-    request.messages.push(response.assistant);
+    let native = response_to_framework(response).unwrap();
+    let mut admitted = request_to_framework(request).unwrap();
+    let mut message = eliteforge_agent_core::Message::assistant(native.content);
+    message.tool_calls = native.tool_calls;
+    message.model_context = native.model_context;
+    admitted.messages.push(message);
+    let mut request = request_from_framework(&admitted).unwrap();
     request.messages.push(AgentMessage::tool_result(
         "lookup",
         Some("c1".into()),

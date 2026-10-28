@@ -186,10 +186,14 @@ impl GenaiChatAdapter {
             .exec_chat_stream(target, request, Some(&options))
             .await
             .map_err(map_error)?;
+        let mut progressed = false;
         while let Some(event) = response.stream.next().await {
-            match event.map_err(|_| {
-                ModelError::Indeterminate("model stream interrupted after response started".into())
-            })? {
+            let event = event.map_err(|error| {
+                if progressed { ModelError::Indeterminate("model stream interrupted after output started".into()) }
+                else { map_error(error) }
+            })?;
+            if !matches!(&event, ChatStreamEvent::Start | ChatStreamEvent::Heartbeat) { progressed = true; }
+            match event {
                 ChatStreamEvent::Chunk(chunk) => stream.text_delta(&chunk.content).await,
                 ChatStreamEvent::ReasoningChunk(chunk) => {
                     stream.reasoning_delta(&chunk.content).await
