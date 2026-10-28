@@ -68,9 +68,11 @@ pub(crate) async fn generate(
     }
     if config.thinking_enabled
         && config.reasoning_effort.is_none()
-        && ["-low", "-medium", "-high", "-max"]
-            .iter()
-            .any(|suffix| config.model_name.ends_with(suffix))
+        && [
+            "-none", "-zero", "-minimal", "-low", "-medium", "-high", "-xhigh", "-max",
+        ]
+        .iter()
+        .any(|suffix| config.model_name.ends_with(suffix))
     {
         return Err(fw::ModelError::Fatal("this model ID requires an explicit reasoning effort to prevent upstream model-name inference".into()));
     }

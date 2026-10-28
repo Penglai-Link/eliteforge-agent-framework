@@ -91,6 +91,27 @@ fn client(config: &AgentModelConfig) -> HttpProtocolClient {
             .unwrap(),
     ))
 }
+
+#[tokio::test]
+async fn native_model_ids_with_reasoning_suffixes_require_explicit_effort() {
+    for protocol in [AgentModelProtocol::Anthropic, AgentModelProtocol::Gemini] {
+        for suffix in [
+            "none", "zero", "minimal", "low", "medium", "high", "xhigh", "max",
+        ] {
+            let mut config = config(protocol, "http://127.0.0.1:1/v1");
+            config.thinking_enabled = true;
+            config.model_name = format!("custom-model-{suffix}");
+            let error = client(&config)
+                .generate(&config, &request())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, eliteforge_agent_core::ModelError::Fatal(ref message)
+                if message.contains("explicit reasoning effort"))
+            );
+        }
+    }
+}
 fn request() -> ModelRequest {
     ModelRequest {
         messages: vec![

@@ -620,10 +620,9 @@ impl crate::ModelTransportFactory for HttpModelTransportFactory {
         &self,
         config: &crate::AgentModelConfig,
     ) -> Result<Arc<dyn ModelTransport>, ModelError> {
-        Ok(Arc::new(HttpModelTransport::new(
-            self.client.clone(),
-            &config.base_url,
-            &config.api_key,
-        )))
+        Ok(Arc::new(
+            HttpModelTransport::new(self.client.clone(), &config.base_url, &config.api_key)
+                .with_headers(&config.request_headers)?,
+        ))
     }
 }
