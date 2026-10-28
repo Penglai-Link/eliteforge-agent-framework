@@ -6,14 +6,28 @@ use std::sync::Arc;
 #[async_trait]
 pub trait ModelTransportFactory: Send + Sync {
     /// Verified provider metadata, independent of the particular request payload.
-    fn embedding_input_modalities(&self, _: &AgentModelConfig) -> Result<Vec<fw::Modality>, fw::ModelError> {
+    fn embedding_input_modalities(
+        &self,
+        _: &AgentModelConfig,
+    ) -> Result<Vec<fw::Modality>, fw::ModelError> {
         Ok(vec![fw::Modality::Text])
     }
     /// Protocol-specific encoding belongs to the supplied adapter. The default
     /// HTTP embedding protocol accepts text; capability packs may encode media.
-    fn embedding_body(&self, config: &AgentModelConfig, request: &fw::EmbeddingRequest) -> Result<serde_json::Value, fw::ModelError> {
-        if request.inputs.iter().any(|content| content.0.iter().any(|block| !matches!(block, fw::ContentBlock::Text { .. }))) {
-            return Err(fw::ModelError::Fatal("HTTP embedding requires a media-capable adapter".into()));
+    fn embedding_body(
+        &self,
+        config: &AgentModelConfig,
+        request: &fw::EmbeddingRequest,
+    ) -> Result<serde_json::Value, fw::ModelError> {
+        if request.inputs.iter().any(|content| {
+            content
+                .0
+                .iter()
+                .any(|block| !matches!(block, fw::ContentBlock::Text { .. }))
+        }) {
+            return Err(fw::ModelError::Fatal(
+                "HTTP embedding requires a media-capable adapter".into(),
+            ));
         }
         Ok(crate::operations::embedding_body(config, request))
     }
@@ -252,9 +266,39 @@ pub fn request_from_framework(request: &fw::ChatRequest) -> Result<ModelRequest,
                 serde_json::from_value(metadata["responseInputItems"].clone())
                     .map_err(|_| fw::ModelError::Fatal("invalid protocol metadata".into()))?;
         } else {
-            input
-                .messages
-                .push(crate::messages::decode(message).map_err(fw::ModelError::Fatal)?);
+            let mut decoded = crate::messages::decode(message).map_err(fw::ModelError::Fatal)?;
+            if let Some(context) = message
+                .model_context
+                .as_ref()
+                .filter(|context| context.format == "wire.response.v1")
+            {
+                let saved: ModelResponse = serde_json::from_value(context.data.clone())
+                    .map_err(|_| fw::ModelError::Fatal("invalid HTTP model continuation".into()))?;
+                let continuations = saved.assistant.parts.iter().filter(|part| matches!(part,
+                    AgentMessagePart::Context { kind, .. } if kind == crate::genai_bridge::CONTINUATION
+                )).cloned().collect::<Vec<_>>();
+                if !continuations.is_empty() {
+                    let expected = response_to_framework(saved)?;
+                    let calls_match = expected.tool_calls.len() == message.tool_calls.len()
+                        && expected.tool_calls.iter().zip(&message.tool_calls).all(
+                            |(expected, actual)| {
+                                expected.id == actual.id
+                                    && expected.call_name == actual.call_name
+                                    && expected.arguments == actual.arguments
+                            },
+                        );
+                    if message.role != fw::Role::Assistant
+                        || expected.content != message.content
+                        || !calls_match
+                    {
+                        return Err(fw::ModelError::Fatal(
+                            "model continuation no longer matches assistant message".into(),
+                        ));
+                    }
+                    decoded.parts.extend(continuations);
+                }
+            }
+            input.messages.push(decoded);
         }
     }
     Ok(input)
@@ -292,11 +336,18 @@ impl ScopedModelTransportFactory {
 }
 #[async_trait]
 impl ModelTransportFactory for ScopedModelTransportFactory {
-    fn embedding_input_modalities(&self, config: &AgentModelConfig) -> Result<Vec<fw::Modality>, fw::ModelError> {
+    fn embedding_input_modalities(
+        &self,
+        config: &AgentModelConfig,
+    ) -> Result<Vec<fw::Modality>, fw::ModelError> {
         self.ensure(config)?;
         self.inner.embedding_input_modalities(config)
     }
-    fn embedding_body(&self, config: &AgentModelConfig, request: &fw::EmbeddingRequest) -> Result<serde_json::Value, fw::ModelError> {
+    fn embedding_body(
+        &self,
+        config: &AgentModelConfig,
+        request: &fw::EmbeddingRequest,
+    ) -> Result<serde_json::Value, fw::ModelError> {
         self.ensure(config)?;
         self.inner.embedding_body(config, request)
     }
@@ -344,5 +395,7 @@ pub fn model_protocol(config: &AgentModelConfig) -> &'static str {
         AgentModelProtocol::Responses => "openai.responses",
         AgentModelProtocol::ChatCompletions => "openai.chat-completions",
         AgentModelProtocol::Embeddings => "openai.embeddings",
+        AgentModelProtocol::Anthropic => "anthropic.messages",
+        AgentModelProtocol::Gemini => "gemini.generate-content",
     }
 }

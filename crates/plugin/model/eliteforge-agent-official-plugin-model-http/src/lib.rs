@@ -19,6 +19,7 @@ mod transport;
 pub use transport::*;
 mod client;
 pub use client::*;
+mod genai_bridge;
 
 mod wire;
 pub use wire::*;

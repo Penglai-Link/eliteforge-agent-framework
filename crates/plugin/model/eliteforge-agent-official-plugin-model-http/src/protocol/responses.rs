@@ -101,9 +101,7 @@ pub fn responses_request(config: &AgentModelConfig, request: &ModelRequest) -> V
 }
 
 fn include_in_input(message: &AgentMessage, supports_developer_role: bool) -> bool {
-    !(supports_developer_role
-        && message.role == "system"
-        && message.instruction_origin.is_some())
+    !(supports_developer_role && message.role == "system" && message.instruction_origin.is_some())
 }
 
 fn responses_input_value(messages: &[AgentMessage], supports_developer_role: bool) -> Value {

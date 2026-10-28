@@ -13,7 +13,12 @@ impl fw::EmbeddingModel for HttpEmbeddingModel {
         self.config.context_window_tokens.map(|v| v as usize)
     }
     fn input_token_estimate(&self, request: &fw::EmbeddingRequest) -> u64 {
-        request.inputs.iter().map(fw::Content::estimated_tokens).fold(0usize, usize::saturating_add).max(1) as u64
+        request
+            .inputs
+            .iter()
+            .map(fw::Content::estimated_tokens)
+            .fold(0usize, usize::saturating_add)
+            .max(1) as u64
     }
 
     fn on_failure(&self, error: &fw::ModelError) {
@@ -68,8 +73,12 @@ impl fw::EmbeddingModel for HttpEmbeddingModel {
             })
             .collect::<Result<Vec<_>, fw::ModelError>>()?;
         Ok(fw::EmbeddingResponse {
-            provider_model: response.get("model").and_then(Value::as_str)
-                .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned),
+            provider_model: response
+                .get("model")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
             model: request
                 .choice
                 .model
@@ -107,7 +116,11 @@ impl fw::RerankModel for HttpRerankModel {
     }
     fn input_token_estimate(&self, request: &fw::RerankRequest) -> u64 {
         let body = if self.chat_fallback {
-            let mut body = rerank_chat_body(request, self.chat_instruction.as_deref(), self.config.supports_developer_role);
+            let mut body = rerank_chat_body(
+                request,
+                self.chat_instruction.as_deref(),
+                self.config.supports_developer_role,
+            );
             body["max_tokens"] = json!(self.config.max_tokens.unwrap_or(4096));
             body
         } else {
@@ -143,7 +156,11 @@ impl fw::RerankModel for HttpRerankModel {
             .collect::<Vec<_>>();
         let transport = self.factory.create(&self.config).await?;
         let results = if self.chat_fallback {
-            let body = rerank_chat_body(&request, self.chat_instruction.as_deref(), self.config.supports_developer_role);
+            let body = rerank_chat_body(
+                &request,
+                self.chat_instruction.as_deref(),
+                self.config.supports_developer_role,
+            );
             let mut body = body;
             body["max_tokens"] =
                 json!(output_limit.unwrap_or(self.config.max_tokens.unwrap_or(4096)));
@@ -239,7 +256,11 @@ pub(crate) fn parse_usage(response: &Value) -> Option<fw::Usage> {
 
 const DEFAULT_CHAT_RERANK_PROMPT: &str = include_str!("../prompts/chat-rerank.txt");
 
-fn rerank_chat_body(request: &fw::RerankRequest, instruction: Option<&str>, supports_developer_role: bool) -> Value {
+fn rerank_chat_body(
+    request: &fw::RerankRequest,
+    instruction: Option<&str>,
+    supports_developer_role: bool,
+) -> Value {
     let numbered = request
         .documents
         .iter()
@@ -248,7 +269,11 @@ fn rerank_chat_body(request: &fw::RerankRequest, instruction: Option<&str>, supp
         .collect::<Vec<_>>()
         .join("\n\n");
     let instruction = instruction.unwrap_or(DEFAULT_CHAT_RERANK_PROMPT.trim());
-    let role = if supports_developer_role { "developer" } else { "system" };
+    let role = if supports_developer_role {
+        "developer"
+    } else {
+        "system"
+    };
     json!({"messages":[{"role":role,"content":instruction},{"role":"user","content":format!("Query:\n{}\n\nCandidates:\n{numbered}",request.query.text())}],"temperature":0})
 }
 

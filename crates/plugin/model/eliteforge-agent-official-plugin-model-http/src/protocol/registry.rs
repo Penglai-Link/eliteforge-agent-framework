@@ -45,5 +45,7 @@ pub fn adapter_for_protocol(
         AgentModelProtocol::ChatCompletions => Some(&ChatCompletionsAdapter),
         AgentModelProtocol::Responses => Some(&ResponsesAdapter),
         AgentModelProtocol::Embeddings => Some(&EmbeddingsAdapter),
+        // These protocols are implemented by the official genai adapter.
+        AgentModelProtocol::Anthropic | AgentModelProtocol::Gemini => None,
     }
 }

@@ -15,6 +15,9 @@ impl HttpProtocolClient {
         config: &AgentModelConfig,
         request: &ModelRequest,
     ) -> Result<ModelResponse, fw::ModelError> {
+        if crate::genai_bridge::supported(config.protocol) {
+            return self.transport.native_chat(config, request, None).await;
+        }
         let adapter = adapter_for_protocol(config.protocol)
             .ok_or_else(|| fw::ModelError::Fatal("unsupported model protocol".into()))?;
         let body = adapter
@@ -37,6 +40,12 @@ impl HttpProtocolClient {
         request: &ModelRequest,
         sink: Arc<dyn Fn(ModelStreamEvent) + Send + Sync>,
     ) -> Result<ModelResponse, fw::ModelError> {
+        if crate::genai_bridge::supported(config.protocol) {
+            return self
+                .transport
+                .native_chat(config, request, Some(sink))
+                .await;
+        }
         let adapter = adapter_for_protocol(config.protocol)
             .ok_or_else(|| fw::ModelError::Fatal("unsupported model protocol".into()))?;
         let body = adapter

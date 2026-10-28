@@ -14,6 +14,7 @@ fn config(protocol: AgentModelProtocol, path: Option<&str>) -> AgentModelConfig 
         base_url: "https://unused.invalid".into(),
         api_path: path.map(str::to_owned),
         api_key: String::new(),
+        request_headers: Default::default(),
         model_name: String::new(),
         thinking_enabled: false,
         supports_developer_role: false,

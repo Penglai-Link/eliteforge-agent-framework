@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use eliteforge_agent_core::{ModelError, ProviderErrorCategory, ProviderModelError};
+pub use eliteforge_agent_official_plugin_model_genai::{GenaiHttpClient, ModelHttpClientOptions};
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -9,6 +10,18 @@ pub type EventSink<'a> = Arc<dyn Fn(Value) -> Result<(), ModelError> + Send + Sy
 /// explicit invoker action, never a transport retry.
 #[async_trait]
 pub trait ModelTransport: Send + Sync {
+    /// Native protocol execution must be provided explicitly by the injected
+    /// transport. Never silently replace a host transport with a direct client.
+    async fn native_chat(
+        &self,
+        _: &crate::AgentModelConfig,
+        _: &crate::ModelRequest,
+        _: Option<Arc<dyn Fn(crate::ModelStreamEvent) + Send + Sync>>,
+    ) -> Result<crate::ModelResponse, ModelError> {
+        Err(ModelError::Fatal(
+            "injected model transport does not support this native protocol".into(),
+        ))
+    }
     async fn json(&self, path: &str, body: &Value) -> Result<Value, ModelError>;
     /// Status-only connectivity probe, with bounded response drainage.
     async fn probe(&self, path: &str, body: &Value) -> Result<Value, ModelError> {
@@ -23,17 +36,61 @@ pub trait ModelTransport: Send + Sync {
 
 /// Model HTTP pool whose redirect policy cannot hide a second model request.
 /// Host builders retain proxy, connection, pool and timeout settings.
-#[derive(Clone, Debug)]
-pub struct ModelHttpClient(reqwest::Client);
+#[derive(Clone)]
+pub struct ModelHttpClient(reqwest::Client, Option<GenaiHttpClient>);
+impl std::fmt::Debug for ModelHttpClient {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ModelHttpClient")
+            .field("native_protocols", &self.1.is_some())
+            .finish_non_exhaustive()
+    }
+}
 impl ModelHttpClient {
     pub fn new() -> Self {
-        Self::from_builder(reqwest::Client::builder()).expect("model HTTP client initialization")
+        Self::from_options(&ModelHttpClientOptions::default())
+            .expect("model HTTP client initialization")
     }
     pub fn from_builder(builder: reqwest::ClientBuilder) -> Result<Self, reqwest::Error> {
         builder
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .map(Self)
+            .map(|client| Self(client, None))
+    }
+    pub fn with_native_client(mut self, client: GenaiHttpClient) -> Self {
+        self.1 = Some(client);
+        self
+    }
+    pub fn from_options(options: &ModelHttpClientOptions) -> Result<Self, ModelError> {
+        let mut builder = reqwest::Client::builder()
+            .danger_accept_invalid_certs(options.accept_invalid_certificates);
+        if let Some(value) = options.connect_timeout {
+            builder = builder.connect_timeout(value);
+        }
+        if let Some(value) = options.timeout {
+            builder = builder.timeout(value);
+        }
+        if let Some(value) = options.read_timeout {
+            builder = builder.read_timeout(value);
+        }
+        if let Some(value) = options.pool_max_idle_per_host {
+            builder = builder.pool_max_idle_per_host(value);
+        }
+        if let Some(value) = options.pool_idle_timeout {
+            builder = builder.pool_idle_timeout(value);
+        }
+        if let Some(value) = options.tcp_keepalive {
+            builder = builder.tcp_keepalive(value);
+        }
+        if let Some(value) = &options.proxy_url {
+            builder = builder.proxy(
+                reqwest::Proxy::all(value)
+                    .map_err(|_| ModelError::Fatal("invalid model proxy configuration".into()))?,
+            );
+        }
+        Ok(Self::from_builder(builder)
+            .map_err(|_| ModelError::Fatal("model HTTP client initialization failed".into()))?
+            .with_native_client(GenaiHttpClient::from_options(options)?))
     }
 }
 impl Default for ModelHttpClient {
@@ -46,6 +103,7 @@ pub struct HttpModelTransport {
     client: ModelHttpClient,
     base_url: String,
     api_key: String,
+    headers: reqwest::header::HeaderMap,
 }
 impl HttpModelTransport {
     pub fn new(
@@ -57,7 +115,15 @@ impl HttpModelTransport {
             client,
             base_url: base_url.into(),
             api_key: api_key.into(),
+            headers: reqwest::header::HeaderMap::new(),
         }
+    }
+    pub fn with_headers(
+        mut self,
+        headers: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Self, ModelError> {
+        self.headers = connection_headers(headers)?;
+        Ok(self)
     }
     fn request(&self, path: &str, body: &Value) -> Result<reqwest::RequestBuilder, ModelError> {
         if self.base_url.trim().is_empty() || path.trim_matches('/').is_empty() {
@@ -70,7 +136,7 @@ impl HttpModelTransport {
         {
             return Err(ModelError::Fatal("model request exceeds byte limit".into()));
         }
-        Ok(self
+        let request = self
             .client
             .0
             .post(format!(
@@ -78,12 +144,99 @@ impl HttpModelTransport {
                 self.base_url.trim_end_matches('/'),
                 path.trim_start_matches('/')
             ))
-            .bearer_auth(&self.api_key)
-            .json(body))
+            .headers(self.headers.clone())
+            .json(body);
+        Ok(if self.api_key.is_empty() {
+            request
+        } else {
+            request.bearer_auth(&self.api_key)
+        })
     }
+}
+
+/// Validate user supplied headers without placing their values in diagnostics.
+pub fn validate_request_headers(
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ModelError> {
+    connection_headers(headers).map(|_| ())
+}
+
+fn connection_headers(
+    headers: &std::collections::BTreeMap<String, String>,
+) -> Result<reqwest::header::HeaderMap, ModelError> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    if headers.len() > 64
+        || headers
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum::<usize>()
+            > 32 * 1024
+    {
+        return Err(ModelError::Fatal(
+            "model request headers exceed limit".into(),
+        ));
+    }
+    let mut result = HeaderMap::new();
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|_| ModelError::Fatal("invalid model request header name".into()))?;
+        if matches!(
+            name.as_str(),
+            "host"
+                | "content-length"
+                | "transfer-encoding"
+                | "connection"
+                | "authorization"
+                | "proxy-authorization"
+                | "x-api-key"
+                | "x-goog-api-key"
+                | "api-key"
+                | "cookie"
+        ) {
+            return Err(ModelError::Fatal("reserved model request header".into()));
+        }
+        let mut value = HeaderValue::from_str(value)
+            .map_err(|_| ModelError::Fatal("invalid model request header value".into()))?;
+        value.set_sensitive(true);
+        if result.insert(name, value).is_some() {
+            return Err(ModelError::Fatal("duplicate model request header".into()));
+        }
+    }
+    Ok(result)
 }
 #[async_trait]
 impl ModelTransport for HttpModelTransport {
+    async fn native_chat(
+        &self,
+        config: &crate::AgentModelConfig,
+        request: &crate::ModelRequest,
+        sink: Option<Arc<dyn Fn(crate::ModelStreamEvent) + Send + Sync>>,
+    ) -> Result<crate::ModelResponse, ModelError> {
+        let client = self.client.1.clone().ok_or_else(|| ModelError::Fatal(
+            "native protocols require ModelHttpClient::from_options or an explicitly injected native client".into(),
+        ))?;
+        // The transport owns routing and authorization, even when the request
+        // DTO was built before the host selected its concrete transport.
+        let mut config = config.clone();
+        config.base_url = self.base_url.clone();
+        config.api_key = self.api_key.clone();
+        config.request_headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| {
+                Ok((
+                    name.as_str().to_owned(),
+                    value
+                        .to_str()
+                        .map_err(|_| {
+                            ModelError::Fatal("invalid model request header value".into())
+                        })?
+                        .to_owned(),
+                ))
+            })
+            .collect::<Result<_, ModelError>>()?;
+        crate::genai_bridge::generate(&config, request, sink, client).await
+    }
     async fn json(&self, path: &str, body: &Value) -> Result<Value, ModelError> {
         read_json(
             self.request(path, body)?

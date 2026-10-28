@@ -23,6 +23,16 @@ pub fn tool_schema_payload(protocol: AgentModelProtocol, tools: &[EffectiveTool]
                     "parameters": tool.input_schema,
                 }),
                 AgentModelProtocol::Embeddings => Value::Null,
+                AgentModelProtocol::Anthropic => json!({
+                    "name": tool.tool_name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                }),
+                AgentModelProtocol::Gemini => json!({
+                    "name": tool.tool_name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                }),
             })
             .collect(),
     )

@@ -6,6 +6,8 @@ pub enum AgentModelProtocol {
     ChatCompletions,
     Responses,
     Embeddings,
+    Anthropic,
+    Gemini,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

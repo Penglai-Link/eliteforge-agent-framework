@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-official-plugin-model-genai = { path = "../eliteforge-agent-official-plugin-model-genai", version = "0.1.0" }
 async-trait.workspace = true
 tokio.workspace = true
 serde.workspace = true

@@ -19,8 +19,10 @@ use std::{collections::HashMap, sync::Arc};
 
 const FORMAT: &str = "genai/0.7/message";
 mod embedding;
+mod http_client;
 mod plugin;
 pub use embedding::GenaiEmbeddingAdapter;
+pub use http_client::{GenaiHttpClient, ModelHttpClientOptions};
 pub use plugin::{GenaiPlugin, OpenAiChatProtocol};
 
 /// No Debug/Serialize implementation: endpoint, authentication and client stay private.
@@ -45,10 +47,7 @@ impl GenaiChatAdapter {
         }
         Ok(Self {
             connection_id: connection_id.into(),
-            client: Client::builder()
-                .with_adapter_kind(adapter)
-                .build()
-                .map_err(map_error)?,
+            client: GenaiHttpClient::from_options(&ModelHttpClientOptions::default())?.0,
             adapter,
             endpoint: Endpoint::from_owned(endpoint),
             auth,
@@ -59,6 +58,10 @@ impl GenaiChatAdapter {
     /// Calls use an explicit ServiceTarget; no model-name based adapter inference.
     pub fn with_client(mut self, client: Client) -> Self {
         self.client = client;
+        self
+    }
+    pub fn with_http_client(mut self, client: GenaiHttpClient) -> Self {
+        self.client = client.0;
         self
     }
     pub fn with_options(mut self, options: ChatOptions) -> Self {
@@ -113,14 +116,29 @@ impl ModelDiscovery for GenaiChatAdapter {
     }
 }
 
-#[async_trait]
-impl ChatModel for GenaiChatAdapter {
-    async fn generate(
+/// Provider-reported counters remain optional for hosts that distinguish unknown
+/// usage from an actual zero. Framework's core aggregate is intentionally separate.
+#[derive(Debug, Clone, Default)]
+pub struct GenaiTokenUsage {
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
+    pub cached_input_tokens: Option<u32>,
+    pub reasoning_tokens: Option<u32>,
+}
+
+pub struct GenaiChatOutput {
+    pub response: ChatResponse,
+    pub token_usage: Option<GenaiTokenUsage>,
+}
+
+impl GenaiChatAdapter {
+    pub async fn generate_with_usage(
         &self,
         model_id: &str,
         request: ChatRequest,
         stream: &dyn ChatStream,
-    ) -> Result<ChatResponse, ModelError> {
+    ) -> Result<GenaiChatOutput, ModelError> {
         let model = ModelRef::new(&self.connection_id, model_id);
         let generation = request.options.clone();
         if request
@@ -169,7 +187,9 @@ impl ChatModel for GenaiChatAdapter {
             .await
             .map_err(map_error)?;
         while let Some(event) = response.stream.next().await {
-            match event.map_err(map_error)? {
+            match event.map_err(|_| {
+                ModelError::Indeterminate("model stream interrupted after response started".into())
+            })? {
                 ChatStreamEvent::Chunk(chunk) => stream.text_delta(&chunk.content).await,
                 ChatStreamEvent::ReasoningChunk(chunk) => {
                     stream.reasoning_delta(&chunk.content).await
@@ -196,6 +216,27 @@ impl ChatModel for GenaiChatAdapter {
                             ToolCall::new(&call.call_id, &call.fn_name, call.fn_arguments.clone())
                         })
                         .collect();
+                    let token_usage = end.captured_usage.as_ref().map(|usage| {
+                        let count =
+                            |value: Option<i32>| value.and_then(|value| u32::try_from(value).ok());
+                        GenaiTokenUsage {
+                            input_tokens: count(usage.prompt_tokens),
+                            output_tokens: count(usage.completion_tokens),
+                            total_tokens: count(usage.total_tokens),
+                            cached_input_tokens: count(
+                                usage
+                                    .prompt_tokens_details
+                                    .as_ref()
+                                    .and_then(|details| details.cached_tokens),
+                            ),
+                            reasoning_tokens: count(
+                                usage
+                                    .completion_tokens_details
+                                    .as_ref()
+                                    .and_then(|details| details.reasoning_tokens),
+                            ),
+                        }
+                    });
                     let usage = end.captured_usage.unwrap_or_default();
                     // Signed reasoning already lives in ordered content parts in 0.7.
                     // Appending flattened reasoning again would break signature pairing.
@@ -205,7 +246,7 @@ impl ChatModel for GenaiChatAdapter {
                         native =
                             native.with_reasoning_content(end.captured_reasoning_content.clone());
                     }
-                    return Ok(ChatResponse {
+                    let response = ChatResponse {
                         public_content: None,
                         content: framework_content,
                         reasoning: end.captured_reasoning_content.clone(),
@@ -223,6 +264,10 @@ impl ChatModel for GenaiChatAdapter {
                                 ModelError::Fatal("could not encode model continuation".into())
                             })?,
                         }),
+                    };
+                    return Ok(GenaiChatOutput {
+                        response,
+                        token_usage,
                     });
                 }
                 ChatStreamEvent::ThoughtSignatureChunk(_)
@@ -231,9 +276,24 @@ impl ChatModel for GenaiChatAdapter {
                 | ChatStreamEvent::Heartbeat => {}
             }
         }
-        Err(ModelError::Transient(
+        Err(ModelError::Indeterminate(
             "model stream ended without terminal event".into(),
         ))
+    }
+}
+
+#[async_trait]
+impl ChatModel for GenaiChatAdapter {
+    async fn generate(
+        &self,
+        model_id: &str,
+        request: ChatRequest,
+        stream: &dyn ChatStream,
+    ) -> Result<ChatResponse, ModelError> {
+        Ok(self
+            .generate_with_usage(model_id, request, stream)
+            .await?
+            .response)
     }
 }
 

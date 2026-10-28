@@ -128,6 +128,7 @@ fn config(url: &str) -> http::AgentModelConfig {
         base_url: url.into(),
         api_path: None,
         api_key: "test".into(),
+        request_headers: Default::default(),
         model_name: "test".into(),
         thinking_enabled: false,
         supports_developer_role: false,
