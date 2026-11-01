@@ -177,7 +177,6 @@ crates/
 
 **执行能力与应用接入**
 
-- [DAG 工作流](docs/DAG工作流.md)：节点、并行分支、汇合和恢复。
 - [用户交互与审批](docs/用户交互与审批.md)：持久化问答、工具审批和恢复执行。
 - [Agent 协作](docs/Agent协作.md)：子 Agent、独立 Thread 和协作边界。
 - [AG-UI 事件协议](docs/AG-UI事件协议.md)：Framework 事件映射及 SSE 输出。

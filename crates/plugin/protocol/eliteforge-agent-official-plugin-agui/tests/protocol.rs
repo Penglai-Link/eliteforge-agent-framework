@@ -3,7 +3,7 @@ use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_agui::{
     AgUiOptions, AgUiPlugin, AgUiStream, Event, EventType, ag_ui,
 };
-use eliteforge_agent_official_plugin_storage_local::{SqliteOptions, SqliteStateStore};
+use eliteforge_agent_official_plugin_storage_local::{SqliteConversationStore, SqliteOptions, SqliteStateStore};
 use eliteforge_agent_test_support::*;
 use futures::StreamExt;
 use serde_json::{Value, json};
@@ -72,6 +72,228 @@ fn code(events: &[Event]) -> Option<&str> {
 }
 
 struct Streaming;
+
+struct PhaseModel {
+    calls: Arc<AtomicUsize>,
+    requests: Arc<std::sync::Mutex<Vec<ChatRequest>>>,
+    always_commentary: bool,
+}
+
+struct MultiPhaseModel;
+#[async_trait]
+impl ChatModel for MultiPhaseModel {
+    async fn generate(&self, _: &str, _: ChatRequest, stream: &dyn ChatStream) -> Result<ChatResponse, ModelError> {
+        let items = [(0, "commentary", "Checking"), (2, "final_answer", "Done")];
+        for (index, phase, text) in items {
+            stream.message_start(index, None).await;
+            stream.message_delta(index, text).await;
+            stream.message_end(index, Some(phase), text).await;
+        }
+        Ok(ChatResponse {
+            content: "Done".into(), disposition: Some(ModelDisposition::Final),
+            output_items: items.into_iter().map(|(output_index, phase, text)| ModelOutputItem::Message {
+                output_index, item_id: Some(format!("item-{output_index}")), phase: Some(phase.into()), content: text.into(),
+            }).collect(), ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn one_response_keeps_separate_late_phases_in_stream_and_history() {
+    let agent = TestBuilder::default().plugin(AgUiPlugin::default()).plugin(ChatModelPlugin::new(MultiPhaseModel)).build().await.unwrap();
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("multi-phase", "task")).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert_eq!(result.unwrap().output, "Done");
+    assert_eq!(text(&events), "CheckingDone");
+    let ends: Vec<Value> = events.iter().filter(|event| matches!(event, Event::TextMessageEnd(_))).map(|event| serde_json::to_value(event).unwrap()).collect();
+    assert_eq!(ends.len(), 2);
+    assert_eq!(ends[0]["metadata"]["framework"]["message"]["phase"], "commentary");
+    assert_eq!(ends[1]["metadata"]["framework"]["message"]["phase"], "final_answer");
+    let checkpoint = agent.latest_checkpoint("multi-phase").await.unwrap().unwrap();
+    let messages: Vec<_> = checkpoint.history.messages.iter().filter(|message| message.phase.is_some()).collect();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].step_id, messages[1].step_id);
+    assert_eq!(messages[0].id, ends[0]["messageId"]);
+    assert_eq!(messages[1].id, ends[1]["messageId"]);
+    validate_client(&events).await;
+}
+
+#[async_trait]
+impl ChatModel for PhaseModel {
+    async fn generate(&self, _: &str, request: ChatRequest, stream: &dyn ChatStream) -> Result<ChatResponse, ModelError> {
+        self.requests.lock().unwrap().push(request);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
+        let commentary = call == 0 || self.always_commentary;
+        let (phase, text) = if commentary {
+            ("commentary", "Checking files")
+        } else {
+            ("final_answer", "Done")
+        };
+        stream.message_start(1, Some(phase)).await;
+        stream.message_delta(1, text).await;
+        stream.message_end(1, Some(phase), text).await;
+        Ok(ChatResponse {
+            output_items: vec![ModelOutputItem::Message { output_index: 1, item_id: Some(format!("provider-{call}")), phase: Some(phase.into()), content: text.into() }],
+            ..Default::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn phases_survive_stream_history_and_bounded_continuation() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let agent = TestBuilder::default().plugin(AgUiPlugin::default()).plugin(ChatModelPlugin::new(PhaseModel {
+        calls: calls.clone(), requests: requests.clone(), always_commentary: false,
+    })).build().await.unwrap();
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("phase-test", "task")).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert_eq!(result.unwrap().output, "Done");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(requests.lock().unwrap()[1].messages.iter().any(|message| message.phase.as_deref() == Some("commentary") && message.content.text() == "Checking files"));
+    assert_eq!(text(&events), "Checking filesDone");
+    let starts: Vec<Value> = events.iter().filter(|event| matches!(event, Event::TextMessageStart(_))).map(|event| serde_json::to_value(event).unwrap()).collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[0]["metadata"]["framework"]["message"]["phase"], "commentary");
+    assert_eq!(starts[1]["metadata"]["framework"]["message"]["phase"], "final_answer");
+    assert_ne!(starts[0]["messageId"], starts[1]["messageId"]);
+    let terminal = events.iter().find(|event| matches!(event, Event::RunFinished(_))).unwrap();
+    let terminal = serde_json::to_value(terminal).unwrap();
+    assert_eq!(terminal["metadata"]["framework"]["finalMessageIds"][0], starts[1]["messageId"]);
+    let checkpoint = agent.latest_checkpoint("phase-test").await.unwrap().unwrap();
+    let messages: Vec<_> = checkpoint.history.messages.iter().filter(|message| message.phase.is_some()).collect();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].id, starts[0]["messageId"]);
+    assert_eq!(messages[0].phase.as_deref(), Some("commentary"));
+    assert_eq!(messages[1].id, starts[1]["messageId"]);
+    assert_eq!(messages[1].phase.as_deref(), Some("final_answer"));
+    assert!(messages.iter().all(|message| message.status == HistoryStatus::Completed));
+    assert_eq!(checkpoint.state["phase_continuations"], 1);
+    validate_client(&events).await;
+}
+
+#[tokio::test]
+async fn commentary_continuation_stops_at_the_configured_limit() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = TestBuilder::default().plugin(AgUiPlugin::default()).plugin(ChatModelPlugin::new(PhaseModel {
+        calls: calls.clone(), requests: Arc::default(), always_commentary: true,
+    })).build().await.unwrap();
+    let mut request = RunRequest::new("phase-limit", "task");
+    request.limits.max_phase_continuations = 2;
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert!(result.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(types(&events, EventType::RunError), 1);
+    assert_eq!(agent.latest_checkpoint("phase-limit").await.unwrap().unwrap().state["phase_continuations"], 2);
+}
+
+#[tokio::test]
+async fn commentary_continuation_can_be_disabled() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = TestBuilder::default().plugin(AgUiPlugin::default()).plugin(ChatModelPlugin::new(PhaseModel {
+        calls: calls.clone(), requests: Arc::default(), always_commentary: true,
+    })).build().await.unwrap();
+    let mut request = RunRequest::new("phase-zero", "task");
+    request.limits.max_phase_continuations = 0;
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
+    let (result, _) = complete(agent.clone(), handle, stream).await;
+    assert!(result.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let checkpoint = agent.latest_checkpoint("phase-zero").await.unwrap().unwrap();
+    assert_eq!(checkpoint.state["phase_continuations"], 0);
+    assert!(checkpoint.transcript.iter().any(|message| message.phase.as_deref() == Some("commentary")));
+}
+
+struct InterruptedPhaseModel;
+#[async_trait]
+impl ChatModel for InterruptedPhaseModel {
+    async fn generate(&self, _: &str, _: ChatRequest, stream: &dyn ChatStream) -> Result<ChatResponse, ModelError> {
+        stream.message_start(0, Some("commentary")).await;
+        stream.message_delta(0, "Saved").await;
+        stream.message_end(0, Some("commentary"), "Saved").await;
+        stream.message_start(1, Some("final_answer")).await;
+        stream.message_delta(1, "Partial").await;
+        Err(ModelError::Indeterminate("fixture stream interrupted".into()))
+    }
+}
+
+#[tokio::test]
+async fn interrupted_phased_stream_preserves_finished_and_partial_messages() {
+    let agent = TestBuilder::default().plugin(AgUiPlugin::default()).plugin(ChatModelPlugin::new(InterruptedPhaseModel)).build().await.unwrap();
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("phase-interrupted", "task")).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert!(result.is_err());
+    let checkpoint = agent.latest_checkpoint("phase-interrupted").await.unwrap().unwrap();
+    let messages: Vec<_> = checkpoint.history.messages.iter().filter(|message| message.phase.is_some()).collect();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].status, HistoryStatus::Completed);
+    assert_eq!(messages[1].status, HistoryStatus::Interrupted);
+    assert_eq!(text(&events), "SavedPartial");
+    assert_eq!(types(&events, EventType::RunError), 1);
+}
+
+struct ConflictingPhaseModel;
+#[async_trait]
+impl ChatModel for ConflictingPhaseModel {
+    async fn generate(&self, _: &str, _: ChatRequest, stream: &dyn ChatStream) -> Result<ChatResponse, ModelError> {
+        stream.message_start(0, Some("final_answer")).await;
+        stream.message_delta(0, "Original").await;
+        stream.message_end(0, Some("final_answer"), "Original").await;
+        Ok(ChatResponse { output_items: vec![ModelOutputItem::Message { output_index: 0, item_id: None, phase: Some("final_answer".into()), content: "Changed".into() }], ..Default::default() })
+    }
+}
+
+#[tokio::test]
+async fn conflicting_terminal_phase_content_is_a_protocol_error() {
+    let agent = TestBuilder::default().plugin(AgUiPlugin::default()).plugin(ChatModelPlugin::new(ConflictingPhaseModel)).build().await.unwrap();
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("phase-conflict", "task")).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert!(result.is_err());
+    assert_eq!(text(&events), "Original");
+    assert_eq!(types(&events, EventType::RunError), 1);
+    let checkpoint = agent.latest_checkpoint("phase-conflict").await.unwrap().unwrap();
+    let message = checkpoint.history.messages.iter().find(|message| message.phase.as_deref() == Some("final_answer")).unwrap();
+    assert_eq!(message.content, vec![HistoryContentBlock::Text { text: "Original".into() }]);
+    assert_eq!(message.status, HistoryStatus::Completed);
+}
+
+struct WaitingPhaseModel(Arc<Notify>);
+#[async_trait]
+impl ChatModel for WaitingPhaseModel {
+    async fn generate(&self, _: &str, _: ChatRequest, stream: &dyn ChatStream) -> Result<ChatResponse, ModelError> {
+        stream.message_start(0, Some("commentary")).await;
+        stream.message_delta(0, "Saved before interruption").await;
+        stream.message_end(0, Some("commentary"), "Saved before interruption").await;
+        stream.message_start(1, Some("final_answer")).await;
+        stream.message_delta(1, "Partial answer").await;
+        self.0.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn cancellation_and_timeout_keep_finished_phase_messages() {
+    for cancel in [true, false] {
+        let entered = Arc::new(Notify::new());
+        let agent = TestBuilder::default().plugin(AgUiPlugin::default()).plugin(ChatModelPlugin::new(WaitingPhaseModel(entered.clone()))).build().await.unwrap();
+        let session = if cancel { "phase-cancel" } else { "phase-timeout" };
+        let mut request = RunRequest::new(session, "task");
+        if !cancel { request.limits.model_timeout = Duration::from_millis(100); }
+        let (handle, stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
+        let control = agent.control(&handle).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), entered.notified()).await.unwrap();
+        if cancel { agent.cancel(&control).unwrap(); }
+        let (result, events) = complete(agent.clone(), handle, stream).await;
+        assert!(result.is_err());
+        let checkpoint = agent.latest_checkpoint(session).await.unwrap().unwrap();
+        let messages: Vec<_> = checkpoint.history.messages.iter().filter(|message| message.phase.is_some()).collect();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].status, HistoryStatus::Completed);
+        assert_eq!(messages[1].status, HistoryStatus::Interrupted);
+        assert_eq!(types(&events, EventType::RunError), 1);
+    }
+}
 
 struct ControlledExternal {
     prefix: &'static str,
@@ -366,6 +588,135 @@ fn tools(count: Arc<AtomicUsize>, large: bool) -> ToolProviderPlugin {
         Work { count, large }).parallel_safe()]))
 }
 
+struct PhasedToolModel { calls: AtomicUsize, requests: Arc<std::sync::Mutex<Vec<ChatRequest>>> }
+#[async_trait]
+impl ChatModel for PhasedToolModel {
+    async fn generate(&self, _: &str, request: ChatRequest, stream: &dyn ChatStream) -> Result<ChatResponse, ModelError> {
+        self.requests.lock().unwrap().push(request);
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            let call = ToolCall::new("provider-call", "work", json!({"value":"input"}));
+            stream.message_start(0, Some("commentary")).await;
+            stream.message_delta(0, "Checking").await;
+            stream.message_end(0, Some("commentary"), "Checking").await;
+            stream.tool_boundary(1).await;
+            stream.message_start(2, Some("final_answer")).await;
+            stream.message_delta(2, "After call declaration").await;
+            stream.message_end(2, Some("final_answer"), "After call declaration").await;
+            Ok(ChatResponse { disposition: Some(ModelDisposition::ToolCalls), tool_calls: vec![call.clone()],
+                output_items: vec![ModelOutputItem::Message { output_index: 0, item_id: None, phase: Some("commentary".into()), content: "Checking".into() },
+                    ModelOutputItem::ToolCall { output_index: 1, call },
+                    ModelOutputItem::Message { output_index: 2, item_id: None, phase: Some("final_answer".into()), content: "After call declaration".into() }], ..Default::default() })
+        } else {
+            stream.message_start(0, Some("final_answer")).await;
+            stream.message_delta(0, "Done").await;
+            stream.message_end(0, Some("final_answer"), "Done").await;
+            Ok(ChatResponse { content: "Done".into(), disposition: Some(ModelDisposition::Final),
+                output_items: vec![ModelOutputItem::Message { output_index: 0, item_id: None, phase: Some("final_answer".into()), content: "Done".into() }], ..Default::default() })
+        }
+    }
+}
+
+#[tokio::test]
+async fn phased_tool_call_keeps_message_identity_in_history_and_events() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let agent = TestBuilder::default().plugin(AgUiPlugin::default())
+        .plugin(ChatModelPlugin::new(PhasedToolModel { calls: AtomicUsize::new(0), requests: requests.clone() }))
+        .plugin(tools(calls.clone(), false)).build().await.unwrap();
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("phase-tool", "task")).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert_eq!(result.unwrap().output, "Done");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let start = events.iter().find(|event| matches!(event, Event::TextMessageStart(_))).unwrap();
+    let start = serde_json::to_value(start).unwrap();
+    let tool = events.iter().find(|event| matches!(event, Event::ToolCallStart(_))).unwrap();
+    let tool = serde_json::to_value(tool).unwrap();
+    assert_eq!(tool["parentMessageId"], start["messageId"]);
+    let tool_position = events.iter().position(|event| matches!(event, Event::ToolCallStart(_))).unwrap();
+    let following_position = events.iter().position(|event| matches!(event, Event::TextMessageContent(content) if content.delta == "After call declaration")).unwrap();
+    assert!(tool_position < following_position);
+    let checkpoint = agent.latest_checkpoint("phase-tool").await.unwrap().unwrap();
+    assert_eq!(checkpoint.history.tool_invocations.len(), 1);
+    assert_eq!(checkpoint.history.tool_invocations[0].message_id, start["messageId"]);
+    let captured = requests.lock().unwrap();
+    let replay = &captured[1].messages;
+    let first = replay.iter().position(|message| message.content.text() == "Checking").unwrap();
+    assert_eq!(replay[first].tool_calls.len(), 1);
+    assert_eq!(replay[first + 1].content.text(), "After call declaration");
+    assert_eq!(replay[first + 1].phase.as_deref(), Some("final_answer"));
+    assert!(replay[first + 1].tool_calls.is_empty());
+    assert_eq!(replay[first + 2].role, Role::Tool);
+    validate_client(&events).await;
+}
+
+struct NonStreamingPhasedToolModel(AtomicUsize);
+#[async_trait]
+impl ChatModel for NonStreamingPhasedToolModel {
+    async fn generate(&self, _: &str, _: ChatRequest, _: &dyn ChatStream) -> Result<ChatResponse, ModelError> {
+        let items = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+            vec![
+                ModelOutputItem::Message { output_index: 0, item_id: None, phase: Some("commentary".into()), content: "Before".into() },
+                ModelOutputItem::ToolCall { output_index: 1, call: ToolCall::new("nonstream-call", "work", json!({"value":"input"})) },
+                ModelOutputItem::Message { output_index: 2, item_id: None, phase: Some("final_answer".into()), content: "After".into() },
+            ]
+        } else {
+            vec![ModelOutputItem::Message { output_index: 0, item_id: None, phase: Some("final_answer".into()), content: "Done".into() }]
+        };
+        Ok(ChatResponse { output_items: items, ..Default::default() })
+    }
+}
+
+#[tokio::test]
+async fn non_streaming_output_keeps_tool_and_message_order() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = TestBuilder::default().plugin(AgUiPlugin::default()).plugin(ChatModelPlugin::new(NonStreamingPhasedToolModel(AtomicUsize::new(0))))
+        .plugin(tools(calls.clone(), false)).build().await.unwrap();
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("non-stream-order", "task")).unwrap();
+    let (result, events) = complete(agent, handle, stream).await;
+    assert_eq!(result.unwrap().output, "Done");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let before = events.iter().position(|event| matches!(event, Event::TextMessageContent(content) if content.delta == "Before")).unwrap();
+    let tool = events.iter().position(|event| matches!(event, Event::ToolCallStart(_))).unwrap();
+    let after = events.iter().position(|event| matches!(event, Event::TextMessageContent(content) if content.delta == "After")).unwrap();
+    assert!(before < tool && tool < after);
+    validate_client(&events).await;
+}
+
+struct ContinuationAcrossToolModel(AtomicUsize);
+#[async_trait]
+impl ChatModel for ContinuationAcrossToolModel {
+    async fn generate(&self, _: &str, _: ChatRequest, stream: &dyn ChatStream) -> Result<ChatResponse, ModelError> {
+        if self.0.fetch_add(1, Ordering::SeqCst) == 1 {
+            let call = ToolCall::new("one-call", "work", json!({"value":"input"}));
+            return Ok(ChatResponse { disposition: Some(ModelDisposition::ToolCalls), tool_calls: vec![call.clone()],
+                output_items: vec![ModelOutputItem::ToolCall { output_index: 0, call }], ..Default::default() });
+        }
+        stream.message_start(0, Some("commentary")).await;
+        stream.message_delta(0, "Working").await;
+        stream.message_end(0, Some("commentary"), "Working").await;
+        Ok(ChatResponse { disposition: Some(ModelDisposition::Continue),
+            output_items: vec![ModelOutputItem::Message { output_index: 0, item_id: None, phase: Some("commentary".into()), content: "Working".into() }], ..Default::default() })
+    }
+}
+
+#[tokio::test]
+async fn commentary_continuation_budget_survives_a_tool_call() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let agent = TestBuilder::default().plugin(AgUiPlugin::default())
+        .plugin(ChatModelPlugin::new(ContinuationAcrossToolModel(AtomicUsize::new(0))))
+        .plugin(tools(calls.clone(), false)).build().await.unwrap();
+    let mut request = RunRequest::new("phase-after-tool", "task");
+    request.limits.max_phase_continuations = 1;
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert!(result.is_err());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(types(&events, EventType::RunError), 1);
+    let checkpoint = agent.latest_checkpoint("phase-after-tool").await.unwrap().unwrap();
+    assert_eq!(checkpoint.state["phase_continuations"], 1);
+    assert_eq!(checkpoint.history.tool_invocations.len(), 1);
+}
+
 struct GatedStepModel {
     step: AtomicUsize,
     releases: Vec<Arc<Notify>>,
@@ -518,64 +869,6 @@ async fn offloaded_tool_results_preserve_reference_and_tool_lifecycle() {
     agent.framework().close().await;
 }
 
-#[tokio::test]
-async fn parallel_dag_nodes_with_identical_provider_call_ids_have_distinct_messages_and_results() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        SqliteStateStore::open(dir.path().join("dag.db"), SqliteOptions::default())
-            .await
-            .unwrap(),
-    );
-    let plugin = AgUiPlugin::default();
-    let graph = DagWorkflowDefinition {
-        id: "dag".into(),
-        version: 1,
-        nodes: vec![
-            DagNode::react(WorkflowStage::new("a")),
-            DagNode::react(WorkflowStage::new("b")),
-        ],
-        edges: vec![],
-        max_parallel_nodes: 2,
-    };
-    let agent = TestBuilder::default()
-        .plugin(plugin.clone())
-        .plugin(store.clone().plugin())
-        .plugin(AgentLoopPlugin::new(DagWorkflowLoop::new(graph).unwrap()))
-        .plugin(ChatModelPlugin::new(ToolModel {
-            barrier: Some(Arc::new(Barrier::new(2))),
-        }))
-        .plugin(tools(Arc::new(AtomicUsize::new(0)), false))
-        .build()
-        .await
-        .unwrap();
-    let (handle, stream) = agent
-        .start_with_output::<AgUiStream>(RunRequest::new("dag", "task"))
-        .unwrap();
-    let (result, events) = complete(agent.clone(), handle, stream).await;
-    assert_eq!(result.unwrap().status, RunStatus::Completed);
-    validate_client(&events).await;
-    let mut ids = BTreeSet::new();
-    let mut nodes = BTreeSet::new();
-    for event in &events {
-        if let Event::ToolCallResult(result) = event {
-            ids.insert(result.tool_call_id.to_string());
-            nodes.insert(
-                event.base().metadata.as_ref().unwrap()["framework"]["node"]["node_id"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned(),
-            );
-        }
-    }
-    assert_eq!(ids.len(), 2);
-    assert_eq!(nodes, BTreeSet::from(["a".into(), "b".into()]));
-    // Two workflow nodes and two model calls per node.
-    assert_eq!(types(&events, EventType::StepStarted), 6);
-    assert_eq!(types(&events, EventType::StepFinished), 6);
-    agent.framework().close().await;
-    store.close().await.unwrap();
-}
-
 struct Approval;
 #[async_trait]
 impl ToolPolicy for Approval {
@@ -590,24 +883,75 @@ async fn approval_agent(
     plugin: &AgUiPlugin,
     store: &Arc<SqliteStateStore>,
     count: &Arc<AtomicUsize>,
+    path: &std::path::Path,
 ) -> Agent {
     TestBuilder::default()
         .plugin(plugin.clone())
         .plugin(store.clone().plugin())
-        .plugin(AgentLoopPlugin::new(
-            WorkflowLoop::new(WorkflowDefinition {
-                id: "approval".into(),
-                version: 1,
-                stages: vec![WorkflowStage::new("solve")],
-            })
-            .unwrap(),
-        ))
+        .plugin(ConversationStorePlugin::new(SqliteConversationStore::open(path, Default::default()).await.unwrap()))
+        .plugin(AgentLoopPlugin::new(ReactAgentLoop))
         .plugin(ChatModelPlugin::new(ToolModel { barrier: None }))
         .plugin(tools(count.clone(), false))
         .plugin(ToolPolicyPlugin::new("approve", Approval))
         .build()
         .await
         .unwrap()
+}
+
+struct RecoveringPhaseModel(Arc<AtomicUsize>);
+#[async_trait]
+impl ChatModel for RecoveringPhaseModel {
+    async fn generate(&self, _: &str, _: ChatRequest, stream: &dyn ChatStream) -> Result<ChatResponse, ModelError> {
+        let index = self.0.fetch_add(1, Ordering::SeqCst);
+        let (phase, text) = if index < 2 { ("commentary", "Working") } else { ("final_answer", "Recovered") };
+        stream.message_start(0, Some(phase)).await;
+        stream.message_delta(0, text).await;
+        stream.message_end(0, Some(phase), text).await;
+        let mut items = vec![ModelOutputItem::Message { output_index: 0, item_id: None, phase: Some(phase.into()), content: text.into() }];
+        if index == 1 { items.push(ModelOutputItem::ToolCall { output_index: 1, call: ToolCall::new("recovery-call", "work", json!({"value":"input"})) }); }
+        Ok(ChatResponse { output_items: items, ..Default::default() })
+    }
+}
+
+#[tokio::test]
+async fn phased_continuation_and_pending_tools_survive_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("phase-recovery.db");
+    let model_calls = Arc::new(AtomicUsize::new(0));
+    let tool_calls = Arc::new(AtomicUsize::new(0));
+    let make_agent = |store: Arc<SqliteStateStore>, conversations: SqliteConversationStore| {
+        TestBuilder::default().plugin(AgUiPlugin::default()).plugin(store.plugin())
+            .plugin(ConversationStorePlugin::new(conversations))
+            .plugin(ChatModelPlugin::new(RecoveringPhaseModel(model_calls.clone())))
+            .plugin(tools(tool_calls.clone(), false)).plugin(ToolPolicyPlugin::new("approve", Approval))
+    };
+    let store = Arc::new(SqliteStateStore::open(&path, SqliteOptions::default()).await.unwrap());
+    let agent = make_agent(store.clone(), SqliteConversationStore::open(&path, Default::default()).await.unwrap()).build().await.unwrap();
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("phase-recovery", "task")).unwrap();
+    let run_id = handle.run_id;
+    let (result, _) = complete(agent.clone(), handle, stream).await;
+    let result = result.unwrap();
+    assert_eq!(result.status, RunStatus::AwaitingInput);
+    assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+    let checkpoint = agent.latest_checkpoint("phase-recovery").await.unwrap().unwrap();
+    assert_eq!(checkpoint.state["phase_continuations"], 1);
+    let saved_ids: Vec<_> = checkpoint.history.messages.iter().filter(|message| message.phase.as_deref() == Some("commentary")).map(|message| message.id.clone()).collect();
+    assert_eq!(saved_ids.len(), 2);
+    agent.framework().close().await;
+    store.close().await.unwrap();
+    let store = Arc::new(SqliteStateStore::open(&path, SqliteOptions::default()).await.unwrap());
+    let agent = make_agent(store, SqliteConversationStore::open(&path, Default::default()).await.unwrap()).build().await.unwrap();
+    let mut request = RunRequest::new("phase-recovery", "");
+    request.resume = Some(ResumeRequest { run_id, response: Some(InteractionResponse { interaction_id: result.interactions[0].id, value: json!(true) }) });
+    let (handle, stream) = agent.start_with_output::<AgUiStream>(request).unwrap();
+    let (result, events) = complete(agent.clone(), handle, stream).await;
+    assert_eq!(result.unwrap().output, "Recovered");
+    assert_eq!(model_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(tool_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(types(&events, EventType::ToolCallStart), 0);
+    let checkpoint = agent.latest_checkpoint("phase-recovery").await.unwrap().unwrap();
+    assert_eq!(checkpoint.state["phase_continuations"], 1);
+    assert!(saved_ids.iter().all(|id| checkpoint.history.messages.iter().any(|message| &message.id == id && message.phase.as_deref() == Some("commentary"))));
 }
 
 async fn approval_round_trip(approved: bool, legacy: bool) {
@@ -620,7 +964,7 @@ async fn approval_round_trip(approved: bool, legacy: bool) {
     );
     let plugin = AgUiPlugin::default();
     let count = Arc::new(AtomicUsize::new(0));
-    let agent = approval_agent(&plugin, &store, &count).await;
+    let agent = approval_agent(&plugin, &store, &count, &path).await;
     let (handle, stream) = agent
         .start_with_output::<AgUiStream>(RunRequest::new("approval", "task"))
         .unwrap();
@@ -680,7 +1024,7 @@ async fn approval_round_trip(approved: bool, legacy: bool) {
             .unwrap(),
     );
     let plugin = AgUiPlugin::default();
-    let agent = approval_agent(&plugin, &store, &count).await;
+    let agent = approval_agent(&plugin, &store, &count, &path).await;
     let mut request = RunRequest::new("approval", "");
     request.resume = Some(ResumeRequest {
         run_id: id,
@@ -2039,42 +2383,78 @@ async fn batch_approvals_reference_declared_parent_and_preserve_each_child_ident
     assert!(agent.framework().close().await.is_success());
 }
 
-
 struct NativeToolLifecycle;
 #[async_trait]
 impl ExternalAgent for NativeToolLifecycle {
-    async fn run(&self, _: ExternalAgentRequest, sink: &dyn ExternalAgentEventSink) -> Result<ExternalAgentResult, AgentError> {
+    async fn run(
+        &self,
+        _: ExternalAgentRequest,
+        sink: &dyn ExternalAgentEventSink,
+    ) -> Result<ExternalAgentResult, AgentError> {
         for status in ["in_progress", "completed", "completed"] {
             sink.emit(ExternalAgentEvent::Tool {
                 name: "command_execution".into(),
                 detail: json!({"event":"item.updated","id":"item-1","status":status}),
-            }).await;
+            })
+            .await;
         }
-        Ok(ExternalAgentResult { content: "NATIVE_TOOL_OK".into(), structured: None, session: None, usage: Usage::default() })
+        Ok(ExternalAgentResult {
+            content: "NATIVE_TOOL_OK".into(),
+            structured: None,
+            session: None,
+            usage: Usage::default(),
+        })
     }
 }
 #[tokio::test]
 async fn external_native_lifecycle_is_one_agui_tool_and_one_durable_record() {
     let directory = tempfile::tempdir().unwrap();
-    let sqlite = Arc::new(SqliteStateStore::open(directory.path().join("external.sqlite"), Default::default()).await.unwrap());
-    let agent = TestBuilder::new().default_models(false)
+    let sqlite = Arc::new(
+        SqliteStateStore::open(directory.path().join("external.sqlite"), Default::default())
+            .await
+            .unwrap(),
+    );
+    let agent = TestBuilder::new()
+        .default_models(false)
         .plugin(sqlite.plugin())
         .plugin(AgentLoopPlugin::new(ExternalAgentLoop))
         .plugin(ExternalAgentPlugin::new(NativeToolLifecycle))
         .plugin(AgUiPlugin::new(AgUiOptions::default()).unwrap())
-        .build().await.unwrap();
-    let (handle, stream) = agent.start_with_output::<AgUiStream>(RunRequest::new("native-tool", "run")).unwrap();
+        .build()
+        .await
+        .unwrap();
+    let (handle, stream) = agent
+        .start_with_output::<AgUiStream>(RunRequest::new("native-tool", "run"))
+        .unwrap();
     let (result, events) = tokio::join!(agent.wait(handle), collect(stream));
     assert_eq!(result.unwrap().output, "NATIVE_TOOL_OK");
     assert_eq!(types(&events, EventType::ToolCallStart), 1);
     assert_eq!(types(&events, EventType::ToolCallEnd), 1);
     assert_eq!(types(&events, EventType::ToolCallResult), 1);
     validate_client(&events).await;
-    let history = agent.framework().history().unwrap().read_session("native-tool", HistoryQuery::default()).await.unwrap();
+    let history = agent
+        .framework()
+        .history()
+        .unwrap()
+        .read_session("native-tool", HistoryQuery::default())
+        .await
+        .unwrap();
     assert_eq!(history.records.tool_invocations.len(), 1);
-    assert_eq!(history.records.tool_invocations[0].status, HistoryStatus::Completed);
+    assert_eq!(
+        history.records.tool_invocations[0].status,
+        HistoryStatus::Completed
+    );
     assert_eq!(history.records.tool_invocations[0].call_id, "item-1");
-    let Event::ToolCallStart(start) = events.iter().find(|event| matches!(event, Event::ToolCallStart(_))).unwrap() else { unreachable!() };
-    assert_eq!(start.tool_call_id.to_string(), history.records.tool_invocations[0].id.to_string());
+    let Event::ToolCallStart(start) = events
+        .iter()
+        .find(|event| matches!(event, Event::ToolCallStart(_)))
+        .unwrap()
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        start.tool_call_id.to_string(),
+        history.records.tool_invocations[0].id.to_string()
+    );
     let _ = agent.close().await;
 }

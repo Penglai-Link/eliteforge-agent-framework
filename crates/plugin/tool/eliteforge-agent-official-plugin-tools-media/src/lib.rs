@@ -91,6 +91,13 @@ impl Plugin for MediaToolsPlugin {
 /// Reusable provider for run-scoped host installation and unified discovery.
 #[async_trait]
 impl ToolProvider for MediaToolsPlugin {
+    fn catalog_metadata(&self) -> Option<Vec<eliteforge_agent_core::ToolCatalogEntry>> {
+        Some(media_tool_catalog().into_iter().map(|descriptor| eliteforge_agent_core::ToolCatalogEntry {
+            descriptor,
+            domain_code: Some("media".into()),
+            category: Some(media_tool_category()),
+        }).collect())
+    }
     fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
         Some(media_tool_catalog())
     }
@@ -107,11 +114,19 @@ impl ToolProvider for MediaToolsPlugin {
 pub fn media_tool_catalog() -> Vec<ToolDescriptor> {
     [true, false].into_iter().map(|image| {
         let (id, name, description) = if image { ("media.read_image", "media_read_image", "Read a scoped local image or attachment as native media; validates size and dimensions.") }
-            else { ("media.read_pdf", "media_read_pdf", "Read selected PDF pages from a scoped local file or attachment. Returns text and page numbers; no OCR.") };
+            else { ("media.read_pdf", "media_read_pdf", "Read selected PDF pages from a scoped local file or attachment. Returns page text and page numbers.") };
         let mut schema = json!({"type":"object","additionalProperties":false,"oneOf":[{"required":["path"]},{"required":["fileRef"]}],"properties":{"path":{"type":"string","minLength":1},"fileRef":{"type":"object"}}});
         if !image { schema["properties"]["startPage"]=json!({"type":"integer","minimum":1}); schema["properties"]["endPage"]=json!({"type":"integer","minimum":1}); }
-        ToolDescriptor::new(id, name, description, schema).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+        ToolDescriptor::new(id, name, description, schema).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }).collect()
+}
+
+pub fn media_tool_category() -> eliteforge_agent_core::ToolCategory {
+    eliteforge_agent_core::ToolCategory::localized(
+        "document.media",
+        "文档与媒体工具",
+        "Document and media tools",
+    )
 }
 
 struct MediaProvider {
@@ -120,6 +135,13 @@ struct MediaProvider {
 }
 #[async_trait]
 impl ToolProvider for MediaProvider {
+    fn catalog_metadata(&self) -> Option<Vec<eliteforge_agent_core::ToolCatalogEntry>> {
+        Some(media_tool_catalog().into_iter().map(|descriptor| eliteforge_agent_core::ToolCatalogEntry {
+            descriptor,
+            domain_code: Some("media".into()),
+            category: Some(media_tool_category()),
+        }).collect())
+    }
     async fn lease(&self, _: &RunContext) -> Result<ToolLease, AgentError> {
         Ok(ToolLease::new(
             media_tool_catalog()
@@ -134,6 +156,7 @@ impl ToolProvider for MediaProvider {
                             image: index == 0,
                         },
                     )
+                    .with_category(media_tool_category())
                     .parallel_safe()
                 })
                 .collect(),

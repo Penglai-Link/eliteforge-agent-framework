@@ -94,6 +94,23 @@ pub struct TokenUsageAuditSnapshot {
 pub enum ModelFinish {
     Final,
     ToolCalls,
+    Continue,
+}
+
+/// Ordered provider output, kept separate from the legacy assistant projection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ModelOutputItem {
+    Message {
+        output_index: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+        text: String,
+    },
+    ReasoningSummary { output_index: usize, text: String },
+    ToolCall { output_index: usize, call: ToolCall },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -101,6 +118,8 @@ pub enum ModelFinish {
 pub struct ModelResponse {
     pub assistant: AgentMessage,
     pub finish: ModelFinish,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_items: Vec<ModelOutputItem>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<ModelTokenUsage>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +133,12 @@ pub struct ModelResponse {
 pub struct ModelStreamEvent {
     pub kind: ModelStreamEventKind,
     pub delta: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,6 +147,9 @@ pub enum ModelStreamEventKind {
     Text,
     Reasoning,
     ReasoningSummary,
+    MessageStart,
+    MessageEnd,
+    ToolBoundary,
 }
 
 impl ModelStreamEvent {
@@ -129,6 +157,9 @@ impl ModelStreamEvent {
         Self {
             kind: ModelStreamEventKind::Text,
             delta: delta.into(),
+            output_index: None,
+            item_id: None,
+            phase: None,
         }
     }
 
@@ -136,6 +167,9 @@ impl ModelStreamEvent {
         Self {
             kind: ModelStreamEventKind::Reasoning,
             delta: delta.into(),
+            output_index: None,
+            item_id: None,
+            phase: None,
         }
     }
 
@@ -143,6 +177,9 @@ impl ModelStreamEvent {
         Self {
             kind: ModelStreamEventKind::ReasoningSummary,
             delta: delta.into(),
+            output_index: None,
+            item_id: None,
+            phase: None,
         }
     }
 }
@@ -161,6 +198,7 @@ impl ModelResponse {
         Self {
             assistant,
             finish,
+            output_items: Vec::new(),
             token_usage,
             system_agent_session_id,
             response_id,
@@ -315,7 +353,18 @@ impl ModelResponse {
     }
 
     pub fn output_text(&self) -> String {
-        self.assistant.output_text_content()
+        if self.output_items.is_empty() {
+            return self.assistant.output_text_content();
+        }
+        let has_final = self.output_items.iter().any(|item| matches!(item,
+            ModelOutputItem::Message { phase: Some(phase), text, .. }
+                if phase == "final_answer" && !text.trim().is_empty()));
+        self.output_items.iter().filter_map(|item| match item {
+            ModelOutputItem::Message { phase, text, .. }
+                if !text.is_empty() && (phase.as_deref() == Some("final_answer")
+                    || (!has_final && phase.is_none())) => Some(text.as_str()),
+            _ => None,
+        }).collect::<Vec<_>>().join("\n\n")
     }
 
     pub fn tool_calls(&self) -> Vec<ToolCall> {
@@ -403,11 +452,17 @@ pub(crate) fn responses_input_item_json(message: &AgentMessage) -> Value {
             "role": message.role.as_str(),
             "content": message.plain_text_content(),
         }),
-        "user" | "assistant" => json!({
-            "type": "message",
-            "role": message.role.as_str(),
-            "content": responses_message_content(message),
-        }),
+        "user" | "assistant" => {
+            let mut item = json!({
+                "type": "message",
+                "role": message.role.as_str(),
+                "content": responses_message_content(message),
+            });
+            if message.role == "assistant" && let Some(phase) = &message.phase {
+                item["phase"] = json!(phase);
+            }
+            item
+        },
         "tool" => match message.parts.iter().find_map(tool_result_part) {
             Some((Some(call_id), output)) => {
                 json!({

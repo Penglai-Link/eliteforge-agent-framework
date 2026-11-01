@@ -213,11 +213,13 @@ impl RunningCommand {
             }
         } else {
             let mut command = Command::new(&request.command);
+            crate::command_shell::process_arguments(&mut command, &request.command, &request.args);
             command
-                .args(&request.args)
                 .kill_on_drop(true)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
+            #[cfg(windows)]
+            command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
             if let Some(cwd) = &request.cwd {
                 command.current_dir(cwd);
             }

@@ -67,7 +67,6 @@ sequenceDiagram
 |---|---|---|---|
 | `RunStarted` | 新运行同步准入并创建输出通道后；恢复运行读取原宿主元数据后 | `RUN_STARTED` | `threadId=session_id`；`runId=executionId` |
 | `StepStarted / StepFinished` | `ModelInvoker` 开始一次模型调用；`AttemptStream` 在响应完成、取消或退出时关闭 | `STEP_STARTED / STEP_FINISHED` | `stepName` 含节点执行身份和步骤 ID |
-| `WorkflowNodeChanged` | Workflow / DAG 调度器使节点进入 `Running` 或离开运行态时 | `STEP_STARTED / STEP_FINISHED`；`CUSTOM framework.node` | `nodeId`、`status` |
 | `MessageStarted / TextDelta / MessageFinished` | `ModelInvoker` 开启模型流、收到文本、收束响应时 | `TEXT_MESSAGE_START / TEXT_MESSAGE_CONTENT / TEXT_MESSAGE_END` | `messageId`；`delta` 是本次追加内容 |
 | `ReasoningDelta`、消息结束或中止 | `AttemptStream` 收到公开推理片段；消息关闭时收束 | `REASONING_START / REASONING_MESSAGE_START / REASONING_MESSAGE_CONTENT / REASONING_MESSAGE_END / REASONING_END` | 推理 ID 为 `{messageId}/reasoning` |
 | `MessageFinished.tool_calls` | 模型给出完整响应和工具调用声明时 | `TOOL_CALL_START / TOOL_CALL_ARGS / TOOL_CALL_END` | `toolCallId=invocation_id`；ARGS 是完整参数 JSON |

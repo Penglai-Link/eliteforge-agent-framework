@@ -81,6 +81,9 @@ impl HttpProtocolClient {
                         .parse_stream_terminal_response(&event)
                         .map_err(fw::ModelError::Fatal)?
                     {
+                        if protocol == AgentModelProtocol::Responses {
+                            state.0.validate_response_items(&response).map_err(fw::ModelError::Fatal)?;
+                        }
                         state.0.terminal_response = Some(response);
                         state.1 = true;
                     }
@@ -96,10 +99,13 @@ impl HttpProtocolClient {
                         state.1 = true;
                     }
                     state.0.observe_raw_event(protocol, &event);
-                    for delta in adapter
+                    for mut delta in adapter
                         .parse_stream_events(&event)
                         .map_err(fw::ModelError::Fatal)?
                     {
+                        if protocol == AgentModelProtocol::Responses {
+                            state.0.associate_response_message(&mut delta).map_err(fw::ModelError::Fatal)?;
+                        }
                         state.0.observe_delta(&delta);
                         sink(delta);
                     }
@@ -114,6 +120,8 @@ impl HttpProtocolClient {
             ));
         }
         let usage = state.token_usage;
+        let unindexed_response_text = state.unindexed_response_text;
+        let indexed_response_message = state.indexed_response_message;
         let mut response = if let Some(response) = state.terminal_response.clone() {
             response
         } else {
@@ -123,6 +131,15 @@ impl HttpProtocolClient {
         };
         if usage.is_some() {
             response.token_usage = usage;
+        }
+        if protocol == AgentModelProtocol::Responses && unindexed_response_text {
+            let phased = response.output_items.iter().any(|item| matches!(item, crate::ModelOutputItem::Message { phase: Some(_), .. }));
+            if indexed_response_message || phased {
+                return Err(fw::ModelError::Fatal("model stream cannot associate text with its output item".into()));
+            }
+            // Older compatible Responses providers stream a single unindexed
+            // text channel. Retain their existing single-message behavior.
+            response.output_items.clear();
         }
         Ok(response)
     }

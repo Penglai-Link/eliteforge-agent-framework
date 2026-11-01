@@ -134,7 +134,6 @@ async fn large_data_concurrency_query_load() {
     let prototype = InteractionRecord {
         session_id: "load-owner".into(),
         run_id: RunId::from_u128(1),
-        node_invocation_id: None,
         request: InteractionRequest::input("Choose", serde_json::json!({"type":"string"})).unwrap(),
         tool_call: None,
         response: None,

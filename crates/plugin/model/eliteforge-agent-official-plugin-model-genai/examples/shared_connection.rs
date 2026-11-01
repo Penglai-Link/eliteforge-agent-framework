@@ -43,14 +43,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into(),
         fallback: None,
     };
-    let mut plan = WorkflowStage::new("plan");
-    plan.instructions.push(Message::system(
-        "Create a concise implementation plan. The next stage will implement it.",
-    ));
-    let mut execute = WorkflowStage::new("execute");
-    execute.instructions.push(Message::system(
-        "Implement the previous stage's plan and return the Rust source.",
-    ));
     let framework = FrameworkBuilder::new()
         .plugin(
             eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin::new(
@@ -58,13 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 artifact_root,
             ),
         )
-        .plugin(AgentLoopPlugin::new(WorkflowLoop::new(
-            WorkflowDefinition {
-                id: "shared-model-phases".into(),
-                version: 1,
-                stages: vec![plan, execute],
-            },
-        )?))
+        .plugin(AgentLoopPlugin::new(ReactAgentLoop))
         .plugin(
             eliteforge_agent_official_plugin_model_genai::GenaiPlugin::from_adapter(
                 provider,

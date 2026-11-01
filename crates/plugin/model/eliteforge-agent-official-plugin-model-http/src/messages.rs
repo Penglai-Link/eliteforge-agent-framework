@@ -16,6 +16,8 @@ pub(crate) fn encode(message: &AgentMessage) -> Result<Message, String> {
     let mut result =
         Message::new(role, Content::default()).with_annotations(message.annotations.clone());
     result.instruction_origin = message.instruction_origin;
+    result.phase = message.phase.clone();
+    result.output_group_id = message.output_group_id.clone();
     for part in &message.parts {
         let block = match part {
             AgentMessagePart::Text { text } => ContentBlock::Text { text: text.clone() },
@@ -237,6 +239,8 @@ pub(crate) fn decode(message: &Message) -> Result<AgentMessage, String> {
     let mut result = AgentMessage::new(role, parts);
     result.annotations = message.annotations.clone();
     result.instruction_origin = message.instruction_origin;
+    result.phase = message.phase.clone();
+    result.output_group_id = message.output_group_id.clone();
     Ok(result)
 }
 
@@ -246,6 +250,7 @@ pub(crate) fn encode_history(history: &[AgentMessage]) -> Result<Vec<Message>, S
     use std::collections::VecDeque;
     let mut output = Vec::new();
     let mut pending = VecDeque::<(String, String)>::new();
+    let mut pending_group: Option<String> = None;
     let close_pending = |pending: &mut VecDeque<(String, String)>, output: &mut Vec<Message>| {
         for (name, id) in pending.drain(..) {
             output.push(Message::tool(id, format!("Legacy history has no recorded result for {name}; execution outcome is unknown.")));
@@ -253,8 +258,12 @@ pub(crate) fn encode_history(history: &[AgentMessage]) -> Result<Vec<Message>, S
     };
     for (sequence, original) in history.iter().enumerate() {
         let mut message = original.clone();
-        if message.role != "tool" {
+        let same_response = message.role == "assistant"
+            && pending_group.is_some()
+            && pending_group == message.output_group_id;
+        if message.role != "tool" && !same_response {
             close_pending(&mut pending, &mut output);
+            pending_group = None;
         }
         for (part_index, part) in message.parts.iter_mut().enumerate() {
             if let AgentMessagePart::ToolCall {
@@ -266,6 +275,7 @@ pub(crate) fn encode_history(history: &[AgentMessage]) -> Result<Vec<Message>, S
                 if id.is_empty() {
                     *id = format!("wire-legacy-{sequence}-{part_index}");
                 }
+                if pending.is_empty() { pending_group = message.output_group_id.clone(); }
                 pending.push_back((tool_name.clone(), id.clone()));
             }
             if let AgentMessagePart::ToolResult {
@@ -281,6 +291,7 @@ pub(crate) fn encode_history(history: &[AgentMessage]) -> Result<Vec<Message>, S
                 });
                 if let Some(index) = found {
                     *call_id = Some(pending.remove(index).unwrap().1);
+                    if pending.is_empty() { pending_group = None; }
                 } else {
                     close_pending(&mut pending, &mut output);
                     output.push(Message::user(Content(vec![ContentBlock::Json {

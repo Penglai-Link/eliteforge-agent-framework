@@ -155,6 +155,8 @@ pub trait ConversationSession: Send {
 
 pub fn validate_messages(messages: &[Message]) -> Result<(), ConversationError> {
     let mut pending = HashSet::new();
+    let mut pending_group: Option<&str> = None;
+    let mut results_started = false;
     for message in messages {
         crate::validate_annotations(&message.annotations).map_err(ConversationError::Other)?;
         if !message.tool_calls.is_empty() && message.role != Role::Assistant {
@@ -168,6 +170,7 @@ pub fn validate_messages(messages: &[Message]) -> Result<(), ConversationError> 
             ));
         }
         if message.role == Role::Tool {
+            results_started = true;
             let id = message
                 .tool_call_id
                 .as_deref()
@@ -177,8 +180,16 @@ pub fn validate_messages(messages: &[Message]) -> Result<(), ConversationError> 
                     "orphan or duplicate tool result".into(),
                 ));
             }
+            if pending.is_empty() {
+                pending_group = None;
+                results_started = false;
+            }
         } else {
-            if !pending.is_empty() {
+            let same_response = message.role == Role::Assistant
+                && !results_started
+                && pending_group.is_some()
+                && pending_group == message.output_group_id.as_deref();
+            if !pending.is_empty() && !same_response {
                 return Err(ConversationError::Other(
                     "tool calls must be followed by their results".into(),
                 ));
@@ -189,6 +200,9 @@ pub fn validate_messages(messages: &[Message]) -> Result<(), ConversationError> 
                 ));
             }
             for call in &message.tool_calls {
+                if pending.is_empty() {
+                    pending_group = message.output_group_id.as_deref();
+                }
                 if call.id.is_empty() || !pending.insert(call.id.as_str()) {
                     return Err(ConversationError::Other(
                         "empty or duplicate tool call ID".into(),

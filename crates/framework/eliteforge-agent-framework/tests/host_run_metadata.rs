@@ -284,14 +284,7 @@ async fn recovery_agent(
     TestBuilder::default()
         .plugin(store.plugin())
         .plugin(ChatModelPlugin::new(AskOnce))
-        .plugin(AgentLoopPlugin::new(
-            WorkflowLoop::new(WorkflowDefinition {
-                id: "restore".into(),
-                version: 1,
-                stages: vec![WorkflowStage::new("work")],
-            })
-            .unwrap(),
-        ))
+        .plugin(AgentLoopPlugin::new(ReactAgentLoop))
         .plugin(EventPlugin::new("capture", Capture(capture)))
         .plugin(ToolProviderPlugin::new(
             "tools",

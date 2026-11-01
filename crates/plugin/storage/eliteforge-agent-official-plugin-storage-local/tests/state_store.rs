@@ -43,7 +43,7 @@ async fn transcript_state_and_events_survive_close_and_reopen_together() {
         schema_version: 1,
         run_id: snapshot.run_id,
         session_id: snapshot.session_id.clone(),
-        node_execution: None,
+
         sequence: 1,
         timestamp_unix_ms: unix_time_ms(),
         event: AgentEvent::ToolStarted {
@@ -354,7 +354,6 @@ async fn terminal_commit_closes_interactions_atomically_and_survives_republicati
         let record = InteractionRecord {
             session_id: "closed".into(),
             run_id: cp.run_id,
-            node_invocation_id: None,
             request: InteractionRequest::input("Continue?", json!({"type":"boolean"})).unwrap(),
             tool_call: None,
             response: None,

@@ -8,6 +8,10 @@ pub struct AgentMessage {
     pub annotations: Vec<eliteforge_agent_core::MessageAnnotation>,
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_group_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_origin: Option<eliteforge_agent_core::InstructionOrigin>,
     pub parts: Vec<AgentMessagePart>,
 }
@@ -62,6 +66,8 @@ impl AgentMessage {
     pub fn new(role: impl Into<String>, parts: Vec<AgentMessagePart>) -> Self {
         Self {
             role: role.into(),
+            phase: None,
+            output_group_id: None,
             annotations: Vec::new(),
             instruction_origin: None,
             parts,

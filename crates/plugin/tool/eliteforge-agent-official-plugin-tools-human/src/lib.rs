@@ -75,7 +75,7 @@ impl AskUserTool {
                     }}
                 }
             }),
-        ).with_single_input()
+        ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command).with_single_input()
     }
     pub fn binding() -> ToolBinding {
         ToolBinding::new(Self::descriptor(), Self)
@@ -136,7 +136,16 @@ impl AskUserTool {
 }
 #[async_trait]
 impl Tool for AskUserTool {
-    async fn call(&self, arguments: Value, _: &RunContext) -> Result<ToolOutput, ToolError> {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        if context
+            .extensions
+            .get::<eliteforge_agent_core::CallerInteractionScope>()
+            .is_some()
+        {
+            return Err(ToolError::Failed(
+                "delegated runs must use ask_caller instead of asking the user directly".into(),
+            ));
+        }
         let input = serde_json::from_value(arguments)
             .map_err(|_| ToolError::Failed("invalid ask_user arguments".into()))?;
         let request = Self::request(input)

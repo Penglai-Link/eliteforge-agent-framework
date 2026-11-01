@@ -15,7 +15,6 @@ pub mod context;
 pub mod context_preparation;
 pub mod continuation_budget;
 pub mod conversation;
-pub mod dag;
 pub mod errors;
 pub mod external;
 mod external_tools;
@@ -36,11 +35,13 @@ pub mod skills;
 pub mod state;
 pub mod tokens;
 pub mod tool_batch;
+mod tool_display;
+pub use tool_display::*;
 pub use tool_batch::*;
+mod react;
 pub mod tool_gateway;
 pub mod transaction;
 pub mod types;
-pub mod workflow;
 pub use capability_packs::*;
 pub use collaboration::*;
 pub use content::*;
@@ -48,7 +49,6 @@ pub use context::*;
 pub use context_preparation::*;
 pub use continuation_budget::*;
 pub use conversation::*;
-pub use dag::*;
 pub use eliteforge_agent_plugin_core::{
     ExtensionBinding, ExtensionMultiplicity, ExtensionPlugin, ExtensionPoint, Plugin,
     PluginContext, PluginError, PluginReadyContext,
@@ -65,6 +65,7 @@ pub use models::*;
 pub use operations::*;
 pub use output::*;
 pub use plugins::*;
+pub use react::*;
 pub use session::*;
 pub use skills::*;
 pub use state::*;
@@ -74,7 +75,6 @@ pub use tokens::*;
 pub use tool_gateway::*;
 pub use transaction::*;
 pub use types::*;
-pub use workflow::*;
 
 /// Internal implementation dependencies used by framework-generated code.
 /// Application code should use the public `#[capability]` macro instead.

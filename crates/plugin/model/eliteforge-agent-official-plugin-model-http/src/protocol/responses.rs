@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use crate::{
     AgentMessage, AgentMessagePart, AgentModelConfig, AgentModelProtocol, ModelFinish,
-    ModelRequest, ModelResponse, ModelStreamEvent, ModelTokenUsage, ToolCall,
+    ModelOutputItem, ModelRequest, ModelResponse, ModelStreamEvent, ModelStreamEventKind, ModelTokenUsage, ToolCall,
     responses_function_call_item_json, responses_input_item_json,
 };
 
@@ -138,7 +138,24 @@ fn responses_input_value(messages: &[AgentMessage], supports_developer_role: boo
 
 fn parse_responses_stream_event(body: &Value) -> Option<ModelStreamEvent> {
     let event_type = body.get("type").and_then(Value::as_str).unwrap_or_default();
-    let event = match event_type {
+    if matches!(event_type, "response.output_item.added" | "response.output_item.done") {
+        let item = body.get("item")?;
+        let item_type = item.get("type").and_then(Value::as_str);
+        if matches!(item_type, Some("function_call" | "custom_tool_call")) {
+            return Some(ModelStreamEvent { kind: ModelStreamEventKind::ToolBoundary, delta: String::new(),
+                output_index: body.get("output_index").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()),
+                item_id: item.get("id").and_then(Value::as_str).map(str::to_owned), phase: None });
+        }
+        if item_type != Some("message") { return None; }
+        return Some(ModelStreamEvent {
+            kind: if event_type.ends_with(".added") { ModelStreamEventKind::MessageStart } else { ModelStreamEventKind::MessageEnd },
+            delta: if event_type.ends_with(".done") { item.get("content").and_then(text_from_content).unwrap_or_default() } else { String::new() },
+            output_index: body.get("output_index").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()),
+            item_id: item.get("id").and_then(Value::as_str).map(str::to_owned),
+            phase: item.get("phase").and_then(Value::as_str).map(str::to_owned),
+        });
+    }
+    let mut event = match event_type {
         "response.output_text.delta" | "response.refusal.delta" => body
             .get("delta")
             .and_then(Value::as_str)
@@ -153,6 +170,8 @@ fn parse_responses_stream_event(body: &Value) -> Option<ModelStreamEvent> {
             .map(|text| ModelStreamEvent::reasoning_summary_delta(text.to_owned())),
         _ => None,
     }?;
+    event.output_index = body.get("output_index").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
+    event.item_id = body.get("item_id").and_then(Value::as_str).map(str::to_owned);
     if event.delta.is_empty() {
         None
     } else {
@@ -172,8 +191,10 @@ fn parse_responses_response(body: &Value) -> Option<ModelResponse> {
     let token_usage = parse_responses_usage(body);
     if let Some(output) = body.get("output").and_then(Value::as_array) {
         let mut parts = Vec::new();
-        for item in output {
+        let mut output_items = Vec::new();
+        for (output_index, item) in output.iter().enumerate() {
             if let Some(tool_call) = parse_responses_tool_call(item) {
+                output_items.push(ModelOutputItem::ToolCall { output_index, call: tool_call.clone() });
                 parts.push(AgentMessagePart::ToolCall {
                     call_id: tool_call.call_id,
                     tool_name: tool_call.tool_name,
@@ -185,10 +206,17 @@ fn parse_responses_response(body: &Value) -> Option<ModelResponse> {
             if item.get("type").and_then(Value::as_str) == Some("message")
                 && let Some(text) = item.get("content").and_then(text_from_content)
             {
+                output_items.push(ModelOutputItem::Message {
+                    output_index,
+                    item_id: item.get("id").and_then(Value::as_str).map(str::to_owned),
+                    phase: item.get("phase").and_then(Value::as_str).map(str::to_owned),
+                    text: text.clone(),
+                });
                 parts.push(AgentMessagePart::Text { text });
                 continue;
             }
             if let Some(summary) = parse_responses_reasoning_summary(item) {
+                output_items.push(ModelOutputItem::ReasoningSummary { output_index, text: summary.clone() });
                 parts.push(AgentMessagePart::ReasoningSummary { text: summary });
             }
         }
@@ -204,17 +232,29 @@ fn parse_responses_response(body: &Value) -> Option<ModelResponse> {
             .any(|part| matches!(part, AgentMessagePart::ToolCall { .. }))
         {
             ModelFinish::ToolCalls
+        } else if output_items.iter().any(|item| matches!(item, ModelOutputItem::Message { phase: Some(phase), text, .. } if phase == "commentary" && !text.trim().is_empty()))
+            && !output_items.iter().any(|item| matches!(item, ModelOutputItem::Message { phase, text, .. } if phase.as_deref() != Some("commentary") && !text.trim().is_empty()))
+        {
+            ModelFinish::Continue
         } else {
             ModelFinish::Final
         };
         if !parts.is_empty() {
-            return Some(ModelResponse::from_assistant(
+            let mut response = ModelResponse::from_assistant(
                 AgentMessage::new("assistant", parts),
                 finish,
                 token_usage,
                 None,
                 response_id,
-            ));
+            );
+            let mut calls = response.tool_calls().into_iter();
+            for item in &mut output_items {
+                if let ModelOutputItem::ToolCall { call, .. } = item && let Some(normalized) = calls.next() {
+                    *call = normalized;
+                }
+            }
+            response.output_items = output_items;
+            return Some(response);
         }
     }
     if let Some(text) = body.get("output_text").and_then(Value::as_str) {
@@ -275,4 +315,46 @@ fn parse_responses_reasoning_summary(item: &Value) -> Option<String> {
         return None;
     }
     item.get("summary").and_then(text_from_content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responses_keeps_message_identity_phase_and_final_selection() {
+        let start = parse_responses_stream_event(&json!({"type":"response.output_item.added","output_index":1,"item":{"id":"m1","type":"message","role":"assistant","phase":"commentary"}})).unwrap();
+        assert_eq!(start.kind, ModelStreamEventKind::MessageStart);
+        assert_eq!(start.output_index, Some(1));
+        assert_eq!(start.phase.as_deref(), Some("commentary"));
+        let delta = parse_responses_stream_event(&json!({"type":"response.output_text.delta","output_index":1,"item_id":"m1","delta":"Checking"})).unwrap();
+        assert_eq!(delta.kind, ModelStreamEventKind::Text);
+        assert_eq!(delta.output_index, Some(1));
+        let done = parse_responses_stream_event(&json!({"type":"response.output_item.done","output_index":1,"item":{"id":"m1","type":"message","phase":"commentary","content":[{"type":"output_text","text":"Checking"}]}})).unwrap();
+        assert_eq!(done.kind, ModelStreamEventKind::MessageEnd);
+        assert_eq!(done.delta, "Checking");
+
+        let response = parse_responses_response(&json!({"id":"r1","output":[
+            {"id":"m1","type":"message","phase":"commentary","content":[{"type":"output_text","text":"Checking"}]},
+            {"id":"m2","type":"message","phase":"final_answer","content":[{"type":"output_text","text":"Done"}]}
+        ]})).unwrap();
+        assert_eq!(response.output_text(), "Done");
+        assert_eq!(response.output_items.len(), 2);
+        assert!(matches!(&response.output_items[0], ModelOutputItem::Message { output_index: 0, phase: Some(phase), .. } if phase == "commentary"));
+        assert!(matches!(&response.output_items[1], ModelOutputItem::Message { output_index: 1, phase: Some(phase), .. } if phase == "final_answer"));
+        let commentary = parse_responses_response(&json!({"output":[{"type":"message","phase":"commentary","content":[{"type":"output_text","text":"Checking"}]}]})).unwrap();
+        assert_eq!(commentary.finish, ModelFinish::Continue);
+        assert!(commentary.output_text().is_empty());
+    }
+
+    #[test]
+    fn assistant_phase_is_preserved_on_manual_replay() {
+        let mut message = AgentMessage::assistant("Checking");
+        message.phase = Some("commentary".into());
+        let encoded = responses_input_item_json(&message);
+        assert_eq!(encoded["phase"], "commentary");
+        let mut user = AgentMessage::user("Question");
+        user.phase = Some("commentary".into());
+        assert!(responses_input_item_json(&user).get("phase").is_none());
+    }
 }

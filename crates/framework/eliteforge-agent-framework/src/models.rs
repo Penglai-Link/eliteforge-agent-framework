@@ -62,6 +62,7 @@ impl ModelInvoker {
                 .min(bound.max_model_output_tokens);
             limits.max_total_tokens = limits.max_total_tokens.min(bound.max_total_tokens);
             limits.max_model_retries = limits.max_model_retries.min(bound.max_model_retries);
+            limits.max_phase_continuations = limits.max_phase_continuations.min(bound.max_phase_continuations);
             limits.max_overflow_recoveries = limits
                 .max_overflow_recoveries
                 .min(bound.max_overflow_recoveries);
@@ -524,7 +525,6 @@ impl ModelInvoker {
                         call.stage.into(),
                         call.step,
                         attempt,
-                        context.node_execution().cloned(),
                         Vec::new(),
                         error,
                     ),
@@ -587,17 +587,10 @@ impl ModelInvoker {
                     attempt,
                 })
                 .await;
-            let stream = AttemptStream {
-                context,
-                emitted: AtomicBool::new(false),
-                message_id: RunId::new_v4().to_string(),
-                finished: AtomicBool::new(false),
-                content: std::sync::Mutex::new(Vec::new()),
-            };
+            let attempt_id = RunId::new_v4().to_string();
             let mut history_step = HistoryStep {
-                id: stream.message_id.clone(),
+                id: attempt_id.clone(),
                 run_id: context.run_id,
-                node_invocation_id: context.node_execution().map(|n| n.invocation_id),
                 sequence: call.step,
                 attempt,
                 name: call.stage.into(),
@@ -607,6 +600,19 @@ impl ModelInvoker {
                 started_at_ms: unix_time_ms(),
                 finished_at_ms: None,
             };
+            let stream = AttemptStream {
+                context,
+                emitted: AtomicBool::new(false),
+                message_id: attempt_id.clone(),
+                finished: AtomicBool::new(false),
+                legacy_open: AtomicBool::new(false),
+                content: std::sync::Mutex::new(Vec::new()),
+                items: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                tool_boundary: std::sync::Mutex::new(None),
+                buffered_items: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                history_step: history_step.clone(),
+                stream_error: std::sync::Mutex::new(None),
+            };
             let mut history_message = HistoryMessage {
                 annotations: Vec::new(),
                 requested_skills: Vec::new(),
@@ -614,6 +620,8 @@ impl ModelInvoker {
                 run_id: context.run_id,
                 step_id: Some(stream.message_id.clone()),
                 role: Role::Assistant,
+                phase: None,
+                output_index: None,
                 provenance: context.assistant_provenance(),
                 content: Vec::new(),
                 structured: None,
@@ -623,15 +631,12 @@ impl ModelInvoker {
             if let Some(writer) = context.extensions.get::<HistoryCommitterService>() {
                 writer
                     .0
-                    .model_attempt(history_step.clone(), history_message.clone(), None)
+                    .model_attempt(history_step.clone(), Vec::new(), None, Default::default())
                     .await?;
             }
             context.emit_output(OutputEvent::StepStarted {
                 id: stream.message_id.clone(),
                 name: format!("{} / step {} / attempt {}", call.stage, call.step, attempt),
-            });
-            context.emit_output(OutputEvent::MessageStarted {
-                message_id: stream.message_id.clone(),
             });
             let provider = catalog.adapter(&selected).expect("validated model");
             let invocation_context = ModelInvocationContext {
@@ -691,10 +696,14 @@ impl ModelInvoker {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .clone();
+                let mut failed_messages = stream.history_items(false);
+                if stream.legacy_open.load(Ordering::Acquire) {
+                    failed_messages.push(history_message.clone());
+                }
                 if let Some(writer) = context.extensions.get::<HistoryCommitterService>() {
                     writer
                         .0
-                        .model_attempt(history_step.clone(), history_message.clone(), None)
+                        .model_attempt(history_step.clone(), failed_messages, None, Default::default())
                         .await?;
                 }
                 if context.cancellation.is_cancelled() {
@@ -714,6 +723,46 @@ impl ModelInvoker {
                     // that return clones of a previously constructed response.
                     for tool in &mut response.tool_calls {
                         tool.invocation_id = RunId::new_v4();
+                    }
+                    // Keep ordered provider tool items bound to the same framework invocation IDs.
+                    let mut tools = response.tool_calls.iter();
+                    for item in &mut response.output_items {
+                        if let ModelOutputItem::ToolCall { call, .. } = item && let Some(tool) = tools.next() {
+                            *call = tool.clone();
+                        }
+                    }
+                    for item in &response.output_items {
+                        if let ModelOutputItem::ToolCall { output_index, .. } = item {
+                            stream.tool_boundary(*output_index).await;
+                        }
+                        if let ModelOutputItem::Message { output_index, phase, content, .. } = item {
+                            let terminal_text = content.text();
+                            let existing = stream.items.lock().unwrap_or_else(|e| e.into_inner()).get(output_index).cloned();
+                            if let Some(existing) = existing
+                                && (!terminal_text.starts_with(&existing.text)
+                                    || (existing.ended && terminal_text != existing.text))
+                            {
+                                stream.fail("streamed model text differs from completed message");
+                                continue;
+                            }
+                            stream.message_start(*output_index, phase.as_deref()).await;
+                            stream.message_end(*output_index, phase.as_deref(), &terminal_text).await;
+                        }
+                    }
+                    let stream_error = stream.stream_error.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                    if let Some(error) = stream_error {
+                        history_step.status = HistoryStatus::Failed;
+                        history_step.finished_at_ms = Some(unix_time_ms());
+                        let mut partial = stream.history_items(false);
+                        if stream.legacy_open.load(Ordering::Acquire) {
+                            history_message.status = HistoryStatus::Interrupted;
+                            history_message.content = stream.content.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                            partial.push(history_message.clone());
+                        }
+                        if let Some(writer) = context.extensions.get::<HistoryCommitterService>() {
+                            writer.0.model_attempt(history_step, partial, None, Default::default()).await?;
+                        }
+                        return Err(ModelError::Indeterminate(error).into());
                     }
                     if let Some(data) = &mut response.model_context {
                         data.model = selected.clone();
@@ -744,18 +793,99 @@ impl ModelInvoker {
                             .as_ref()
                             .unwrap_or(&response.content),
                     ));
+                    let segmented = !stream.items.lock().unwrap_or_else(|e| e.into_inner()).is_empty();
+                    let mut messages = stream.history_items(true);
+                    if let Some(structured) = &response.structured {
+                        let index = messages.iter().rposition(|message| message.phase.as_deref() == Some("final_answer"))
+                            .or_else(|| messages.iter().rposition(|message| message.phase.is_none()));
+                        if let Some(index) = index {
+                            messages[index].structured = Some(structured.clone());
+                        }
+                    }
+                    let mut tool_parents = std::collections::BTreeMap::new();
+                    if !segmented {
+                        stream.ensure_legacy();
+                        messages.push(history_message.clone());
+                    } else if stream.legacy_open.load(Ordering::Acquire) {
+                        // The carrier holds streamed reasoning only; text items have their own records.
+                        history_message.content.retain(|part| matches!(part, HistoryContentBlock::Reasoning { .. }));
+                        messages.push(history_message.clone());
+                    }
+                    if segmented {
+                        let mut previous_message: Option<String> = None;
+                        for item in &response.output_items {
+                            match item {
+                                ModelOutputItem::Message { output_index, .. } => previous_message = Some(stream.item_id(*output_index)),
+                                ModelOutputItem::ToolCall { call, .. } => {
+                                    let parent = previous_message.clone().unwrap_or_else(|| stream.message_id.clone());
+                                    if parent == stream.message_id && !messages.iter().any(|m| m.id == parent) {
+                                        stream.ensure_legacy();
+                                        let mut carrier = history_message.clone();
+                                        carrier.content.clear();
+                                        messages.push(carrier);
+                                    }
+                                    tool_parents.insert(call.invocation_id, parent);
+                                }
+                                _ => {}
+                            }
+                        }
+                        // Plugins that still report calls only in the aggregate
+                        // attach them to the final available message.
+                        for call in &response.tool_calls {
+                            if !tool_parents.contains_key(&call.invocation_id) {
+                                if let Some(parent) = previous_message.clone() {
+                                    tool_parents.insert(call.invocation_id, parent);
+                                }
+                            }
+                        }
+                    }
                     if let Some(writer) = context.extensions.get::<HistoryCommitterService>() {
                         writer
                             .0
-                            .model_attempt(history_step, history_message, Some(response.clone()))
+                            .model_attempt(history_step, messages, Some(response.clone()), tool_parents.clone())
                             .await?;
                     }
-                    context.emit_output(OutputEvent::MessageFinished {
-                        message_id: stream.message_id.clone(),
-                        content: response.content.clone(),
-                        structured: response.structured.clone(),
-                        tool_calls: response.tool_calls.clone(),
-                    });
+                    if segmented {
+                        if stream.legacy_open.load(Ordering::Acquire) {
+                            context.emit_output(OutputEvent::MessageFinished { message_id: stream.message_id.clone(), content: Content::default(), structured: None, tool_calls: Vec::new() });
+                        }
+                        let mut declared = std::collections::HashSet::new();
+                        for item in &response.output_items {
+                            match item {
+                                ModelOutputItem::Message { output_index, .. } => stream.flush_item(*output_index),
+                                ModelOutputItem::ToolCall { call, .. } => {
+                                    let parent = tool_parents.get(&call.invocation_id).cloned().unwrap_or_else(|| stream.message_id.clone());
+                                    context.emit_output(OutputEvent::ToolCalls { message_id: parent, calls: vec![call.clone()] });
+                                    declared.insert(call.invocation_id);
+                                }
+                                _ => {}
+                            }
+                        }
+                        for call in &response.tool_calls {
+                            if declared.insert(call.invocation_id) {
+                                let parent = tool_parents.get(&call.invocation_id).cloned().unwrap_or_else(|| stream.message_id.clone());
+                                context.emit_output(OutputEvent::ToolCalls { message_id: parent, calls: vec![call.clone()] });
+                            }
+                        }
+                        stream.flush_all();
+                        if response.disposition == Some(ModelDisposition::Final) && response.tool_calls.is_empty() {
+                            let explicit = response.output_items.iter().any(|item| matches!(item,
+                                ModelOutputItem::Message { phase: Some(phase), content, .. } if phase == "final_answer" && !content.text().trim().is_empty()));
+                            let ids: Vec<String> = response.output_items.iter().filter_map(|item| match item {
+                                ModelOutputItem::Message { output_index, phase, content, .. }
+                                    if !content.text().trim().is_empty() && (phase.as_deref() == Some("final_answer") || (!explicit && phase.is_none())) => Some(stream.item_id(*output_index)),
+                                _ => None,
+                            }).collect();
+                            if !ids.is_empty() { context.emit_output(OutputEvent::Custom { name: "framework.final_message_ids".into(), value: serde_json::json!({"messageIds": ids}) }); }
+                        }
+                    } else {
+                        context.emit_output(OutputEvent::MessageFinished {
+                            message_id: stream.message_id.clone(),
+                            content: response.content.clone(),
+                            structured: response.structured.clone(),
+                            tool_calls: response.tool_calls.clone(),
+                        });
+                    }
                     stream.finished.store(true, Ordering::Release);
                     context
                         .emit(AgentEvent::ModelUsage {
@@ -924,9 +1054,65 @@ struct AttemptStream<'a> {
     emitted: AtomicBool,
     message_id: String,
     finished: AtomicBool,
+    legacy_open: AtomicBool,
     content: std::sync::Mutex<Vec<HistoryContentBlock>>,
+    items: std::sync::Mutex<std::collections::BTreeMap<usize, AttemptItem>>,
+    tool_boundary: std::sync::Mutex<Option<usize>>,
+    buffered_items: std::sync::Mutex<std::collections::BTreeMap<usize, Vec<OutputEvent>>>,
+    history_step: HistoryStep,
+    stream_error: std::sync::Mutex<Option<String>>,
 }
+
+#[derive(Clone, Default)]
+struct AttemptItem {
+    phase: Option<String>,
+    text: String,
+    ended: bool,
+}
+
 impl AttemptStream<'_> {
+    fn emit_item(&self, index: usize, event: OutputEvent) {
+        let defer = self.tool_boundary.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|boundary| index > boundary);
+        if defer {
+            self.buffered_items.lock().unwrap_or_else(|e| e.into_inner()).entry(index).or_default().push(event);
+        } else {
+            self.context.emit_output(event);
+        }
+    }
+    fn flush_item(&self, index: usize) {
+        let events = self.buffered_items.lock().unwrap_or_else(|e| e.into_inner()).remove(&index).unwrap_or_default();
+        for event in events { self.context.emit_output(event); }
+    }
+    fn flush_all(&self) {
+        let events = std::mem::take(&mut *self.buffered_items.lock().unwrap_or_else(|e| e.into_inner()));
+        for events in events.into_values() { for event in events { self.context.emit_output(event); } }
+    }
+    fn ensure_legacy(&self) {
+        if !self.legacy_open.swap(true, Ordering::AcqRel) {
+            self.context.emit_output(OutputEvent::MessageStarted { message_id: self.message_id.clone() });
+        }
+    }
+    fn item_id(&self, index: usize) -> String { format!("{}/message/{index}", self.message_id) }
+    fn item_record(&self, index: usize, item: &AttemptItem, status: HistoryStatus) -> HistoryMessage {
+        HistoryMessage {
+            annotations: Vec::new(), requested_skills: Vec::new(),
+            id: self.item_id(index), run_id: self.context.run_id, step_id: Some(self.message_id.clone()),
+            role: Role::Assistant, phase: item.phase.clone(), output_index: Some(index),
+            provenance: self.context.assistant_provenance(),
+            content: vec![HistoryContentBlock::Text { text: item.text.clone() }],
+            structured: None, status,
+            created_at_ms: self.history_step.started_at_ms,
+        }
+    }
+    fn history_items(&self, success: bool) -> Vec<HistoryMessage> {
+        self.items.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(index, item)| {
+            self.item_record(*index, item, if success || item.ended { HistoryStatus::Completed } else { HistoryStatus::Interrupted })
+        }).collect()
+    }
+    fn fail(&self, error: impl Into<String>) {
+        let mut current = self.stream_error.lock().unwrap_or_else(|e| e.into_inner());
+        if current.is_none() { *current = Some(error.into()); }
+    }
     fn append(&self, text: &str, reasoning: bool) {
         let mut blocks = self.content.lock().unwrap_or_else(|e| e.into_inner());
         match blocks
@@ -949,10 +1135,14 @@ impl AttemptStream<'_> {
 }
 impl Drop for AttemptStream<'_> {
     fn drop(&mut self) {
+        self.flush_all();
         if !self.finished.load(Ordering::Acquire) {
-            self.context.emit_output(OutputEvent::MessageAborted {
-                message_id: self.message_id.clone(),
-            });
+            if self.legacy_open.load(Ordering::Acquire) {
+                self.context.emit_output(OutputEvent::MessageAborted { message_id: self.message_id.clone() });
+            }
+            for (index, item) in self.items.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+                if !item.ended { self.context.emit_output(OutputEvent::MessageAborted { message_id: self.item_id(*index) }); }
+            }
         }
         self.context.emit_output(OutputEvent::StepFinished {
             id: self.message_id.clone(),
@@ -970,6 +1160,7 @@ impl ChatStream for SilentStream {
 impl ChatStream for AttemptStream<'_> {
     async fn text_delta(&self, text: &str) {
         if !text.is_empty() {
+            self.ensure_legacy();
             self.append(text, false);
             self.emitted.store(true, Ordering::Release);
             self.context.emit_output(OutputEvent::TextDelta {
@@ -981,6 +1172,7 @@ impl ChatStream for AttemptStream<'_> {
     }
     async fn reasoning_delta(&self, text: &str) {
         if !text.is_empty() {
+            self.ensure_legacy();
             self.append(text, true);
             self.emitted.store(true, Ordering::Release);
             self.context.emit_output(OutputEvent::ReasoningDelta {
@@ -989,6 +1181,78 @@ impl ChatStream for AttemptStream<'_> {
             });
         }
         self.context.reasoning_delta(text).await;
+    }
+    async fn message_start(&self, index: usize, phase: Option<&str>) {
+        let (created, ended, current_phase) = {
+            let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+            let created = !items.contains_key(&index);
+            let item = items.entry(index).or_default();
+            if let Some(phase) = phase {
+                if item.phase.as_deref().is_some_and(|old| old != phase) {
+                    self.fail("model message phase changed during streaming");
+                } else { item.phase = Some(phase.to_owned()); }
+            }
+            (created, item.ended, item.phase.clone())
+        };
+        let message_id = self.item_id(index);
+        if created { self.emit_item(index, OutputEvent::MessageStarted { message_id: message_id.clone() }); }
+        if ended {
+            self.emit_item(index, OutputEvent::Custom { name: "framework.message.metadata".into(), value: serde_json::json!({"messageId":message_id,"stepId":self.message_id,"outputIndex":index,"phase":current_phase}) });
+        } else {
+            self.emit_item(index, OutputEvent::MessageMetadata { message_id, step_id: self.message_id.clone(), output_index: index, phase: current_phase });
+        }
+    }
+    async fn message_delta(&self, index: usize, text: &str) {
+        if text.is_empty() { return; }
+        if !self.items.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&index) {
+            self.message_start(index, None).await;
+        }
+        {
+            let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(item) = items.get_mut(&index) else { return; };
+            if item.ended { self.fail("model streamed text after message end"); return; }
+            item.text.push_str(text);
+        }
+        self.emitted.store(true, Ordering::Release);
+        self.emit_item(index, OutputEvent::TextDelta { message_id: self.item_id(index), delta: text.into() });
+        self.context.text_delta(text).await;
+    }
+    async fn message_end(&self, index: usize, phase: Option<&str>, text: &str) {
+        self.message_start(index, phase).await;
+        let item = self.items.lock().unwrap_or_else(|e| e.into_inner()).get(&index).cloned().unwrap_or_default();
+        if !text.is_empty() {
+            if let Some(suffix) = text.strip_prefix(&item.text) {
+                if !suffix.is_empty() {
+                    if item.ended { self.fail("completed model message changed"); return; }
+                    self.message_delta(index, suffix).await;
+                }
+            } else { self.fail("streamed model text differs from completed message"); return; }
+        }
+        let (item, newly_ended) = {
+            let mut items = self.items.lock().unwrap_or_else(|e| e.into_inner());
+            let item = items.get_mut(&index).expect("message was started");
+            let newly_ended = !item.ended;
+            item.ended = true;
+            (item.clone(), newly_ended)
+        };
+        if let Some(writer) = self.context.extensions.get::<HistoryCommitterService>() {
+            if let Err(error) = writer.0.model_attempt(self.history_step.clone(), vec![self.item_record(index, &item, HistoryStatus::Completed)], None, Default::default()).await {
+                self.fail(format!("model message history commit failed: {error}"));
+                if newly_ended && let Some(item) = self.items.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&index) {
+                    item.ended = false;
+                }
+                return;
+            }
+        }
+        if newly_ended {
+            self.emit_item(index, OutputEvent::MessageFinished {
+                message_id: self.item_id(index), content: item.text.clone().into(), structured: None, tool_calls: Vec::new(),
+            });
+        }
+    }
+    async fn tool_boundary(&self, index: usize) {
+        let mut boundary = self.tool_boundary.lock().unwrap_or_else(|e| e.into_inner());
+        *boundary = Some(boundary.map_or(index, |previous| previous.min(index)));
     }
 }
 

@@ -193,6 +193,7 @@ fn spawn_result(child: ChildRunResult) -> ToolOutput {
     let result = child.result;
     structured(json!({
         "run_id": run_id,
+        "child_run_id": run_id,
         "status": result.status,
         "output": result.output,
         "content": result.content,
@@ -202,6 +203,68 @@ fn spawn_result(child: ChildRunResult) -> ToolOutput {
         "steps": result.steps,
         "tool_calls": result.tool_calls,
     }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AskCallerInput {
+    question: String,
+    #[serde(default = "default_answer_schema")]
+    answer_schema: Value,
+}
+
+fn default_answer_schema() -> Value {
+    json!({"type":"string","minLength":1,"maxLength":16384})
+}
+
+/// Suspend a delegated run without creating a human-facing question.
+pub struct AskCallerTool;
+
+impl AskCallerTool {
+    pub fn descriptor() -> ToolDescriptor {
+        ToolDescriptor::new(
+            "agent.ask_caller",
+            "ask_caller",
+            "Ask the agent that invoked this child or thread for missing information or a decision, then suspend this run. Pass question and optionally answer_schema (JSON Schema; defaults to a nonempty string). The caller receives an interaction ID through agent_spawn, child_wait or thread_wait and resumes this same conversation with child_answer or thread_answer. This does not ask the human user; the caller must ask the user separately when needed. Available only inside delegated children and threads.",
+            json!({"type":"object","additionalProperties":false,"required":["question"],"properties":{
+                "question":{"type":"string","minLength":1,"maxLength":16384},
+                "answer_schema":{"type":"object"}
+            }}),
+        ).with_display_resource(include_str!("tool-display.json"))
+        .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+        .with_single_input()
+    }
+}
+
+#[async_trait]
+impl Tool for AskCallerTool {
+    async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
+        if context
+            .extensions
+            .get::<eliteforge_agent_core::CallerInteractionScope>()
+            .is_none()
+        {
+            return Err(ToolError::Failed(
+                "ask_caller requires a delegated child or thread".into(),
+            ));
+        }
+        let input: AskCallerInput = serde_json::from_value(arguments)
+            .map_err(|_| ToolError::Failed("invalid ask_caller arguments".into()))?;
+        let question = task(input.question)?;
+        if !input.answer_schema.is_object() {
+            return Err(ToolError::Failed(
+                "answer_schema must be a JSON Schema object".into(),
+            ));
+        }
+        let mut interaction =
+            eliteforge_agent_core::InteractionRequest::input(question.clone(), input.answer_schema)
+                .map_err(failed)?;
+        interaction.presentation = Some(json!({"kind":"ask_caller"}));
+        Ok(structured(
+            json!({"question":question,"interaction_id":interaction.id,"recipient":"caller"}),
+        )
+        .request_input(interaction))
+    }
 }
 
 fn thread_summary(summary: ThreadSummary) -> ToolOutput {
@@ -224,7 +287,7 @@ impl AgentGetTool {
             json!({"type":"object","additionalProperties":false,"required":["agentCode"],"properties":{
                 "agentCode":{"type":"string","minLength":1,"maxLength":256}
             }}),
-        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+        ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }
 }
 #[async_trait]
@@ -252,7 +315,7 @@ impl AgentSpawnTool {
         ToolDescriptor::new(
             "agent.spawn",
             "agent_spawn",
-            "Delegate one focused task to a child run. Default (background=false) waits inline for the child result; the child inherits your run's cancellation and deadline. Set background=true when the task can run in parallel: the child runs detached with its own deadline, the tool returns a child_run_id immediately, and you continue other work. Collect a detached result with child_wait when needed; its completion is also notified to you, so do not poll. Step and tool-call limits are resolved by the host from the target Agent configuration; do not set them in the task unless the user explicitly requests a task constraint. Work that must survive the current turn, cross sessions or wait for user decisions belongs in thread_create, not a background spawn.",
+            "Delegate one focused task to a child run. Default (background=false) waits inline for the child result; the child inherits your run's cancellation and deadline. Set background=true when the task can run in parallel: the child runs detached with its own deadline, the tool returns a child_run_id immediately, and you continue other work. Collect a detached result with child_wait when needed; its completion is also notified to you, so do not poll. Step and tool-call limits are resolved by the host from the target Agent configuration; do not set them in the task unless the user explicitly requests a task constraint. If the child calls ask_caller, the result has status AwaitingInput, child_run_id and interactions; answer with child_answer and collect with child_wait. Work that must survive the current turn, cross sessions or wait for user decisions belongs in thread_create, not a background spawn.",
             json!({
                 "type":"object","additionalProperties":false,"required":["task"],"properties":{
                     "task":{"type":"string","minLength":1,"maxLength":16384},
@@ -262,7 +325,7 @@ impl AgentSpawnTool {
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
             .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
             .with_timeout_scope(eliteforge_agent_core::ToolTimeoutScope::Run)
     }
@@ -312,7 +375,7 @@ impl ThreadCreateTool {
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
-        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+        ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
 
@@ -363,7 +426,7 @@ impl ThreadSendTool {
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
-        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+        ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
 
@@ -395,7 +458,7 @@ impl ThreadAnswerTool {
         ToolDescriptor::new(
             "thread.answer",
             "thread_answer",
-            "Answer a pending interaction and resume the independent thread.",
+            "Answer an AwaitingInput interaction returned by thread_wait and resume the independent thread from its original checkpoint. Pass the exact interaction_id and an answer matching response_schema; the session_id remains unchanged. Do not use thread_send to answer a paused interaction.",
             json!({
                 "type":"object","additionalProperties":false,
                 "required":["session_id","interaction_id","answer"],"properties":{
@@ -404,7 +467,7 @@ impl ThreadAnswerTool {
                     "answer":{}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
         .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
@@ -441,7 +504,7 @@ impl ThreadWaitTool {
                     "run_id":{"type":"string","format":"uuid"}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
             .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
             .with_timeout_scope(eliteforge_agent_core::ToolTimeoutScope::Run)
     }
@@ -476,7 +539,7 @@ impl ThreadReadTool {
                     "limit":{"type":"integer","minimum":1,"maximum":100}
                 }
             }),
-        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+        ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }
 }
 
@@ -511,7 +574,7 @@ impl ThreadListTool {
                     "limit":{"type":"integer","minimum":1,"maximum":100}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
         .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }
 }
@@ -546,7 +609,7 @@ impl ThreadCloseTool {
                     "session_id":{"type":"string","minLength":1,"maxLength":256}
                 }
             }),
-        ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+        ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
 
@@ -579,13 +642,13 @@ impl ChildWaitTool {
         ToolDescriptor::new(
             "child.wait",
             "child_wait",
-            "Wait for one detached child run started by agent_spawn with background=true and return its final result. Completion is normally notified to you, so call this only when you need the result to proceed.",
+            "Wait for an addressable child started by agent_spawn and return its result. AwaitingInput includes interactions with IDs, questions and response schemas; answer them with child_answer, then wait again. Completed is the final result. Background completion is normally notified to you, so wait only when needed.",
             json!({
                 "type":"object","additionalProperties":false,"required":["child_run_id"],"properties":{
                     "child_run_id":{"type":"string","format":"uuid"}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
         .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
         .with_timeout_scope(eliteforge_agent_core::ToolTimeoutScope::Run)
     }
@@ -625,7 +688,7 @@ impl ChildSendTool {
                     "message":{"type":"string","minLength":1,"maxLength":16384}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
         .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
@@ -660,7 +723,7 @@ impl ChildAnswerTool {
         ToolDescriptor::new(
             "child.answer",
             "child_answer",
-            "Answer a pending interaction of a detached child run and resume it. The child keeps its child_run_id and conversation.",
+            "Answer a pending interaction of a child run and resume its original checkpoint. Use an interaction_id returned by agent_spawn or child_wait, and an answer matching response_schema. The child keeps its child_run_id and conversation. Do not use child_send to answer a paused interaction.",
             json!({
                 "type":"object","additionalProperties":false,
                 "required":["child_run_id","interaction_id","answer"],"properties":{
@@ -669,7 +732,7 @@ impl ChildAnswerTool {
                     "answer":{}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
         .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
@@ -713,7 +776,7 @@ impl ChildCancelTool {
                     "child_run_id":{"type":"string","format":"uuid"}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
         .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
     }
 }
@@ -755,7 +818,7 @@ impl ChildReadTool {
                     "limit":{"type":"integer","minimum":1,"maximum":100}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
         .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }
 }
@@ -798,7 +861,7 @@ impl ChildListTool {
                     "limit":{"type":"integer","minimum":1,"maximum":100}
                 }
             }),
-        )
+        ).with_display_resource(include_str!("tool-display.json"))
         .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
     }
 }
@@ -836,7 +899,8 @@ impl Plugin for AgentToolsPlugin {
     }
 
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        let provider: Arc<dyn ToolProvider> = Arc::new(StaticToolProvider::new(vec![
+        let tools = vec![
+            ToolBinding::new(AskCallerTool::descriptor(), AskCallerTool),
             ToolBinding::new(AgentGetTool::descriptor(), AgentGetTool),
             ToolBinding::new(AgentSpawnTool::descriptor(), AgentSpawnTool),
             ToolBinding::new(ChildWaitTool::descriptor(), ChildWaitTool),
@@ -852,9 +916,55 @@ impl Plugin for AgentToolsPlugin {
             ToolBinding::new(ThreadReadTool::descriptor(), ThreadReadTool),
             ToolBinding::new(ThreadListTool::descriptor(), ThreadListTool),
             ToolBinding::new(ThreadCloseTool::descriptor(), ThreadCloseTool),
-        ]));
+        ]
+        .into_iter()
+        .map(|tool| {
+            let domain = if tool.descriptor.id.starts_with("thread.") {
+                "collaboration_thread"
+            } else {
+                "subagent"
+            };
+            tool.with_domain_code(domain).with_category(
+                eliteforge_agent_core::ToolCategory::localized(
+                    "agent.collaboration",
+                    "协作工具",
+                    "Collaboration tools",
+                ),
+            )
+        })
+        .collect();
+        let provider: Arc<dyn ToolProvider> =
+            Arc::new(CallerAwareProvider(StaticToolProvider::new(tools)));
         context.contribute(ToolProviderService(provider.clone()))?;
         context.contribute_extension(provider)
+    }
+}
+
+struct CallerAwareProvider(StaticToolProvider);
+
+#[async_trait]
+impl ToolProvider for CallerAwareProvider {
+    fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
+        self.0.descriptors()
+    }
+    fn catalog_metadata(&self) -> Option<Vec<eliteforge_agent_core::ToolCatalogEntry>> {
+        self.0.catalog_metadata()
+    }
+    async fn lease(
+        &self,
+        context: &RunContext,
+    ) -> Result<eliteforge_agent_core::ToolLease, AgentError> {
+        let mut lease = self.0.lease(context).await?;
+        if context
+            .extensions
+            .get::<eliteforge_agent_core::CallerInteractionScope>()
+            .is_none()
+        {
+            lease
+                .tools
+                .retain(|tool| tool.descriptor.id != "agent.ask_caller");
+        }
+        Ok(lease)
     }
 }
 

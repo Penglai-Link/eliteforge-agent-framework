@@ -1,0 +1,29 @@
+{
+  "defaultLocale": "en-US",
+  "tools": {
+    "framework.tools.search": {
+      "en-US": {
+        "name": "Search",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "查找工具",
+        "description": "按领域和关键词查找已授权工具，再获取工具的完整参数说明。"
+      }
+    },
+    "framework.tools.execute": {
+      "en-US": {
+        "name": "Execute",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "执行工具",
+        "description": "执行已发现的工具，可批量提交相互独立的操作。"
+      }
+    }
+  },
+  "parameters": {
+    "en-US": {},
+    "zh-CN": {}
+  }
+}

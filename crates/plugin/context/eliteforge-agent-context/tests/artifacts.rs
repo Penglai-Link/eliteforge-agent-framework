@@ -383,14 +383,7 @@ async fn workflow_offload_failure_ends_run_without_automatic_tool_replay() {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let agent = offload_agent_builder(Arc::new(FailingArtifacts), calls.clone())
         .plugin(StateStorePlugin(state.clone()))
-        .plugin(AgentLoopPlugin::new(
-            WorkflowLoop::new(WorkflowDefinition {
-                id: "offload".into(),
-                version: 1,
-                stages: vec![WorkflowStage::new("step")],
-            })
-            .unwrap(),
-        ))
+        .plugin(AgentLoopPlugin::new(ReactAgentLoop))
         .build()
         .await
         .unwrap();
@@ -435,14 +428,7 @@ async fn completed_workflow_replays_offloaded_reference_without_rerunning_tool()
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let agent = offload_agent_builder(artifacts.clone(), calls.clone())
         .plugin(StateStorePlugin(state.clone()))
-        .plugin(AgentLoopPlugin::new(
-            WorkflowLoop::new(WorkflowDefinition {
-                id: "offload".into(),
-                version: 1,
-                stages: vec![WorkflowStage::new("step")],
-            })
-            .unwrap(),
-        ))
+        .plugin(AgentLoopPlugin::new(ReactAgentLoop))
         .build()
         .await
         .unwrap();

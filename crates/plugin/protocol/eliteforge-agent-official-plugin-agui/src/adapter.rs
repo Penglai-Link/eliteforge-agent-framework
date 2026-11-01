@@ -10,6 +10,7 @@ struct MessageState {
     text_hash: Sha256,
     text_open: bool,
     reasoning_open: bool,
+    message_metadata: Option<serde_json::Value>,
 }
 #[derive(Clone)]
 pub(crate) struct Adapter {
@@ -22,6 +23,7 @@ pub(crate) struct Adapter {
     started: bool,
     ended: bool,
     last_text: Option<(usize, [u8; 32])>,
+    final_message_ids: Vec<String>,
     messages: BTreeMap<String, MessageState>,
     calls: BTreeSet<RunId>,
     external_calls: BTreeMap<RunId, HistoryStatus>,
@@ -42,6 +44,7 @@ impl Adapter {
             started: false,
             ended: false,
             last_text: None,
+            final_message_ids: Vec::new(),
             messages: BTreeMap::new(),
             calls: BTreeSet::new(),
             external_calls: BTreeMap::new(),
@@ -66,10 +69,7 @@ impl Adapter {
         }
         self.sequence = envelope.sequence;
         self.timestamp = envelope.timestamp_unix_ms.min(i64::MAX as u64) as i64;
-        let owner = envelope
-            .node_execution
-            .as_ref()
-            .map_or_else(String::new, |node| node.invocation_id.to_string());
+        let owner = String::new();
         let mut out = Vec::new();
         if let AgentEvent::RunStarted { run_id, session_id } = &envelope.event {
             if self.started {
@@ -93,20 +93,6 @@ impl Adapter {
                 AgentEvent::Output(event) => self.output(*event, &owner, &mut out)?,
                 AgentEvent::Steered(text) => {
                     out.push(Event::custom("framework.steered", json!({"text":text})))
-                }
-                AgentEvent::WorkflowNodeChanged { node_id, status } => {
-                    let step = format!("node/{node_id}");
-                    if matches!(status, WorkflowNodeStatus::Running) {
-                        if self.steps.insert(step.clone(), step.clone()).is_none() {
-                            out.push(Event::step_started(step));
-                        }
-                    } else if let Some(name) = self.steps.remove(&step) {
-                        out.push(Event::step_finished(name));
-                    }
-                    out.push(Event::custom(
-                        "framework.node",
-                        json!({"nodeId":node_id,"status":status}),
-                    ));
                 }
                 AgentEvent::Collaboration(event) => self.collaboration(*event, &mut out)?,
                 AgentEvent::RunFinished { status } => self.finish(status, &mut out)?,
@@ -145,7 +131,7 @@ impl Adapter {
         {
             return Err("AGUI_OPEN_ITEM_LIMIT");
         }
-        self.stamp(&mut out, envelope.node_execution.as_ref());
+        self.stamp(&mut out);
         Ok(out)
     }
     fn collaboration(
@@ -305,6 +291,7 @@ impl Adapter {
     ) -> Result<(), &'static str> {
         match event {
             OutputEvent::StepStarted { id, name } => {
+                self.final_message_ids.clear();
                 if id.is_empty() || name.is_empty() {
                     return Err("AGUI_STEP_ORDER");
                 }
@@ -331,6 +318,12 @@ impl Adapter {
                 {
                     return Err("AGUI_MESSAGE_ORDER");
                 }
+            }
+            OutputEvent::MessageMetadata { message_id, step_id, output_index, phase } => {
+                let state = self.messages.get_mut(&message_id).ok_or("AGUI_MESSAGE_ORDER")?;
+                let mut metadata = json!({"stepId": step_id, "outputIndex": output_index});
+                if let Some(phase) = phase { metadata["phase"] = json!(phase); }
+                state.message_metadata = Some(metadata);
             }
             OutputEvent::TextDelta { message_id, delta } => {
                 let state = self
@@ -413,6 +406,13 @@ impl Adapter {
                     close_message(&message_id, &state, out);
                 }
             }
+            OutputEvent::ToolCalls { message_id, calls } => {
+                for call in calls {
+                    if !self.calls.insert(call.invocation_id) { return Err("AGUI_TOOL_ID_COLLISION"); }
+                    let id = tool_id(call.invocation_id)?;
+                    self.declare_tool(&id, &call, Some(&message_id), out)?;
+                }
+            }
             OutputEvent::ToolResult { call, output } => {
                 // A resumed result answers the original proposal, possibly in
                 // an earlier stream. Never mint another call or repeat its args.
@@ -453,6 +453,10 @@ impl Adapter {
                 out.push(Event::activity_delta(id, activity_type, patch));
             }
             OutputEvent::Custom { name, value } => {
+                if name == "framework.final_message_ids" {
+                    self.final_message_ids = value.get("messageIds").and_then(serde_json::Value::as_array)
+                        .map(|items| items.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
+                }
                 if name == "framework.external_agent" {
                     self.external_tool(&value, out)?;
                 }
@@ -557,7 +561,7 @@ impl Adapter {
             if result.status != status {
                 return Err("AGUI_RESULT_MISMATCH");
             }
-            if !result.output.is_empty() && self.last_text != Some(text_fingerprint(&result.output))
+            if !result.output.is_empty() && self.final_message_ids.is_empty() && self.last_text != Some(text_fingerprint(&result.output))
             {
                 let id = format!("{}/result", self.execution_id);
                 out.push(Event::text_message_start(
@@ -579,6 +583,14 @@ impl Adapter {
                     for request in &result.interactions {
                         let reason = match request.kind {
                             InteractionKind::Approval { .. } => "tool_call",
+                            InteractionKind::Input
+                                if request
+                                    .presentation
+                                    .as_ref()
+                                    .is_some_and(|value| value["kind"] == "ask_caller") =>
+                            {
+                                "caller_input_required"
+                            }
                             InteractionKind::Input => "input_required",
                         };
                         let mut interrupt = ag_ui::Interrupt::new(request.id.to_string(), reason);
@@ -623,7 +635,11 @@ impl Adapter {
         if let Some(result) = self.result.take() {
             finished.result = Some(serde_json::to_value(result).map_err(|_| "AGUI_SERIALIZATION")?);
         }
-        out.push(finished.into());
+        let mut event: Event = finished.into();
+        if !self.final_message_ids.is_empty() {
+            event = event.with_metadata(json!({"framework":{"finalMessageIds":self.final_message_ids}}).as_object().unwrap().clone());
+        }
+        out.push(event);
         self.ended = true;
         Ok(())
     }
@@ -648,15 +664,20 @@ impl Adapter {
                 .into(),
         );
         self.ended = true;
-        self.stamp(&mut out, None);
+        self.stamp(&mut out);
         out
     }
-    fn stamp(&self, events: &mut [Event], node: Option<&WorkflowNodeExecution>) {
+    fn stamp(&self, events: &mut [Event]) {
         for event in events {
             event.base_mut().timestamp = Some(self.timestamp);
-            event.base_mut().metadata = Some(json!({"framework": {
-                "runId":self.run_id,"sessionId":self.session_id,"executionId":self.execution_id,"sourceSequence":self.sequence,"node":node
-            }}).as_object().unwrap().clone());
+            let metadata = event.base_mut().metadata.get_or_insert_with(Default::default);
+            let framework = metadata.entry("framework").or_insert_with(|| json!({}));
+            if let Some(fields) = framework.as_object_mut() {
+                fields.insert("runId".into(), json!(self.run_id));
+                fields.insert("sessionId".into(), json!(self.session_id));
+                fields.insert("executionId".into(), json!(self.execution_id));
+                fields.insert("sourceSequence".into(), json!(self.sequence));
+            }
         }
     }
 }
@@ -671,10 +692,14 @@ fn tool_id(invocation_id: RunId) -> Result<String, &'static str> {
 }
 fn open_text(id: &str, state: &mut MessageState, out: &mut Vec<Event>) {
     if !state.text_open {
-        out.push(Event::text_message_start(
+        let mut event = Event::text_message_start(
             id,
             ag_ui::TextMessageRole::Assistant,
-        ));
+        );
+        if let Some(metadata) = &state.message_metadata {
+            event = event.with_metadata(json!({"framework":{"message":metadata}}).as_object().unwrap().clone());
+        }
+        out.push(event);
         state.text_open = true;
     }
 }
@@ -685,6 +710,10 @@ fn close_message(id: &str, state: &MessageState, out: &mut Vec<Event>) {
         out.push(Event::reasoning_end(id));
     }
     if state.text_open {
-        out.push(Event::text_message_end(id));
+        let mut event = Event::text_message_end(id);
+        if let Some(metadata) = &state.message_metadata {
+            event = event.with_metadata(json!({"framework":{"message":metadata}}).as_object().unwrap().clone());
+        }
+        out.push(event);
     }
 }

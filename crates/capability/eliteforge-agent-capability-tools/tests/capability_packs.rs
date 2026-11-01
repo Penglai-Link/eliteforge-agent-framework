@@ -213,7 +213,7 @@ impl AgentLoop for CommandTaskLoop {
 impl ToolHarness {
     #[cfg(unix)]
     async fn new(config: SystemCommandConfig) -> Self {
-        let invocation = Arc::new(Mutex::new(("system_exec", json!({}))));
+        let invocation = Arc::new(Mutex::new(("command_exec", json!({}))));
         let output = Arc::new(Mutex::new(None));
         let agent = builder(CommandTaskLoop {
             invocation: invocation.clone(),
@@ -278,7 +278,7 @@ async fn command_task_survives_runs_and_supports_cursor_reads_session_checks_and
     let started = harness
         .call(
             "owner",
-            "system_exec",
+            "command_exec",
             json!({
                 "command": "sh",
                 "args": ["-c", "printf 'first\\n'; sleep 0.1; printf 'second\\n'; exec sleep 30"]
@@ -291,7 +291,7 @@ async fn command_task_survives_runs_and_supports_cursor_reads_session_checks_and
     let denied = harness
         .call(
             "foreign",
-            "system_exec_task_read",
+            "command_exec_read",
             json!({
                 "taskId": task_id
             }),
@@ -302,7 +302,7 @@ async fn command_task_survives_runs_and_supports_cursor_reads_session_checks_and
     let next = harness
         .call(
             "owner",
-            "system_exec_task_read",
+            "command_exec_read",
             json!({
                 "taskId": task_id,
                 "stdoutCursor": started["stdoutCursor"],
@@ -321,7 +321,7 @@ async fn command_task_survives_runs_and_supports_cursor_reads_session_checks_and
     let stopped = harness
         .call(
             "owner",
-            "system_exec_task_stop",
+            "command_exec_stop",
             json!({
                 "taskId": task_id,
                 "stdoutCursor": next["stdoutCursor"],
@@ -345,7 +345,7 @@ async fn default_command_handoff_returns_after_ten_seconds() {
         Duration::from_secs(15),
         harness.call(
             "owner",
-            "system_exec",
+            "command_exec",
             json!({"command": "sleep", "args": ["30"]}),
         ),
     )
@@ -358,7 +358,7 @@ async fn default_command_handoff_returns_after_ten_seconds() {
     let stopped = harness
         .call(
             "owner",
-            "system_exec_task_stop",
+            "command_exec_stop",
             json!({
                 "taskId": running["taskId"]
             }),
@@ -378,7 +378,7 @@ async fn closing_framework_terminates_its_background_command() {
     let running = harness
         .call(
             "owner",
-            "system_exec",
+            "command_exec",
             json!({
                 "command": "sh", "args": ["-c", "echo $$; exec sleep 30"]
             }),
@@ -477,7 +477,7 @@ async fn local_domain_pack_combines_selected_tools_without_duplicate_providers()
         1
     );
     assert_eq!(
-        tools.iter().filter(|name| *name == "system_exec").count(),
+        tools.iter().filter(|name| *name == "command_exec").count(),
         1
     );
     let read = invoke(selection(), "fs_read_text", json!({"path":"note.txt"})).await;
@@ -546,7 +546,7 @@ async fn web_domain_pack_retains_host_backend_and_exposes_only_selected_tools() 
     let pack =
         web_tools_pack(WebToolsPlugin::new().fetch(WebFetchConfig::restricted(["127.0.0.1"])));
     assert_eq!(plugin_ids(&pack), ["framework.web.tools"]);
-    assert_eq!(listed_tools(pack).await, ["web_fetch"]);
+    assert_eq!(listed_tools(pack).await, ["web_read"]);
 }
 
 #[cfg(feature = "media")]
@@ -611,7 +611,7 @@ async fn system_command_pack_uses_platform_native_command_runners() {
 
     let output = invoke(
         system_command_pack(SystemCommandConfig::new()),
-        "system_exec",
+        "command_exec",
         json!({"command":command, "args":args}),
     )
     .await;
@@ -628,7 +628,7 @@ async fn system_command_pack_uses_platform_native_command_runners() {
 async fn system_command_pack_can_restrict_executable_names() {
     let error = invoke_error(
         system_command_pack(SystemCommandConfig::restricted(["git"])),
-        "system_exec",
+        "command_exec",
         json!({"command":"not-allowed"}),
     )
     .await;
@@ -645,7 +645,7 @@ async fn system_command_pack_accepts_an_arbitrary_working_directory() {
 
     let output = invoke(
         system_command_pack(SystemCommandConfig::new()),
-        "system_exec",
+        "command_exec",
         json!({
             "command":command,
             "args":args,
@@ -671,7 +671,7 @@ async fn command_until_terminal(harness: &ToolHarness, task: &Value) -> Value {
             let result = harness
                 .call(
                     "owner",
-                    "system_exec_task_read",
+                    "command_exec_read",
                     json!({"taskId":task,"waitMs":100}),
                 )
                 .await
@@ -712,14 +712,14 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
     let harness =
         ToolHarness::new(SystemCommandConfig::new().with_async_after(Duration::from_millis(30)))
             .await;
-    let started = harness.call("owner", "system_exec", json!({
+    let started = harness.call("owner", "command_exec", json!({
         "command":"sh", "args":["-c", r#"read first; printf 'first=%s\n' "$first"; cat"#], "interactive":true
     })).await.unwrap();
     assert_eq!(started["stdinOpen"], true);
     assert_eq!(started["tty"], false);
     let id = &started["taskId"];
     let list = harness
-        .call("owner", "system_exec_list", json!({}))
+        .call("owner", "command_exec_list", json!({}))
         .await
         .unwrap();
     assert_eq!(list["commands"].as_array().unwrap().len(), 1);
@@ -727,7 +727,7 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
     let foreign = harness
         .call(
             "foreign",
-            "system_exec_list",
+            "command_exec_list",
             json!({"includeCompleted":true}),
         )
         .await
@@ -737,7 +737,7 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
         harness
             .call(
                 "foreign",
-                "system_exec_task_write",
+                "command_exec_write",
                 json!({"taskId":id,"data":"wrong\n"})
             )
             .await
@@ -746,7 +746,7 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
     harness
         .call(
             "owner",
-            "system_exec_task_write",
+            "command_exec_write",
             json!({"taskId":id,"data":"hello\n"}),
         )
         .await
@@ -754,7 +754,7 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
     harness
         .call(
             "owner",
-            "system_exec_task_write",
+            "command_exec_write",
             json!({"taskId":id,"data":"world\n","closeStdin":true}),
         )
         .await
@@ -767,21 +767,21 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
         harness
             .call(
                 "owner",
-                "system_exec_task_write",
+                "command_exec_write",
                 json!({"taskId":id,"data":"late"})
             )
             .await
             .is_err()
     );
     let running = harness
-        .call("owner", "system_exec_list", json!({}))
+        .call("owner", "command_exec_list", json!({}))
         .await
         .unwrap();
     assert!(running["commands"].as_array().unwrap().is_empty());
     let history = harness
         .call(
             "owner",
-            "system_exec_list",
+            "command_exec_list",
             json!({"includeCompleted":true}),
         )
         .await
@@ -796,7 +796,7 @@ async fn pty_is_a_real_terminal_and_combines_output_and_accepts_input() {
     let harness =
         ToolHarness::new(SystemCommandConfig::new().with_async_after(Duration::from_millis(50)))
             .await;
-    let started = harness.call("owner", "system_exec", json!({
+    let started = harness.call("owner", "command_exec", json!({
         "command":"sh", "args":["-c", r#"test -t 0 && test -t 1 && test -t 2 || exit 9; stty -echo; stty size; read answer; printf 'answer=%s\n' "$answer"; printf 'error-stream\n' >&2"#],
         "tty":true,"rows":40,"cols":100
     })).await.unwrap();
@@ -805,7 +805,7 @@ async fn pty_is_a_real_terminal_and_combines_output_and_accepts_input() {
     harness
         .call(
             "owner",
-            "system_exec_task_write",
+            "command_exec_write",
             json!({"taskId":id,"data":"terminal-value\n"}),
         )
         .await
@@ -831,7 +831,7 @@ async fn stopping_pipe_and_pty_commands_cleans_their_process_groups() {
         let started = harness
             .call(
                 "owner",
-                "system_exec",
+                "command_exec",
                 json!({
                     "command":"sh", "args":["-c", "sleep 30 & echo $!; wait"], "tty":tty
                 }),
@@ -843,7 +843,7 @@ async fn stopping_pipe_and_pty_commands_cleans_their_process_groups() {
         let stopped = harness
             .call(
                 "owner",
-                "system_exec_task_stop",
+                "command_exec_stop",
                 json!({"taskId":started["taskId"]}),
             )
             .await
@@ -870,7 +870,7 @@ async fn timeout_and_framework_close_clean_managed_descendants() {
         let started = harness
             .call(
                 "owner",
-                "system_exec",
+                "command_exec",
                 json!({
                     "command":"sh", "args":["-c", "sleep 30 & echo $!; wait"], "tty":true
                 }),
@@ -895,7 +895,7 @@ async fn completed_shell_does_not_leave_background_children_and_plain_stdin_stil
     let finished = harness
         .call(
             "owner",
-            "system_exec",
+            "command_exec",
             json!({
                 "command":"sh", "args":["-c", "sleep 30 & echo $!"]
             }),
@@ -907,13 +907,48 @@ async fn completed_shell_does_not_leave_background_children_and_plain_stdin_stil
     let finished = harness
         .call(
             "owner",
-            "system_exec",
+            "command_exec",
             json!({"command":"cat","stdin":"one-shot\n"}),
         )
         .await
         .unwrap();
     assert_eq!(finished["stdout"], "one-shot\n");
     assert_eq!(finished["success"], true);
+    assert!(harness.agent.framework().close().await.is_success());
+}
+
+#[tokio::test]
+async fn unified_patch_accepts_relative_versions_with_authorized_roots() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("note.txt");
+    std::fs::write(&path, "old\n").unwrap();
+    let config = FileSystemToolsConfig::new(root.path())
+        .with_authorized_roots(vec![root.path().to_path_buf()]);
+    let harness = ToolHarness::filesystem(config).await;
+    let read = harness
+        .call("owner", "fs_read_text", json!({"path":"note.txt"}))
+        .await
+        .unwrap();
+    let patch = "--- note.txt\n+++ note.txt\n@@ -1 +1 @@\n-old\n+new\n";
+    let duplicate = json!({"patch":patch,"expectedVersions":{"note.txt":read["version"],(path.to_string_lossy().to_string()):read["version"]}});
+    assert!(
+        harness
+            .call("owner", "fs_apply_unified_patch", duplicate)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate paths")
+    );
+    let result = harness
+        .call(
+            "owner",
+            "fs_apply_unified_patch",
+            json!({"patch":patch,"expectedVersions":{"note.txt":read["version"]}}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result["applied"], true);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "new\n");
     assert!(harness.agent.framework().close().await.is_success());
 }
 

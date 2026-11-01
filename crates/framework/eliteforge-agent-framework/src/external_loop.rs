@@ -231,7 +231,6 @@ impl AgentLoop for ExternalAgentLoop {
             checkpoint.history.steps.push(HistoryStep {
                 id: events.message_id.clone(),
                 run_id: context.run_id,
-                node_invocation_id: None,
                 sequence: 1,
                 attempt: 1,
                 name: "external".into(),
@@ -248,6 +247,8 @@ impl AgentLoop for ExternalAgentLoop {
                 run_id: context.run_id,
                 step_id: Some(events.message_id.clone()),
                 role: Role::Assistant,
+                phase: None,
+                output_index: None,
                 provenance: context.assistant_provenance(),
                 content: Vec::new(),
                 structured: None,
@@ -260,7 +261,7 @@ impl AgentLoop for ExternalAgentLoop {
             let checkpoint = store.create(checkpoint, previous.map(|p| p.run_id)).await?;
             let ttl = std::time::Duration::from_secs(30);
             let lease = store.claim(context.run_id, RunId::new_v4(), ttl).await?;
-            let guard = crate::model_execution::WorkflowLease::new(
+            let guard = crate::model_execution::RunLeaseGuard::new(
                 store.clone(),
                 lease.clone(),
                 ttl,

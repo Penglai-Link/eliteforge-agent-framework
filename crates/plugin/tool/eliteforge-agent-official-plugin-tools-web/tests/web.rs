@@ -99,7 +99,7 @@ async fn brave_protocol_and_html_fetch_preserve_sources_and_strip_scripts() {
     );
     let result = invoke(
         fetch_plugin(),
-        "web_fetch",
+        "web_read",
         json!({"url":format!("{}/html",server.url)}),
         false,
     )
@@ -121,7 +121,7 @@ async fn fetch_rechecks_redirects_rejects_oversize_and_cancels_or_times_out() {
         format!("{}/redirect", server.url),
     ] {
         assert!(
-            invoke(fetch_plugin(), "web_fetch", json!({"url":url}), false)
+            invoke(fetch_plugin(), "web_read", json!({"url":url}), false)
                 .await
                 .is_err()
         );
@@ -136,7 +136,7 @@ async fn fetch_rechecks_redirects_rejects_oversize_and_cancels_or_times_out() {
     assert!(
         invoke(
             plugin,
-            "web_fetch",
+            "web_read",
             json!({"url":format!("{}/large",server.url)}),
             false
         )
@@ -147,7 +147,7 @@ async fn fetch_rechecks_redirects_rejects_oversize_and_cancels_or_times_out() {
     assert!(
         invoke(
             fetch_plugin().with_timeout(Duration::from_millis(20)),
-            "web_fetch",
+            "web_read",
             json!({"url":format!("{}/slow",server.url)}),
             false
         )
@@ -158,7 +158,7 @@ async fn fetch_rechecks_redirects_rejects_oversize_and_cancels_or_times_out() {
     assert!(
         invoke(
             fetch_plugin(),
-            "web_fetch",
+            "web_read",
             json!({"url":format!("{}/html",server.url)}),
             true
         )
@@ -169,7 +169,7 @@ async fn fetch_rechecks_redirects_rejects_oversize_and_cancels_or_times_out() {
     assert!(
         invoke(
             fetch_plugin(),
-            "web_fetch",
+            "web_read",
             json!({"url":format!("{}/error",server.url)}),
             false
         )

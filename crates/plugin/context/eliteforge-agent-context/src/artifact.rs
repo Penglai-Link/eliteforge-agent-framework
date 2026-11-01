@@ -229,7 +229,7 @@ impl ArtifactReadTool {
                     "required": ["id", "length"],
                     "additionalProperties": false
                 }),
-            ),
+            ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query),
             self,
         )
         .parallel_safe()

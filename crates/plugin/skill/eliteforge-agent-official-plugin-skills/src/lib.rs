@@ -1050,15 +1050,15 @@ fn serialize_catalog_for_context(skills: &[ContextSkill<'_>]) -> Result<String, 
 
 #[async_trait]
 impl ToolProvider for SkillsEndpoint {
+    fn catalog_metadata(&self) -> Option<Vec<eliteforge_agent_core::ToolCatalogEntry>> {
+        Some(tools::catalog_metadata())
+    }
     async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError> {
         let snapshot = self.runtime.snapshot(context).await?;
-        if snapshot.skills.is_empty() && snapshot.catalog.diagnostics.is_empty() {
-            return Ok(ToolLease::new(Vec::new()));
-        }
         Ok(ToolLease::new(tools::bindings(
             self.runtime.clone(),
             !snapshot.skills.is_empty(),
-            !snapshot.catalog.diagnostics.is_empty(),
+            true,
         )))
     }
 }

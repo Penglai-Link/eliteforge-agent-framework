@@ -184,14 +184,7 @@ async fn workflow_projection_compresses_while_sqlite_keeps_complete_history() {
     store.release(&lease).await.unwrap();
     let agent = builder(fixture("success"))
         .plugin(StateStorePlugin(store.clone()))
-        .plugin(AgentLoopPlugin::new(
-            WorkflowLoop::new(WorkflowDefinition {
-                id: "workflow".into(),
-                version: 1,
-                stages: vec![WorkflowStage::new("answer")],
-            })
-            .unwrap(),
-        ))
+        .plugin(AgentLoopPlugin::new(ReactAgentLoop))
         .build()
         .await
         .unwrap();

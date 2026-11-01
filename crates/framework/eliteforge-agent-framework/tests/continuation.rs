@@ -730,53 +730,7 @@ async fn initial_child_slots_are_not_refilled_before_first_judge() {
     policy.client.close().await;
     agent.framework().close().await;
 }
-#[tokio::test]
-async fn resumed_native_checkpoint_charges_saved_step_call_bound_with_original_limits() {
-    let provider = Provider::default();
-    let definition = WorkflowDefinition {
-        id: "two-stages".into(),
-        version: 1,
-        stages: vec![WorkflowStage::new("first"), WorkflowStage::new("second")],
-    };
-    let agent = eliteforge_agent_test_support::TestBuilder::default()
-        .default_models(false)
-        .plugin(ChatModelPlugin::new(provider.clone()))
-        .plugin(AgentLoopPlugin::new(WorkflowLoop::new(definition).unwrap()))
-        .build()
-        .await
-        .unwrap();
-    let mut run = RunRequest::new("resume-budget", "work");
-    run.limits.max_steps = 4;
-    run.limits.max_model_calls_per_step = Some(3);
-    run.limits.max_model_output_tokens = 16;
-    let handle = agent.start(run).unwrap();
-    let id = handle.run_id;
-    let result = agent.wait(handle).await.unwrap();
-    assert_eq!(result.steps, 2);
-    let mut resumed = RunRequest::new("resume-budget", "");
-    resumed.resume = Some(ResumeRequest {
-        run_id: id,
-        response: None,
-    });
-    let handle = agent.start(resumed).unwrap();
-    let control = agent.control(&handle).unwrap();
-    let result = agent.wait(handle).await.unwrap();
-    let observed = agent.execution_snapshot(&control, &result).unwrap();
-    assert!(observed.incomplete);
-    assert_eq!(observed.historical_calls_bound, Some(6));
-    assert_eq!(observed.model_calls, 6);
-    assert_eq!(observed.limits.max_steps, 4);
-    assert_eq!(observed.limits.max_model_calls_per_step, Some(3));
-    assert_eq!(
-        observed.budget_usage,
-        Usage {
-            input_tokens: 8,
-            output_tokens: 4
-        }
-    );
-    assert_eq!(provider.calls.load(Ordering::Acquire), 2);
-    agent.framework().close().await;
-}
+
 #[test]
 fn exhausted_usize_max_dispatch_bound_rejects_without_overflow() {
     let budget = ContinuationBudget::new(usize::MAX, 1, 1, usize::MAX, 0, 0).unwrap();

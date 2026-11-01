@@ -1,37 +1,23 @@
-//! Shared persistent model/tool execution for ReAct and workflow stages.
+//! Durable ReAct model and tool execution.
 use crate::*;
 use async_trait::async_trait;
 use futures::{StreamExt, stream::FuturesUnordered};
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 pub(crate) struct ModelExecutionLoop {
-    pub(crate) conversation: bool,
-    definition: WorkflowDefinition,
     lease_duration: Duration,
 }
 impl ModelExecutionLoop {
-    pub fn new(definition: WorkflowDefinition) -> Result<Self, AgentError> {
-        definition.validate()?;
-        Ok(Self {
-            definition,
-            conversation: false,
+    pub fn new() -> Self {
+        Self {
             lease_duration: Duration::from_secs(30),
-        })
-    }
-    pub fn with_lease_duration(mut self, duration: Duration) -> Result<Self, AgentError> {
-        if duration < Duration::from_millis(30) {
-            return Err(AgentError::InvalidConfiguration(
-                "workflow lease must be at least 30 milliseconds".into(),
-            ));
         }
-        self.lease_duration = duration;
-        Ok(self)
     }
 }
 
 #[async_trait]
 impl AgentLoop for ModelExecutionLoop {
     fn execution_kind(&self) -> &str {
-        "WORKFLOW"
+        "REACT"
     }
     fn supports_resume(&self) -> bool {
         true
@@ -61,22 +47,18 @@ impl AgentLoop for ModelExecutionLoop {
             .state
             .clone()
             .ok_or(AgentError::MissingService("StateStore"))?;
-        let mut conversation = if self.conversation {
-            Some(
-                services
-                    .conversations
-                    .open_branch(&ConversationKey {
-                        session_id: request.session_id.clone(),
-                        branch: request
-                            .conversation_branch
-                            .clone()
-                            .unwrap_or_else(|| "main".into()),
-                    })
-                    .await?,
-            )
-        } else {
-            None
-        };
+        let mut conversation = Some(
+            services
+                .conversations
+                .open_branch(&ConversationKey {
+                    session_id: request.session_id.clone(),
+                    branch: request
+                        .conversation_branch
+                        .clone()
+                        .unwrap_or_else(|| "main".into()),
+                })
+                .await?,
+        );
         let mut initial_tools = if request.resume.is_none() {
             Some(crate::react::ToolSet::load(&services.tools, context).await?)
         } else {
@@ -86,11 +68,11 @@ impl AgentLoop for ModelExecutionLoop {
             let checkpoint = store.load(resume.run_id).await?;
             if checkpoint.session_id != request.session_id
                 || checkpoint.execution_scope != request.scope()
-                || checkpoint.loop_id != self.definition.id
-                || checkpoint.loop_version != self.definition.version
+                || checkpoint.loop_id != "framework.react"
+                || checkpoint.loop_version != 1
             {
                 return Err(AgentError::InvalidConfiguration(
-                    "resume identity or workflow version mismatch".into(),
+                    "resume identity or ReAct version mismatch".into(),
                 ));
             }
             checkpoint
@@ -104,10 +86,10 @@ impl AgentLoop for ModelExecutionLoop {
             let initial_snapshot = if let Some(session) = &mut conversation {
                 let snapshot = session.snapshot().await?;
                 if let Some(previous) = &previous
-                    && previous.loop_id == self.definition.id
+                    && previous.loop_id == "framework.react"
                     && previous.status.is_terminal()
                 {
-                    let prior: WorkflowState =
+                    let prior: ReactState =
                         serde_json::from_value(previous.state.clone()).map_err(state_encoding)?;
                     if prior.conversation_generation.as_deref() == Some(&snapshot.generation) {
                         sync_transcript(
@@ -122,16 +104,16 @@ impl AgentLoop for ModelExecutionLoop {
             } else {
                 None
             };
-            let state = WorkflowState {
-                definition: self.definition.clone(),
+            let state = ReactState {
                 request: saved_request,
                 conversation_generation: initial_snapshot.as_ref().map(|s| s.generation.clone()),
-                stage: 0,
                 steps: 0,
+                phase_continuations: 0,
                 tool_calls: 0,
                 tool_batch_limit_reached: false,
-                cursor: WorkflowCursor::Model,
+                cursor: ReactCursor::Model,
                 pending_model_response: None,
+                pending_assistant_messages: Vec::new(),
                 visible_tools: initial_tools
                     .as_ref()
                     .expect("new run catalog")
@@ -153,8 +135,8 @@ impl AgentLoop for ModelExecutionLoop {
             let mut checkpoint = Checkpoint::new(
                 context.run_id,
                 &request.session_id,
-                &self.definition.id,
-                self.definition.version,
+                "framework.react",
+                1,
                 serde_json::to_value(state).map_err(state_encoding)?,
             )
             .with_execution_scope(request.scope())
@@ -169,27 +151,26 @@ impl AgentLoop for ModelExecutionLoop {
                     .with_annotations(request.annotations.clone())
                     .with_provenance(request.message_provenance.clone()),
             );
-            if context.node_execution().is_none() {
-                checkpoint.history.messages.push(
-                    HistoryMessage::user(context.run_id, &request.input)
-                        .with_annotations(request.annotations.clone())
-                        .with_requested_skills(request.requested_skills.clone())
-                        .with_provenance(request.message_provenance.clone()),
-                );
-            }
+
+            checkpoint.history.messages.push(
+                HistoryMessage::user(context.run_id, &request.input)
+                    .with_annotations(request.annotations.clone())
+                    .with_requested_skills(request.requested_skills.clone())
+                    .with_provenance(request.message_provenance.clone()),
+            );
+
             store.create(checkpoint, previous.map(|p| p.run_id)).await?
         };
-        let state: WorkflowState =
+        let state: ReactState =
             serde_json::from_value(checkpoint.state.clone()).map_err(state_encoding)?;
-        if state.definition != self.definition || state.stage >= self.definition.stages.len() {
+        if state.request.model_stage.trim().is_empty() {
             return Err(AgentError::InvalidConfiguration(
-                "persisted workflow definition differs from installed workflow".into(),
+                "persisted ReAct definition differs from installed ReAct".into(),
             ));
         }
         state.request.limits.validate()?;
         if request.resume.is_some()
             && context.lineage.depth == 0
-            && context.node_execution.is_none()
             && let Some(counter) = context.extensions.get::<ModelDispatchCounter>()
         {
             counter.restore(
@@ -198,7 +179,7 @@ impl AgentLoop for ModelExecutionLoop {
                 state.steps,
                 state.tool_calls,
                 state.child_runs,
-                !checkpoint.status.is_terminal() && matches!(&state.cursor, WorkflowCursor::Model),
+                !checkpoint.status.is_terminal() && matches!(&state.cursor, ReactCursor::Model),
             );
         }
 
@@ -223,14 +204,14 @@ impl AgentLoop for ModelExecutionLoop {
             }
             let result = match checkpoint.status {
                 ExecutionStatus::Cancelled => Err(AgentError::Cancelled),
-                ExecutionStatus::Failed => Err(AgentError::Run("persisted workflow failed".into())),
+                ExecutionStatus::Failed => Err(AgentError::Run("persisted ReAct failed".into())),
                 _ => Ok(RunResult {
                     output: state.output.text(),
                     content: state.output,
                     structured: state.structured,
                     interactions: state.interactions,
                     status: state.outcome.ok_or_else(|| {
-                        AgentError::Run("terminal workflow is missing its outcome".into())
+                        AgentError::Run("terminal ReAct is missing its outcome".into())
                     })?,
                     usage: state.usage,
                     steps: state.steps,
@@ -251,7 +232,7 @@ impl AgentLoop for ModelExecutionLoop {
         let lease = store
             .claim(checkpoint.run_id, RunId::new_v4(), self.lease_duration)
             .await?;
-        let guard = WorkflowLease::new(
+        let guard = RunLeaseGuard::new(
             store.clone(),
             lease.clone(),
             self.lease_duration,
@@ -262,9 +243,9 @@ impl AgentLoop for ModelExecutionLoop {
             // Reload under the acquired fencing token: state may have advanced after
             // the optimistic read but before claim. Resume always acts on that state.
             checkpoint = store.load(checkpoint.run_id).await?;
-            let mut state: WorkflowState =
+            let mut state: ReactState =
                 serde_json::from_value(checkpoint.state.clone()).map_err(state_encoding)?;
-            if let WorkflowCursor::Tools {
+            if let ReactCursor::Tools {
                 assistant,
                 executions,
             } = &mut state.cursor
@@ -287,15 +268,13 @@ impl AgentLoop for ModelExecutionLoop {
             checkpoint.validate()?;
             if checkpoint.run_id != context.run_id
                 || checkpoint.session_id != request.session_id || checkpoint.execution_scope != request.scope()
-                || checkpoint.loop_id != self.definition.id
-                || checkpoint.loop_version != self.definition.version
-                || state.definition != self.definition
-                || state.stage >= self.definition.stages.len()
+                || checkpoint.loop_id != "framework.react"
+                || checkpoint.loop_version != 1
                 || state.request.session_id != checkpoint.session_id
                 || checkpoint.status.is_terminal()
             {
                 return Err(AgentError::InvalidConfiguration(
-                    "acquired checkpoint does not match the installed workflow and run".into(),
+                    "acquired checkpoint does not match the installed ReAct and run".into(),
                 ));
             }
             state.request.limits.validate()?;
@@ -306,10 +285,10 @@ impl AgentLoop for ModelExecutionLoop {
                 selected.extend(&state.request.requested_skills)?;
                 state.request.requested_skills = selected.names();
             }
-            if request.resume.is_some() && context.lineage.depth == 0 && context.node_execution.is_none()
+            if request.resume.is_some() && context.lineage.depth == 0
                 && let Some(counter) = context.extensions.get::<ModelDispatchCounter>()
             {
-                counter.restore(state.request.limits.clone(), state.budget_usage.clone(), state.steps, state.tool_calls, state.child_runs, !checkpoint.status.is_terminal() && matches!(&state.cursor, WorkflowCursor::Model));
+                counter.restore(state.request.limits.clone(), state.budget_usage.clone(), state.steps, state.tool_calls, state.child_runs, !checkpoint.status.is_terminal() && matches!(&state.cursor, ReactCursor::Model));
             }
 
             state.request.generation.validate()?;
@@ -336,7 +315,7 @@ impl AgentLoop for ModelExecutionLoop {
                 .deadline
                 .min(tokio::time::Instant::now() + state.request.limits.run_timeout);
             let context = &execution_context;
-            // An embedded workflow shares its parent's restored ledger. Resetting
+            // An embedded ReAct shares its parent's restored ledger. Resetting
             // it here would erase reservations held by concurrent DAG siblings.
             if context.budget_journal.is_none() {
                 context
@@ -365,7 +344,7 @@ impl AgentLoop for ModelExecutionLoop {
                         incoming.resume.as_mut().unwrap().response = None;
                 }
                 // Apply committed answers only when their tool batch is complete.
-                let unfinished = matches!(&state.cursor, WorkflowCursor::Tools { executions, .. } if executions.iter().any(|e| !matches!(e.state, ToolExecutionState::Finished(_))));
+                let unfinished = matches!(&state.cursor, ReactCursor::Tools { executions, .. } if executions.iter().any(|e| !matches!(e.state, ToolExecutionState::Finished(_))));
                 let ids = state.interactions.iter()
                     .filter(|interaction| !matches!(interaction.kind, InteractionKind::Input) || !unfinished)
                     .map(|interaction| interaction.id).collect::<Vec<_>>();
@@ -429,7 +408,7 @@ impl AgentLoop for ModelExecutionLoop {
                                 .save(Some(AgentEvent::RunFailed(error.to_string())))
                                 .await;
                             if saved.is_ok() {
-                                if let WorkflowCursor::Tools {assistant,executions} = &runtime.state.cursor {
+                                if let ReactCursor::Tools {assistant,executions} = &runtime.state.cursor {
                                     for event in crate::tool_batches::interrupted_result_events(assistant,executions) {
                                         runtime.context.emit_output(event);
                                     }
@@ -483,13 +462,13 @@ async fn sync_transcript(
 
 fn state_encoding(_: serde_json::Error) -> AgentError {
     AgentError::State(StateError::Invalid(
-        "workflow state cannot be encoded or decoded".into(),
+        "ReAct state cannot be encoded or decoded".into(),
     ))
 }
 
 fn apply_resume(
     request: &RunRequest,
-    state: &mut WorkflowState,
+    state: &mut ReactState,
     checkpoint: &mut Checkpoint,
     tools: &crate::react::ToolSet,
 ) -> Result<(), AgentError> {
@@ -523,7 +502,7 @@ fn apply_resume(
             interaction.validate_response(response, 0)?;
             match interaction.kind {
                 InteractionKind::Input => {
-                    if let WorkflowCursor::Tools {
+                    if let ReactCursor::Tools {
                         assistant,
                         executions,
                     } = &state.cursor
@@ -572,14 +551,14 @@ fn apply_resume(
                         }
                         batch.extend(crate::tool_batches::result_messages(&completed));
                         checkpoint.transcript.extend(batch);
-                        state.cursor = WorkflowCursor::Model;
+                        state.cursor = ReactCursor::Model;
                     }
                     checkpoint.transcript.push(Message::user(Content(vec![ContentBlock::Json {
                         value: serde_json::json!({"interaction_id":response.interaction_id,"answer":response.value}),
                     }])).with_provenance(request.message_provenance.clone()));
                 }
                 InteractionKind::Approval { invocation_id } => {
-                    let WorkflowCursor::Tools { executions, .. } = &mut state.cursor else {
+                    let ReactCursor::Tools { executions, .. } = &mut state.cursor else {
                         return Err(AgentError::InvalidConfiguration(
                             "approval has no pending tool batch".into(),
                         ));
@@ -614,7 +593,7 @@ struct ModelExecutionRuntime<'a> {
     store: &'a dyn StateStore,
     lease: &'a ExecutionLease,
     checkpoint: Checkpoint,
-    state: WorkflowState,
+    state: ReactState,
     tools: crate::react::ToolSet,
     context: &'a RunContext,
     services: &'a AgentServices,
@@ -627,7 +606,7 @@ struct ModelExecutionRuntime<'a> {
 }
 impl ModelExecutionRuntime<'_> {
     fn has_started_tools(&self) -> bool {
-        matches!(&self.state.cursor,WorkflowCursor::Tools { executions,.. } if executions.iter().any(|e|matches!(e.state,ToolExecutionState::Started)))
+        matches!(&self.state.cursor,ReactCursor::Tools { executions,.. } if executions.iter().any(|e|matches!(e.state,ToolExecutionState::Started)))
     }
     fn result(&self, status: RunStatus) -> RunResult {
         RunResult {
@@ -644,7 +623,7 @@ impl ModelExecutionRuntime<'_> {
     }
     fn update_history(&mut self) {
         let now = unix_time_ms();
-        if let WorkflowCursor::Tools { executions, .. } = &self.state.cursor {
+        if let ReactCursor::Tools { executions, .. } = &self.state.cursor {
             crate::tool_batches::update_batch_history(
                 executions,
                 &mut self.checkpoint.history,
@@ -738,7 +717,7 @@ impl ModelExecutionRuntime<'_> {
         }
     }
     async fn process_finished_history_tools(&mut self) -> Result<(), AgentError> {
-        let WorkflowCursor::Tools { executions, .. } = &self.state.cursor else {
+        let ReactCursor::Tools { executions, .. } = &self.state.cursor else {
             return Ok(());
         };
         let pending: Vec<_> = executions
@@ -843,7 +822,7 @@ impl ModelExecutionRuntime<'_> {
         // turn must see confirmed effects and unknown outcomes, not repeat the
         // original plan. Keep the cursor for audit; terminal runs never dispatch it.
         if self.checkpoint.status.is_terminal()
-            && let WorkflowCursor::Tools {
+            && let ReactCursor::Tools {
                 assistant,
                 executions,
             } = &self.state.cursor
@@ -859,7 +838,7 @@ impl ModelExecutionRuntime<'_> {
         if let Some(AgentEvent::ToolFinished {
             call_id, is_error, ..
         }) = &mut event
-            && let WorkflowCursor::Tools { executions, .. } = &self.state.cursor
+            && let ReactCursor::Tools { executions, .. } = &self.state.cursor
             && let Some(ToolExecution {
                 state: ToolExecutionState::Finished(output),
                 ..
@@ -896,7 +875,6 @@ impl ModelExecutionRuntime<'_> {
                 schema_version: 1,
                 run_id: self.checkpoint.run_id,
                 session_id: self.checkpoint.session_id.clone(),
-                node_execution: self.context.node_execution().cloned(),
                 sequence: self.checkpoint.events.last().map_or(1, |e| e.sequence + 1),
                 timestamp_unix_ms: unix_time_ms(),
                 event: event.clone(),
@@ -911,11 +889,7 @@ impl ModelExecutionRuntime<'_> {
             )
             .await?;
         if self.checkpoint.status.is_terminal() {
-            // Embedded DAG checkpoints share the parent's run ID. Only the DAG
-            // owner may close that run, after all sibling nodes have settled.
-            if self.context.node_execution().is_none()
-                && let Some(manager) = &self.services.interactions
-            {
+            if let Some(manager) = &self.services.interactions {
                 // Also close independently configured/remote interaction stores.
                 manager
                     .0
@@ -934,7 +908,7 @@ impl ModelExecutionRuntime<'_> {
         // Publish only committed states. Resumes get a fresh snapshot, while
         // repeated saves of the same state produce no duplicate progress frame.
         if !self.checkpoint.status.is_terminal()
-            && let WorkflowCursor::Tools {
+            && let ReactCursor::Tools {
                 assistant,
                 executions,
             } = &self.state.cursor
@@ -1037,7 +1011,7 @@ impl ModelExecutionRuntime<'_> {
         self.checkpoint.status = execution;
         self.state.outcome = Some(status.clone());
         self.save(None).await?;
-        if let WorkflowCursor::Tools {
+        if let ReactCursor::Tools {
             assistant,
             executions,
         } = &self.state.cursor
@@ -1080,7 +1054,7 @@ impl ModelExecutionRuntime<'_> {
                     .await;
             }
             match &self.state.cursor {
-                WorkflowCursor::Model => {
+                ReactCursor::Model => {
                     if self.state.pending_model_response.is_none()
                         && (self.state.steps >= self.state.request.limits.max_steps
                             || !admit_native_step(
@@ -1097,38 +1071,12 @@ impl ModelExecutionRuntime<'_> {
                         steering.extend(source.0.drain_inputs(self.context, false).await?);
                     }
                     self.record_steering(steering).await?;
-                    let stage = &self.state.definition.stages[self.state.stage];
-                    let instructions = stage
-                        .instructions
-                        .iter()
-                        .cloned()
-                        .map(|message| message.with_instruction_origin(InstructionOrigin::Agent))
-                        .collect::<Vec<_>>();
-                    if instructions.iter().any(|m| {
-                        m.role != Role::System
-                            || !m.tool_calls.is_empty()
-                            || m.tool_call_id.is_some()
-                            || m.tool_result.is_some()
-                    }) {
-                        return Err(AgentError::InvalidConfiguration(
-                            "stage context must provide trusted instructions".into(),
-                        ));
-                    }
-                    // The gateway pair is transport infrastructure and remains
-                    // visible in restricted stages. Unwrapping below enforces
-                    // stage.tools against the actual inner descriptor ID.
+                    let instructions = Vec::new();
                     let descriptors: Vec<_> = self
                         .tools
                         .descriptors()
                         .into_iter()
-                        .filter(|t| {
-                            !self.context.is_tool_revoked(&t.id)
-                                && (self.tools.gateway && is_gateway_descriptor(t)
-                                    || stage
-                                        .tools
-                                        .as_ref()
-                                        .is_none_or(|allowed| allowed.contains(&t.id)))
-                        })
+                        .filter(|tool| !self.context.is_tool_revoked(&tool.id))
                         .collect();
                     let mut memory = if let Some(session) = &mut self.conversation {
                         TranscriptProjection::from_snapshot(session.snapshot().await?)
@@ -1137,14 +1085,14 @@ impl ModelExecutionRuntime<'_> {
                             ConversationKey::new(&self.context.session_id).branch(
                                 serde_json::to_string(&(
                                     self.context.run_id,
-                                    &self.state.definition.id,
-                                    &stage.name,
+                                    "framework.react",
+                                    &self.state.request.model_stage,
                                 ))
-                                .expect("workflow identity is serializable"),
+                                .expect("ReAct identity is serializable"),
                             ),
                         )
                     };
-                    let journal = Arc::new(WorkflowBudgetJournal {
+                    let journal = Arc::new(ReactBudgetJournal {
                         store: self.services.state.clone().expect("validated state store"),
                         lease: self.lease.clone(),
                         checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
@@ -1164,15 +1112,12 @@ impl ModelExecutionRuntime<'_> {
                             .ok_or(AgentError::MissingService("ChatModel"))?
                             .invoke(
                                 ModelCall {
-                                    stage: &stage.name,
+                                    stage: &self.state.request.model_stage,
                                     step: self.state.steps + 1,
                                     instructions: &instructions,
                                     tools: &descriptors,
                                     limits: &self.state.request.limits,
-                                    options: stage
-                                        .generation
-                                        .as_ref()
-                                        .unwrap_or(&self.state.request.generation),
+                                    options: &self.state.request.generation,
                                 },
                                 &mut memory,
                                 &model_context,
@@ -1182,7 +1127,7 @@ impl ModelExecutionRuntime<'_> {
                     self.checkpoint = journal.checkpoint.lock().await.clone();
                     let response = response?;
                     // Maintenance assembles and persists context through the same model
-                    // service, but has no reply message or further workflow stage.
+                    // service, but has no reply message or further ReAct stage.
                     if self
                         .context
                         .extensions
@@ -1196,43 +1141,59 @@ impl ModelExecutionRuntime<'_> {
                     self.state.steps += 1;
                     self.state.usage.add(&response.usage);
                     self.state.output = response.content.clone();
-                    self.state.structured = response.structured;
-                    let mut assistant = Message::assistant(response.content)
-                        .with_provenance(self.context.assistant_provenance());
-                    assistant.structured = self.state.structured.clone();
-                    assistant.tool_calls = response.tool_calls;
-                    assistant.model_context = response.model_context;
-                    if assistant.tool_calls.is_empty() {
-                        if assistant.content.is_empty() {
+                    self.state.structured = response.structured.clone();
+                    let disposition = response.disposition;
+                    let mut assistant_messages = response.assistant_messages();
+                    let output_group_id = (!response.output_items.is_empty()).then(|| {
+                        self.checkpoint.history.steps.last().map(|step| step.id.clone())
+                            .unwrap_or_else(|| RunId::new_v4().to_string())
+                    });
+                    for message in &mut assistant_messages {
+                        message.provenance = self.context.assistant_provenance();
+                        message.output_group_id = output_group_id.clone();
+                    }
+                    if response.tool_calls.is_empty() {
+                        self.checkpoint.transcript.extend(assistant_messages);
+                        if disposition == Some(ModelDisposition::Continue) {
+                            if self.state.phase_continuations >= self.state.request.limits.max_phase_continuations {
+                                self.save(None).await?;
+                                return Err(AgentError::Run("model returned only commentary without a final answer".into()));
+                            }
+                            self.state.phase_continuations += 1;
+                            self.save(None).await?;
+                            continue;
+                        }
+                        if self.state.output.is_empty() {
+                            self.save(None).await?;
                             return Err(AgentError::Run("model returned empty content".into()));
                         }
-                        self.checkpoint.transcript.push(assistant);
-                        if self.state.stage + 1 == self.state.definition.stages.len() {
-                            let mut steering: Vec<LiveInput> = self.context.take_steering_inputs();
-                            if let Some(source) =
-                                self.context.extensions.get::<LiveInputSourceService>()
-                            {
-                                steering.extend(
-                                    source
-                                        .0
-                                        .drain_inputs(self.context, steering.is_empty())
-                                        .await?,
-                                );
-                            }
-                            if steering.is_empty() {
-                                steering = self.context.pending_inputs_or_seal();
-                            }
-                            if steering.is_empty() {
-                                return self
-                                    .stop(RunStatus::Completed, ExecutionStatus::Completed)
-                                    .await;
-                            }
-                            self.record_steering(steering).await?;
-                        } else {
-                            self.state.stage += 1;
-                            self.save(None).await?;
+
+                        let mut steering: Vec<LiveInput> = self.context.take_steering_inputs();
+                        if let Some(source) =
+                            self.context.extensions.get::<LiveInputSourceService>()
+                        {
+                            steering.extend(
+                                source
+                                    .0
+                                    .drain_inputs(self.context, steering.is_empty())
+                                    .await?,
+                            );
                         }
+                        if steering.is_empty() {
+                            steering = self.context.pending_inputs_or_seal();
+                        }
+                        if steering.is_empty() {
+                            return self
+                                .stop(RunStatus::Completed, ExecutionStatus::Completed)
+                                .await;
+                        }
+                        self.record_steering(steering).await?;
                     } else {
+                        // The execution cursor needs the whole call batch; the
+                        // ordered provider messages are persisted separately.
+                        let mut assistant = Message::assistant(response.content.clone());
+                        assistant.tool_calls = response.tool_calls.clone();
+                        self.state.pending_assistant_messages = assistant_messages;
                         let expanded =
                             crate::tool_batches::expand_calls(&assistant.tool_calls, &self.tools)?;
                         let remaining = self
@@ -1268,10 +1229,7 @@ impl ModelExecutionRuntime<'_> {
                             let binding = self.tools.by_name.get(&call.call_name).filter(|b| {
                                 descriptors.iter().any(|d| d.id == b.descriptor.id)
                                     || (self.state.request.limits.allow_unexposed_tools
-                                        && !self.context.is_tool_revoked(&b.descriptor.id)
-                                        && stage.tools.as_ref().is_none_or(|allowed| {
-                                            allowed.contains(&b.descriptor.id)
-                                        }))
+                                        && !self.context.is_tool_revoked(&b.descriptor.id))
                             });
                             // Gateway unwrap: a `tool_execute` envelope is
                             // rewritten to the inner tool's call so schema
@@ -1290,9 +1248,6 @@ impl ModelExecutionRuntime<'_> {
                                             (b.exposed
                                                 || self.state.request.limits.allow_unexposed_tools)
                                                 && !self.context.is_tool_revoked(&b.descriptor.id)
-                                                && stage.tools.as_ref().is_none_or(|allowed| {
-                                                    allowed.contains(&b.descriptor.id)
-                                                })
                                         }) {
                                             Some(inner) => (
                                                 inner.descriptor.clone(),
@@ -1370,14 +1325,14 @@ impl ModelExecutionRuntime<'_> {
                             });
                         }
                         self.state.tool_calls += admitted;
-                        self.state.cursor = WorkflowCursor::Tools {
+                        self.state.cursor = ReactCursor::Tools {
                             assistant: Box::new(assistant),
                             executions,
                         };
                         self.save(None).await?;
                     }
                 }
-                WorkflowCursor::Tools { .. } => {
+                ReactCursor::Tools { .. } => {
                     if let Some(result) = self.execute_tools().await? {
                         return Ok(result);
                     }
@@ -1386,7 +1341,7 @@ impl ModelExecutionRuntime<'_> {
         }
     }
     async fn execute_tools(&mut self) -> Result<Option<RunResult>, AgentError> {
-        if let WorkflowCursor::Tools { executions, .. } = &self.state.cursor {
+        if let ReactCursor::Tools { executions, .. } = &self.state.cursor {
             for execution in executions {
                 if let ToolExecutionState::Finished(output) = &execution.state
                     && let ToolEffect::RevokeTools(ids) = &output.effect
@@ -1395,7 +1350,7 @@ impl ModelExecutionRuntime<'_> {
                 }
             }
         }
-        let WorkflowCursor::Tools { executions, .. } = &self.state.cursor else {
+        let ReactCursor::Tools { executions, .. } = &self.state.cursor else {
             unreachable!()
         };
         let count = executions.len();
@@ -1498,7 +1453,7 @@ impl ModelExecutionRuntime<'_> {
                     call_id: execution.call.id.clone(),
                 }))
                 .await?;
-                let journal = Arc::new(WorkflowBudgetJournal {
+                let journal = Arc::new(ReactBudgetJournal {
                     store: self.services.state.clone().expect("validated state store"),
                     lease: self.lease.clone(),
                     checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
@@ -1584,7 +1539,7 @@ impl ModelExecutionRuntime<'_> {
             self.state.interactions.push(interaction.as_ref().clone());
             // An answer may change the plan. In-flight siblings must still be
             // collected; only calls not dispatched yet can be skipped.
-            if let WorkflowCursor::Tools { executions, .. } = &mut self.state.cursor {
+            if let ReactCursor::Tools { executions, .. } = &mut self.state.cursor {
                 for (other, pending) in executions.iter_mut().enumerate() {
                     if other != index
                         && matches!(
@@ -1621,7 +1576,7 @@ impl ModelExecutionRuntime<'_> {
         {
             return Ok(false);
         }
-        let journal = Arc::new(WorkflowBudgetJournal {
+        let journal = Arc::new(ReactBudgetJournal {
             store: self.services.state.clone().expect("validated state store"),
             lease: self.lease.clone(),
             checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
@@ -1694,14 +1649,19 @@ impl ModelExecutionRuntime<'_> {
         Ok(true)
     }
     async fn complete_tool_batch(&mut self) -> Result<(), AgentError> {
-        let WorkflowCursor::Tools {
+        let ReactCursor::Tools {
             assistant,
             executions,
         } = self.state.cursor.clone()
         else {
             unreachable!()
         };
-        let mut batch = vec![assistant.as_ref().clone()];
+        let mut batch = if self.state.pending_assistant_messages.is_empty() {
+            // Checkpoints created before message segmentation stored only this.
+            vec![assistant.as_ref().clone()]
+        } else {
+            std::mem::take(&mut self.state.pending_assistant_messages)
+        };
         let mut completed = Vec::new();
         for execution in &executions {
             let ToolExecutionState::Finished(output) = execution.state.clone() else {
@@ -1712,7 +1672,7 @@ impl ModelExecutionRuntime<'_> {
         batch.extend(crate::tool_batches::result_messages(&completed));
         let outputs = crate::tool_batches::result_events(&assistant, &completed);
         self.checkpoint.transcript.extend(batch);
-        self.state.cursor = WorkflowCursor::Model;
+        self.state.cursor = ReactCursor::Model;
         self.save(None).await?;
         for output in outputs {
             self.context.emit_output(output);
@@ -1720,13 +1680,13 @@ impl ModelExecutionRuntime<'_> {
         Ok(())
     }
     fn execution(&self, index: usize) -> &ToolExecution {
-        let WorkflowCursor::Tools { executions, .. } = &self.state.cursor else {
+        let ReactCursor::Tools { executions, .. } = &self.state.cursor else {
             unreachable!()
         };
         &executions[index]
     }
     fn execution_mut(&mut self, index: usize) -> &mut ToolExecution {
-        let WorkflowCursor::Tools { executions, .. } = &mut self.state.cursor else {
+        let ReactCursor::Tools { executions, .. } = &mut self.state.cursor else {
             unreachable!()
         };
         &mut executions[index]
@@ -1734,7 +1694,7 @@ impl ModelExecutionRuntime<'_> {
 }
 
 /// A model projection backed by an immutable transcript snapshot. Store writes
-/// remain exclusively in the workflow's atomic checkpoint transition.
+/// remain exclusively in the ReAct's atomic checkpoint transition.
 pub struct TranscriptProjection {
     key: ConversationKey,
     generation: Option<String>,
@@ -1779,14 +1739,14 @@ impl ConversationSession for TranscriptProjection {
     }
 }
 
-pub(crate) struct WorkflowLease {
+pub(crate) struct RunLeaseGuard {
     store: Arc<dyn StateStore>,
     lease: ExecutionLease,
     heartbeat: tokio::task::JoinHandle<()>,
     cleanup_timeout: Duration,
     closed: bool,
 }
-impl WorkflowLease {
+impl RunLeaseGuard {
     pub(crate) fn new(
         store: Arc<dyn StateStore>,
         lease: ExecutionLease,
@@ -1824,7 +1784,7 @@ impl WorkflowLease {
         result
     }
 }
-impl Drop for WorkflowLease {
+impl Drop for RunLeaseGuard {
     fn drop(&mut self) {
         self.heartbeat.abort();
         if self.closed {
@@ -1865,13 +1825,13 @@ async fn release_lease(
     }
 }
 
-struct WorkflowBudgetJournal {
+struct ReactBudgetJournal {
     store: Arc<dyn StateStore>,
     lease: ExecutionLease,
     checkpoint: tokio::sync::Mutex<Checkpoint>,
 }
 #[async_trait]
-impl HistoryCommitter for WorkflowBudgetJournal {
+impl HistoryCommitter for ReactBudgetJournal {
     async fn context_compaction(&self, status: HistoryStatus) -> Result<(), StateError> {
         let mut current = self.checkpoint.lock().await;
         let mut next = current.clone();
@@ -1893,7 +1853,6 @@ impl HistoryCommitter for WorkflowBudgetJournal {
                     next.history.steps.len()
                 ),
                 run_id: next.run_id,
-                node_invocation_id: None,
                 sequence: 0,
                 attempt: 1,
                 name: CONTEXT_COMPACTION_STEP.into(),
@@ -1915,8 +1874,9 @@ impl HistoryCommitter for WorkflowBudgetJournal {
     async fn model_attempt(
         &self,
         step: HistoryStep,
-        message: HistoryMessage,
+        messages: Vec<HistoryMessage>,
         response: Option<ChatResponse>,
+        tool_parents: std::collections::BTreeMap<RunId, String>,
     ) -> Result<(), StateError> {
         let mut current = self.checkpoint.lock().await;
         let mut next = current.clone();
@@ -1925,15 +1885,20 @@ impl HistoryCommitter for WorkflowBudgetJournal {
         } else {
             next.history.steps.push(step.clone());
         }
-        if let Some(old) = next
-            .history
-            .messages
-            .iter_mut()
-            .find(|m| m.id == message.id)
-        {
-            *old = message.clone();
-        } else {
-            next.history.messages.push(message.clone());
+        for message in &messages {
+            if let Some(old) = next.history.messages.iter_mut().find(|m| m.id == message.id) {
+                *old = message.clone();
+            } else if let (Some(step_id), Some(output_index)) = (&message.step_id, message.output_index) {
+                let position = next.history.messages.iter().position(|existing|
+                    existing.step_id.as_ref() == Some(step_id) && existing.output_index.is_some_and(|index| index > output_index));
+                if let Some(position) = position {
+                    next.history.messages.insert(position, message.clone());
+                } else {
+                    next.history.messages.push(message.clone());
+                }
+            } else {
+                next.history.messages.push(message.clone());
+            }
         }
         for call in response
             .as_ref()
@@ -1956,7 +1921,7 @@ impl HistoryCommitter for WorkflowBudgetJournal {
                     id: call.invocation_id,
                     run_id: step.run_id,
                     step_id: step.id.clone(),
-                    message_id: message.id.clone(),
+                    message_id: tool_parents.get(&call.invocation_id).cloned().or_else(|| messages.last().map(|m| m.id.clone())).ok_or_else(|| StateError::Invalid("tool call requires a history message".into()))?,
                     call_id: call.id.clone(),
                     tool_id: call.call_name.clone(),
                     tool_name: call.call_name.clone(),
@@ -1972,11 +1937,11 @@ impl HistoryCommitter for WorkflowBudgetJournal {
             }
         }
         if let Some(response) = response {
-            let mut state: WorkflowState = serde_json::from_value(next.state.clone())
-                .map_err(|_| StateError::Invalid("invalid history workflow state".into()))?;
+            let mut state: ReactState = serde_json::from_value(next.state.clone())
+                .map_err(|_| StateError::Invalid("invalid history ReAct state".into()))?;
             state.pending_model_response = Some(response);
             next.state = serde_json::to_value(state)
-                .map_err(|_| StateError::Invalid("invalid history workflow state".into()))?;
+                .map_err(|_| StateError::Invalid("invalid history ReAct state".into()))?;
         }
         *current = self
             .store
@@ -1986,7 +1951,7 @@ impl HistoryCommitter for WorkflowBudgetJournal {
     }
 }
 #[async_trait]
-impl crate::budget::BudgetJournal for WorkflowBudgetJournal {
+impl crate::budget::BudgetJournal for ReactBudgetJournal {
     async fn save(
         &self,
         ledger: Arc<std::sync::Mutex<crate::budget::UsageLedger>>,
@@ -1994,8 +1959,8 @@ impl crate::budget::BudgetJournal for WorkflowBudgetJournal {
     ) -> Result<(), StateError> {
         let mut current = self.checkpoint.lock().await;
         let mut next = current.clone();
-        let mut state: WorkflowState = serde_json::from_value(next.state.clone())
-            .map_err(|_| StateError::Invalid("invalid workflow budget state".into()))?;
+        let mut state: ReactState = serde_json::from_value(next.state.clone())
+            .map_err(|_| StateError::Invalid("invalid ReAct budget state".into()))?;
         // Read the ledger after acquiring the journal lock. Concurrent callers
         // cannot commit an older, smaller reservation snapshot after a newer one.
         state.budget_usage = ledger
@@ -2004,7 +1969,7 @@ impl crate::budget::BudgetJournal for WorkflowBudgetJournal {
             .including_reservations();
         state.child_runs = child_runs.load(std::sync::atomic::Ordering::Acquire);
         next.state = serde_json::to_value(state)
-            .map_err(|_| StateError::Invalid("invalid workflow budget state".into()))?;
+            .map_err(|_| StateError::Invalid("invalid ReAct budget state".into()))?;
         *current = self
             .store
             .commit(&self.lease, current.revision, next)

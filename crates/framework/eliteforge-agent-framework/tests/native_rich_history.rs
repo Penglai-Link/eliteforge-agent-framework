@@ -51,6 +51,8 @@ impl ChatModel for Model {
         };
         if first {
             Ok(ChatResponse {
+                output_items: Vec::new(),
+                disposition: None,
                 public_content: None,
                 reasoning: None,
                 content: rich(),

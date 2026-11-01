@@ -112,7 +112,6 @@ async fn remote_batches_have_one_rpc_round_trip_and_pass_concurrent_read_contrac
             InteractionRecord {
                 session_id: "owner".into(),
                 run_id: RunId::from_u128(1),
-                node_invocation_id: None,
                 request,
                 tool_call: None,
                 response: None,

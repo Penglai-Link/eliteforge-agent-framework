@@ -28,6 +28,7 @@ router!(TextGenerationAutoRouter);
 router!(TextEmbeddingAutoRouter);
 router!(MultimodalEmbeddingAutoRouter);
 router!(RerankAutoRouter);
+router!(MultimodalRerankAutoRouter);
 
 struct Source(AtomicUsize);
 impl AutoRouteDataSource for Source {
@@ -627,4 +628,42 @@ fn all_four_abstract_routes_pass_the_host_pool_through_without_supplier_rules() 
             .unwrap(),
         candidates[1].model
     );
+}
+
+#[tokio::test]
+async fn multimodal_rerank_dispatches_its_own_policy_and_never_falls_into_text_router() {
+    let mut registrations = update(Arc::new(Embed::default()));
+    registrations.rerank[1].capabilities.input = vec![Modality::Text, Modality::Image];
+    let client = ModelClient::new(registrations)
+        .unwrap()
+        .with_auto_routers(AutoRouters {
+            rerank: Some(Arc::new(Last)),
+            multimodal_rerank: Some(Arc::new(Last)),
+            ..Default::default()
+        });
+    assert_eq!(
+        client.rerank(rank_request()).await.unwrap().model.model,
+        "a"
+    );
+    let mut request = rank_request();
+    request.documents[0].0.push(ContentBlock::Media {
+        media: MediaContent {
+            mime_type: "image/png".into(),
+            source: MediaSource::Base64("AA==".into()),
+            name: None,
+            estimated_tokens: Some(10),
+        },
+    });
+    assert_eq!(
+        client.rerank(request.clone()).await.unwrap().model.model,
+        "b"
+    );
+    let text_only = client.with_auto_routers(AutoRouters {
+        rerank: Some(Arc::new(Last)),
+        ..Default::default()
+    });
+    assert!(matches!(
+        text_only.rerank(request).await,
+        Err(AgentError::MissingService("MultimodalRerankAutoRouter"))
+    ));
 }

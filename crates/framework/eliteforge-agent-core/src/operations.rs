@@ -207,6 +207,38 @@ pub struct AnswerInteraction {
     pub interaction_id: RunId,
     pub value: serde_json::Value,
 }
+
+/// Accept an answer with attribution derived from a trusted caller context.
+pub struct AnswerInteractionWithProvenance {
+    pub session_id: String,
+    pub interaction_id: RunId,
+    pub value: serde_json::Value,
+    pub provenance: Option<crate::MessageProvenance>,
+}
+
+#[async_trait]
+impl AgentOperation for AnswerInteractionWithProvenance {
+    type Service = InteractionStoreService;
+    type Output = RunRequest;
+    async fn execute(
+        self,
+        service: Arc<Self::Service>,
+        _: CancellationToken,
+    ) -> Result<Self::Output, AgentError> {
+        Ok(service
+            .0
+            .answer_with_provenance(
+                &self.session_id,
+                &crate::InteractionResponse {
+                    interaction_id: self.interaction_id,
+                    value: self.value,
+                },
+                self.provenance.as_ref(),
+            )
+            .await?
+            .resume_request())
+    }
+}
 #[async_trait]
 impl AgentOperation for AnswerInteraction {
     type Service = InteractionStoreService;

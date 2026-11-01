@@ -54,7 +54,7 @@ pub fn search_descriptor() -> crate::ToolDescriptor {
                 ]}
             ]
         }),
-    )
+    ).with_display_resource(include_str!("tool-display.json"))
     .with_operation_kind(crate::ToolOperationKind::Query)
 }
 
@@ -74,7 +74,9 @@ pub fn execute_descriptor() -> crate::ToolDescriptor {
                 "arguments": {"type": "object"}
             }
         }),
-    ).with_single_input()
+    ).with_display_resource(include_str!("tool-display.json"))
+    .with_operation_kind(crate::ToolOperationKind::Command)
+    .with_single_input()
 }
 
 /// True when the call name belongs to the stable gateway pair. Hosts use this
@@ -485,7 +487,7 @@ mod tests {
             "other",
             "other",
             json!({})
-        )));
+        ).with_display_resource(include_str!("tool-display.json"))));
     }
 
     #[test]
@@ -552,7 +554,7 @@ mod tests {
         domain: Option<&str>,
     ) -> GatewayInventoryEntry {
         let descriptor =
-            crate::ToolDescriptor::new(id, name, description, json!({"type":"object"}));
+            crate::ToolDescriptor::new(id, name, description, json!({"type":"object"})).with_display_resource(include_str!("tool-display.json"));
         match domain {
             Some(domain) => GatewayInventoryEntry::new(descriptor).with_domain_code(domain),
             None => GatewayInventoryEntry::new(descriptor),

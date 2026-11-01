@@ -121,11 +121,14 @@ impl fw::ChatModel for ProtocolChatModel {
 }
 async fn emit(stream: &dyn fw::ChatStream, event: ModelStreamEvent) {
     match event.kind {
-        ModelStreamEventKind::Text => stream.text_delta(&event.delta).await,
+        ModelStreamEventKind::Text => if let Some(index) = event.output_index { stream.message_delta(index, &event.delta).await } else { stream.text_delta(&event.delta).await },
         // The summary is the presentable reasoning surface; raw chain-of-thought
         // stays internal evidence and is never forwarded to public streams.
         ModelStreamEventKind::ReasoningSummary => stream.reasoning_delta(&event.delta).await,
         ModelStreamEventKind::Reasoning => {}
+        ModelStreamEventKind::MessageStart => if let Some(index) = event.output_index { stream.message_start(index, event.phase.as_deref()).await },
+        ModelStreamEventKind::MessageEnd => if let Some(index) = event.output_index { stream.message_end(index, event.phase.as_deref(), &event.delta).await },
+        ModelStreamEventKind::ToolBoundary => if let Some(index) = event.output_index { stream.tool_boundary(index).await },
     }
 }
 #[derive(Clone)]
@@ -175,7 +178,16 @@ pub fn response_to_framework(response: ModelResponse) -> Result<fw::ChatResponse
         cached_input_tokens: usage.cached_input_tokens.map(u64::from),
         reasoning_tokens: usage.reasoning_tokens.map(u64::from),
     });
+    let tool_calls: Vec<_> = response.tool_calls().into_iter().map(|call| fw::ToolCall::new(call.call_id.unwrap_or_default(), call.tool_name, call.input)).collect();
+    let mut tool_index = 0;
+    let output_items = response.output_items.iter().filter_map(|item| match item {
+        ModelOutputItem::Message { output_index, item_id, phase, text } => Some(fw::ModelOutputItem::Message { output_index: *output_index, item_id: item_id.clone(), phase: phase.clone(), content: text.clone().into() }),
+        ModelOutputItem::ReasoningSummary { output_index, text } => Some(fw::ModelOutputItem::ReasoningSummary { output_index: *output_index, text: text.clone() }),
+        ModelOutputItem::ToolCall { output_index, .. } => { let call = tool_calls.get(tool_index).cloned(); tool_index += 1; call.map(|call| fw::ModelOutputItem::ToolCall { output_index: *output_index, call }) },
+    }).collect();
     let result = fw::ChatResponse {
+        output_items,
+        disposition: Some(match response.finish { ModelFinish::Final => fw::ModelDisposition::Final, ModelFinish::ToolCalls => fw::ModelDisposition::ToolCalls, ModelFinish::Continue => fw::ModelDisposition::Continue }),
         public_content: None,
         content: response.output_text().into(),
         reasoning: {
@@ -192,13 +204,7 @@ pub fn response_to_framework(response: ModelResponse) -> Result<fw::ChatResponse
             (!text.is_empty()).then_some(text)
         },
         structured: serde_json::from_str(&response.output_text()).ok(),
-        tool_calls: response
-            .tool_calls()
-            .into_iter()
-            .map(|call| {
-                fw::ToolCall::new(call.call_id.unwrap_or_default(), call.tool_name, call.input)
-            })
-            .collect(),
+        tool_calls,
         usage: fw::Usage {
             input_tokens: usage.input_tokens.into(),
             output_tokens: usage.output_tokens.into(),

@@ -12,13 +12,6 @@ use std::{
     time::Duration,
 };
 
-fn definition() -> WorkflowDefinition {
-    WorkflowDefinition {
-        id: "crash-fixture".into(),
-        version: 1,
-        stages: vec![WorkflowStage::new("execute")],
-    }
-}
 fn marker(path: &Path, value: &[u8]) {
     let mut file = std::fs::File::create(path).unwrap();
     file.write_all(value).unwrap();
@@ -85,44 +78,7 @@ async fn open(directory: &Path) -> Arc<SqliteStateStore> {
             .unwrap(),
     )
 }
-async fn agent(directory: &Path, mode: &str, store: Arc<SqliteStateStore>) -> Agent {
-    let builder = TestBuilder::default()
-        .plugin(ChatModelPlugin::new(CrashModel {
-            directory: directory.into(),
-            mode: mode.into(),
-        }))
-        .plugin(StateStorePlugin(store))
-        .plugin(AgentLoopPlugin::new(
-            WorkflowLoop::new(definition())
-                .unwrap()
-                .with_lease_duration(Duration::from_millis(200))
-                .unwrap(),
-        ));
-    if mode == "offline" {
-        builder
-            .plugin(ToolProviderPlugin::new("tools", OfflineTools))
-            .build()
-            .await
-            .unwrap()
-    } else {
-        builder
-            .plugin(ToolProviderPlugin::new(
-                "tools",
-                StaticToolProvider::new(vec![ToolBinding::new(
-                    ToolDescriptor::new(
-                        "effect",
-                        "effect",
-                        "crash fixture",
-                        json!({"type":"object"}),
-                    ),
-                    CrashTool(directory.into()),
-                )]),
-            ))
-            .build()
-            .await
-            .unwrap()
-    }
-}
+
 fn resume(id: RunId) -> RunRequest {
     let mut request = RunRequest::new("s", "");
     request.resume = Some(ResumeRequest {
@@ -200,151 +156,9 @@ async fn effect_survives_process_death_without_automatic_reexecution() {
     offline.close().await;
     store.close().await.unwrap();
 }
-async fn in_flight_model_reservation_survives_process_death() {
-    let dir = tempfile::tempdir().unwrap();
-    kill_at_boundary(dir.path(), "model").await;
-    let store = open(dir.path()).await;
-    let saved = store.latest("s").await.unwrap().unwrap();
-    let charged = saved.state["budget_usage"]["input_tokens"]
-        .as_u64()
-        .unwrap()
-        + saved.state["budget_usage"]["output_tokens"]
-            .as_u64()
-            .unwrap();
-    assert_eq!(charged, 512);
-    let executor = agent(dir.path(), "offline", store.clone()).await;
-    // For this nonterminal case use available tools, but a model which panics if
-    // called: the restored exhausted ledger must reject it before dispatch.
-    executor.framework().close().await;
-    let executor = TestBuilder::default()
-        .plugin(ChatModelPlugin::new(CrashModel {
-            directory: dir.path().into(),
-            mode: "offline".into(),
-        }))
-        .plugin(StateStorePlugin(store.clone()))
-        .plugin(AgentLoopPlugin::new(
-            WorkflowLoop::new(definition()).unwrap(),
-        ))
-        .build()
-        .await
-        .unwrap();
-    let error = executor.run(resume(saved.run_id)).await.unwrap_err();
-    assert!(error.to_string().contains("budget exhausted"), "{error}");
-    executor.framework().close().await;
-    store.close().await.unwrap();
-}
 
 struct JsonNode(PathBuf);
-#[async_trait]
-impl WorkflowNode for JsonNode {
-    fn kind(&self) -> &str {
-        "crash.json"
-    }
-    async fn execute(
-        &self,
-        _: WorkflowNodeInput,
-        _: &WorkflowNodeContext,
-        _: &AgentServices,
-    ) -> Result<WorkflowNodeResult, AgentError> {
-        // A completed predecessor must never execute again after process death.
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(self.0.join("json-node-effect"))
-            .unwrap();
-        file.write_all(b"one execution").unwrap();
-        file.sync_all().unwrap();
-        Ok(WorkflowNodeResult::completed(
-            json!({"nested":{"answer":42},"list":[1,2,3]}),
-        ))
-    }
-}
-async fn dag_agent(directory: &Path, mode: &str, store: Arc<SqliteStateStore>) -> Agent {
-    let graph = DagWorkflowDefinition {
-        id: "crash-dag".into(),
-        version: 1,
-        nodes: vec![
-            DagNode::new("json", "crash.json", Value::Null),
-            DagNode::react(WorkflowStage::new("react")),
-        ],
-        edges: vec![DagEdge::new("json", "react")],
-        max_parallel_nodes: 2,
-    };
-    TestBuilder::default()
-        .plugin(StateStorePlugin(store))
-        .plugin(ChatModelPlugin::new(CrashModel {
-            directory: directory.into(),
-            mode: mode.into(),
-        }))
-        .plugin(WorkflowNodePlugin::new("json", JsonNode(directory.into())))
-        .plugin(AgentLoopPlugin::new(
-            DagWorkflowLoop::new(graph)
-                .unwrap()
-                .with_lease_duration(Duration::from_millis(200))
-                .unwrap(),
-        ))
-        .plugin(ToolProviderPlugin::new(
-            "tools",
-            StaticToolProvider::new(vec![ToolBinding::new(
-                ToolDescriptor::new(
-                    "effect",
-                    "effect",
-                    "crash fixture",
-                    json!({"type":"object"}),
-                ),
-                CrashTool(directory.into()),
-            )]),
-        ))
-        .build()
-        .await
-        .unwrap()
-}
-async fn dag_process_crash_preserves_json_tools_and_budget(mode: &str) {
-    let dir = tempfile::tempdir().unwrap();
-    kill_at_boundary(dir.path(), &format!("dag-{mode}")).await;
-    let store = open(dir.path()).await;
-    let saved = store.latest("s").await.unwrap().unwrap();
-    let state: DagWorkflowState = serde_json::from_value(saved.state).unwrap();
-    assert_eq!(state.nodes["json"].status, WorkflowNodeStatus::Succeeded);
-    assert_eq!(
-        state.nodes["json"].result.as_ref().unwrap().value,
-        json!({"nested":{"answer":42},"list":[1,2,3]})
-    );
-    let executor = dag_agent(
-        dir.path(),
-        if mode == "model" { "offline" } else { "effect" },
-        store.clone(),
-    )
-    .await;
-    if mode == "effect" {
-        let error = executor.run(resume(saved.run_id)).await.unwrap_err();
-        assert!(
-            error.to_string().contains("tool execution was interrupted"),
-            "{error}"
-        );
-        assert_eq!(
-            store.load(saved.run_id).await.unwrap().status,
-            ExecutionStatus::Failed
-        );
-        assert!(matches!(
-            executor.run(resume(saved.run_id)).await,
-            Err(AgentError::Run(_))
-        ));
-        assert_eq!(
-            std::fs::read(dir.path().join("external-effect")).unwrap(),
-            b"exactly one effect"
-        );
-    } else {
-        assert_eq!(
-            state.budget_usage.input_tokens + state.budget_usage.output_tokens,
-            512
-        );
-        let error = executor.run(resume(saved.run_id)).await.unwrap_err();
-        assert!(error.to_string().contains("budget exhausted"), "{error}");
-    }
-    executor.framework().close().await;
-    store.close().await.unwrap();
-}
+
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args().collect();

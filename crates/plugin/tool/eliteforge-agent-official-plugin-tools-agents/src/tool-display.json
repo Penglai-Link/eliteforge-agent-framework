@@ -1,0 +1,211 @@
+{
+  "defaultLocale": "en-US",
+  "tools": {
+    "agent.get": {
+      "en-US": {
+        "name": "Agent Get",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "查看智能体",
+        "description": "查看当前目录中一个已授权智能体的详细配置。"
+      }
+    },
+    "agent.ask_caller": {
+      "en-US": {
+        "name": "Agent Ask Caller",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "询问上级智能体",
+        "description": "向分派当前任务的智能体请求信息或决定，回答后继续执行。"
+      }
+    },
+    "agent.spawn": {
+      "en-US": {
+        "name": "Agent Spawn",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "分派子任务",
+        "description": "将任务交给指定智能体，可等待结果或在后台运行。"
+      }
+    },
+    "child.answer": {
+      "en-US": {
+        "name": "Child Answer",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "回答子任务",
+        "description": "回答子任务中待处理的交互，从原检查点恢复运行。使用 agent_spawn 或 child_wait 返回的准确 interaction_id，并按 response_schema 提交 answer；保留原有 child_run_id 和会话。不要使用 child_send 回答已暂停的交互。"
+      }
+    },
+    "thread.answer": {
+      "en-US": {
+        "name": "Thread Answer",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "回答独立线程",
+        "description": "回答 thread_wait 返回的 AwaitingInput 交互，从原检查点恢复独立线程。使用准确的 interaction_id，并按 response_schema 提交 answer，保持 session_id 不变。不要使用 thread_send 回答已暂停的交互。"
+      }
+    },
+    "child.cancel": {
+      "en-US": {
+        "name": "Child Cancel",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "取消子任务",
+        "description": "请求取消一个独立运行的子任务；之后使用 child_wait 获取其最终状态。"
+      }
+    },
+    "thread.cancel": {
+      "en-US": {
+        "name": "Thread Cancel",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "取消独立线程",
+        "description": "取消独立线程。"
+      }
+    },
+    "child.list": {
+      "en-US": {
+        "name": "Child List",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "列出子任务",
+        "description": "列出由当前智能体身份启动且仍可访问的独立子运行，包括已完成但结果尚未领取的运行。"
+      }
+    },
+    "thread.list": {
+      "en-US": {
+        "name": "Thread List",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "列出独立线程",
+        "description": "列出当前智能体身份可访问的独立线程。"
+      }
+    },
+    "child.read": {
+      "en-US": {
+        "name": "Child Read",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "读取子任务",
+        "description": "读取一个独立子运行的摘要和最近消息。"
+      }
+    },
+    "thread.read": {
+      "en-US": {
+        "name": "Thread Read",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "读取独立线程",
+        "description": "读取独立线程的最近消息和状态。"
+      }
+    },
+    "child.send": {
+      "en-US": {
+        "name": "Child Send",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "发送消息给子任务",
+        "description": "向运行中的独立子任务排队发送一条指导消息；子任务在下一次接收指导时读取，本调用不返回任务结果。"
+      }
+    },
+    "thread.send": {
+      "en-US": {
+        "name": "Thread Send",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "发送消息给独立线程",
+        "description": "向现有独立线程发送新消息，并启动其下一次运行。"
+      }
+    },
+    "child.wait": {
+      "en-US": {
+        "name": "Child Wait",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "等待子任务",
+        "description": "等待 agent_spawn 创建的可恢复子运行。AwaitingInput 返回 interactions，包含交互标识、问题和回答格式；使用 child_answer 回答后再等待。Completed 才是最终完成结果。后台完成通常会收到通知，仅在需要结果时等待。"
+      }
+    },
+    "thread.wait": {
+      "en-US": {
+        "name": "Thread Wait",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "等待独立线程",
+        "description": "等待独立线程的一次运行并返回结果。AwaitingInput 的 interactions 包含交互标识、问题和回答格式；使用 thread_answer 回答后再等待。"
+      }
+    },
+    "child.create": {
+      "en-US": {
+        "name": "Child Create",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "创建子任务",
+        "description": "创建子任务。"
+      }
+    },
+    "thread.create": {
+      "en-US": {
+        "name": "Thread Create",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "创建独立线程",
+        "description": "为需要跨当前轮次持续运行、跨消息保留独立会话，或等待用户决策与通知的工作启动持久的独立智能体线程。工具立即返回；继续其他工作，在需要结果时使用 thread_wait。同一会话内的并行分派应改用 background=true 的 agent_spawn。"
+      }
+    },
+    "child.close": {
+      "en-US": {
+        "name": "Child Close",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "关闭子任务",
+        "description": "关闭子任务。"
+      }
+    },
+    "thread.close": {
+      "en-US": {
+        "name": "Thread Close",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "关闭独立线程",
+        "description": "关闭已完成或已暂停的独立线程，释放其进程内注册容量。"
+      }
+    }
+  },
+  "parameters": {
+    "en-US": {
+      "/properties/limit": "Maximum results",
+      "/properties/content": "File text",
+      "/properties/question": "Question to answer",
+      "/properties/task": "Task instructions",
+      "/properties/message": "Message text"
+    },
+    "zh-CN": {
+      "/properties/limit": "最多返回条数",
+      "/properties/content": "文件文本",
+      "/properties/question": "需要回答的问题",
+      "/properties/task": "任务说明",
+      "/properties/message": "消息内容"
+    }
+  }
+}

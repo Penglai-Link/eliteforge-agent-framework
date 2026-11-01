@@ -29,9 +29,6 @@ impl Plugin for DefaultsPlugin {
         self.after.clone()
     }
     async fn install(&self, context: &mut PluginContext<'_>) -> Result<(), PluginError> {
-        let react_node: Arc<dyn WorkflowNode> = Arc::new(ReactWorkflowNode);
-        context.contribute(WorkflowNodeService(react_node.clone()))?;
-        context.contribute_extension(react_node)?;
         if !context.services().contains::<LoopService>() {
             let agent_loop: Arc<dyn AgentLoop> = Arc::new(crate::react::ReactAgentLoop);
             context.contribute(LoopService(agent_loop.clone()))?;

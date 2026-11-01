@@ -152,13 +152,6 @@ async fn build(State(host): State<Arc<Host>>, Json(input): Json<Build>) -> ApiRe
                     .map(str::to_owned)
                     .collect(),
             ),
-            workflow_nodes: Some(
-                registry
-                    .providers::<WorkflowNodeService>()
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect(),
-            ),
             ..Default::default()
         })
     })();

@@ -181,10 +181,15 @@ impl SystemCommandConfig {
         self.shell.is_some()
     }
 
+    pub(crate) fn configured_shell(&self) -> Option<&std::path::Path> {
+        self.shell.as_deref()
+    }
+
     pub(crate) fn invocation(
         &self,
         command: String,
         args: Option<Vec<String>>,
+        interactive: bool,
     ) -> Result<(String, Vec<String>), ToolError> {
         match (&self.shell, args) {
             (Some(shell), None) => {
@@ -196,7 +201,15 @@ impl SystemCommandConfig {
                 let shell = shell
                     .to_str()
                     .ok_or_else(|| ToolError::Failed("shell path is not UTF-8".into()))?;
-                Ok((shell.into(), vec!["-lc".into(), command]))
+                Ok((
+                    shell.into(),
+                    crate::command_shell::arguments(
+                        std::path::Path::new(shell),
+                        command,
+                        true,
+                        interactive,
+                    ),
+                ))
             }
             (_, args) => Ok((command, args.unwrap_or_default())),
         }
@@ -232,14 +245,11 @@ impl SystemCommandConfig {
         }
         let (program, args) = match args {
             Some(args) => (command, args),
-            #[cfg(windows)]
-            None => ("cmd".into(), vec!["/C".into(), command]),
-            #[cfg(not(windows))]
             None => {
                 let shell = self.interactive_shell()?;
                 (
                     shell.to_string_lossy().into_owned(),
-                    vec!["-c".into(), command],
+                    crate::command_shell::arguments(&shell, command, false, true),
                 )
             }
         };

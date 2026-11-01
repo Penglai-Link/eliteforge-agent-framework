@@ -143,7 +143,6 @@ async fn page_and_batch_queries_do_not_scale_with_rows() {
         .map(|_| InteractionRecord {
             session_id: "owner".into(),
             run_id: ids[0],
-            node_invocation_id: None,
             request: InteractionRequest::input("Choose", serde_json::json!({"type":"string"}))
                 .unwrap(),
             tool_call: None,

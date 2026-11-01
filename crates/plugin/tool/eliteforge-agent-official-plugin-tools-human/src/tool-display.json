@@ -1,0 +1,27 @@
+{
+  "defaultLocale": "en-US",
+  "tools": {
+    "human.ask_user": {
+      "en-US": {
+        "name": "Human Ask",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "询问用户",
+        "description": "向用户提出问题并等待回答。"
+      }
+    }
+  },
+  "parameters": {
+    "en-US": {
+      "/properties/pattern": "Search expression",
+      "/properties/question": "Question to answer",
+      "/properties/text": "Text content"
+    },
+    "zh-CN": {
+      "/properties/pattern": "搜索表达式",
+      "/properties/question": "需要回答的问题",
+      "/properties/text": "文本内容"
+    }
+  }
+}

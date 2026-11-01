@@ -128,6 +128,12 @@ pub struct Message {
     #[serde(default)]
     pub annotations: Vec<crate::MessageAnnotation>,
     pub role: Role,
+    /// Provider-supplied assistant message phase; absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Assistant messages produced by the same model response share this ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_group_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_origin: Option<InstructionOrigin>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -149,6 +155,8 @@ impl Message {
     pub fn new(role: Role, content: impl Into<crate::Content>) -> Self {
         Self {
             role,
+            phase: None,
+            output_group_id: None,
             instruction_origin: None,
             annotations: Vec::new(),
             provenance: None,
@@ -189,6 +197,8 @@ impl Message {
     pub fn tool(call_id: impl Into<String>, content: impl Into<crate::Content>) -> Self {
         Self {
             role: Role::Tool,
+            phase: None,
+            output_group_id: None,
             instruction_origin: None,
             annotations: Vec::new(),
             provenance: None,
@@ -263,6 +273,9 @@ pub struct ToolDescriptor {
     pub call_name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Human-facing plugin resources; excluded from model function projections.
+    #[serde(default)]
+    pub display: Option<crate::ToolDisplayMetadata>,
     /// A declaration, not a guarantee that the executor cannot modify data.
     #[serde(default)]
     pub operation_kind: ToolOperationKind,
@@ -284,6 +297,7 @@ impl ToolDescriptor {
             call_name: call_name.into(),
             description: description.into(),
             input_schema,
+            display: None,
             operation_kind: ToolOperationKind::Unknown,
             timeout_scope: ToolTimeoutScope::Tool,
             input_mode: ToolInputMode::Batch,
@@ -315,9 +329,25 @@ pub struct ChatRequest {
     pub extensions: Extensions,
 }
 
+/// A provider output item retains its position within one model invocation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ModelOutputItem {
+    Message { output_index: usize, item_id: Option<String>, phase: Option<String>, content: crate::Content },
+    ReasoningSummary { output_index: usize, text: String },
+    ToolCall { output_index: usize, call: ToolCall },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ModelDisposition { Final, ToolCalls, Continue }
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub content: crate::Content,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_items: Vec<ModelOutputItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<ModelDisposition>,
     /// Explicit public projection when a host's lossless content contains
     /// internal protocol wrappers. History never reads model_context.
     #[serde(default)]
@@ -341,6 +371,94 @@ pub struct ProviderMetrics {
 }
 
 impl ChatResponse {
+    /// Normalize segmented provider output once at the shared model boundary.
+    /// Legacy responses without output items keep their existing projection.
+    pub fn normalize_output_items(&mut self) -> Result<(), crate::ModelError> {
+        if self.output_items.is_empty() { return Ok(()); }
+        let index = |item: &ModelOutputItem| match item {
+            ModelOutputItem::Message { output_index, .. }
+            | ModelOutputItem::ReasoningSummary { output_index, .. }
+            | ModelOutputItem::ToolCall { output_index, .. } => *output_index,
+        };
+        self.output_items.sort_by_key(index);
+        if self.output_items.windows(2).any(|pair| index(&pair[0]) == index(&pair[1])) {
+            return Err(crate::ModelError::Fatal("duplicate model output index".into()));
+        }
+        let item_calls: Vec<_> = self.output_items.iter().filter_map(|item| match item {
+            ModelOutputItem::ToolCall { call, .. } => Some(call.clone()),
+            _ => None,
+        }).collect();
+        if self.tool_calls.is_empty() {
+            self.tool_calls = item_calls.clone();
+        } else if !item_calls.is_empty() && item_calls.len() != self.tool_calls.len() {
+            return Err(crate::ModelError::Fatal("model output tool count changed".into()));
+        }
+        let mut calls = self.tool_calls.iter();
+        for item in &mut self.output_items {
+            if let ModelOutputItem::ToolCall { call, .. } = item && let Some(normalized) = calls.next() {
+                *call = normalized.clone();
+            }
+        }
+        let has_content = |content: &crate::Content| content.0.iter().any(|block| match block {
+            crate::ContentBlock::Text { text } => !text.trim().is_empty(),
+            _ => true,
+        });
+        let explicit_final = self.output_items.iter().any(|item| matches!(item,
+            ModelOutputItem::Message { phase: Some(phase), content, .. } if phase == "final_answer" && has_content(content)));
+        let mut content = crate::Content::default();
+        let mut selected = 0usize;
+        let mut commentary = false;
+        let mut other_message = false;
+        for item in &self.output_items {
+            if let ModelOutputItem::Message { phase, content: item_content, .. } = item && has_content(item_content) {
+                commentary |= phase.as_deref() == Some("commentary");
+                other_message |= phase.as_deref() != Some("commentary");
+                if phase.as_deref() == Some("final_answer") || (!explicit_final && phase.is_none()) {
+                    if selected > 0 { content.0.push(crate::ContentBlock::Text { text: "\n\n".into() }); }
+                    content.0.extend(item_content.0.clone());
+                    selected += 1;
+                }
+            }
+        }
+        self.content = content.clone();
+        self.public_content = Some(content);
+        self.disposition = Some(if !self.tool_calls.is_empty() {
+            ModelDisposition::ToolCalls
+        } else if commentary && !other_message {
+            ModelDisposition::Continue
+        } else {
+            ModelDisposition::Final
+        });
+        Ok(())
+    }
+
+    /// Materialize the provider's message and tool-call items in their original
+    /// order. Tool results are appended after the whole response is executed.
+    pub fn assistant_messages(&self) -> Vec<Message> {
+        let mut messages = Vec::<Message>::new();
+        let mut calls = self.tool_calls.iter();
+        for item in &self.output_items {
+            match item {
+                ModelOutputItem::Message { phase, content, .. } => {
+                    let mut message = Message::assistant(content.clone());
+                    message.phase = phase.clone();
+                    messages.push(message);
+                }
+                ModelOutputItem::ToolCall { .. } => {
+                    if messages.is_empty() { messages.push(Message::assistant(crate::Content::default())); }
+                    if let Some(call) = calls.next() { messages.last_mut().unwrap().tool_calls.push(call.clone()); }
+                }
+                ModelOutputItem::ReasoningSummary { .. } => {}
+            }
+        }
+        if messages.is_empty() { messages.push(Message::assistant(self.content.clone())); }
+        if let Some(last) = messages.last_mut() {
+            last.tool_calls.extend(calls.cloned());
+            last.structured = self.structured.clone();
+            last.model_context = self.model_context.clone();
+        }
+        messages
+    }
     /// Preserve existing provider continuation and the summary's structured
     /// schema. A non-object opaque context cannot carry these optional metrics.
     pub fn with_provider_metrics(mut self, metrics: ProviderMetrics) -> Self {
@@ -614,6 +732,9 @@ pub enum ToolBatchBudgetPolicy {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunLimits {
     pub max_steps: usize,
+    /// Additional model calls after a response consisting only of commentary.
+    #[serde(default = "default_phase_continuations")]
+    pub max_phase_continuations: usize,
     pub max_tool_calls: usize,
     #[serde(default)]
     pub tool_batch_budget_policy: ToolBatchBudgetPolicy,
@@ -651,6 +772,7 @@ impl Default for RunLimits {
     fn default() -> Self {
         Self {
             max_steps: 20,
+            max_phase_continuations: default_phase_continuations(),
             max_tool_calls: 50,
             tool_batch_budget_policy: ToolBatchBudgetPolicy::default(),
             allow_unexposed_tools: false,
@@ -675,6 +797,7 @@ impl Default for RunLimits {
 fn default_child_runs() -> usize {
     32
 }
+fn default_phase_continuations() -> usize { 2 }
 fn default_child_depth() -> usize {
     8
 }
@@ -736,7 +859,11 @@ pub struct RunRequest {
     pub agent_code: Option<String>,
     /// Requested child working directory. The host resolves relative paths against
     /// the caller's directory and validates its existing filesystem authority.
-    #[serde(default, rename = "workingDirectory", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "workingDirectory",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub working_directory: Option<String>,
     /// Host admission identity, shared by control, events and durable run records.
     #[serde(default)]
@@ -829,10 +956,6 @@ pub enum AgentEvent {
         phase: crate::RunLifecyclePhase,
         failure: crate::LifecycleHookFailure,
     },
-    WorkflowNodeChanged {
-        node_id: String,
-        status: crate::WorkflowNodeStatus,
-    },
     Collaboration(Box<crate::CollaborationEvent>),
     ModelSelected {
         stage: String,
@@ -888,8 +1011,6 @@ pub struct EventEnvelope {
     pub run_id: RunId,
     pub session_id: String,
     /// Execution identity for parallel node streams. Absent for run-wide events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_execution: Option<crate::WorkflowNodeExecution>,
     pub event: AgentEvent,
 }
 
@@ -913,6 +1034,12 @@ pub struct RunLineage {
 pub trait ChatStream: Send + Sync {
     async fn text_delta(&self, text: &str);
     async fn reasoning_delta(&self, text: &str);
+    /// Message item lifecycle; providers without item boundaries use text_delta.
+    async fn message_start(&self, _index: usize, _phase: Option<&str>) {}
+    async fn message_delta(&self, _index: usize, text: &str) { self.text_delta(text).await; }
+    async fn message_end(&self, _index: usize, _phase: Option<&str>, _text: &str) {}
+    /// Marks a provider tool item before later messages in the same response.
+    async fn tool_boundary(&self, _index: usize) {}
 }
 
 #[async_trait]
@@ -1048,6 +1175,90 @@ pub trait Tool: Send + Sync {
     async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError>;
 }
 
+/// Provider-declared catalog grouping. This metadata is kept apart from the
+/// model-facing tool descriptor and does not grant execution authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCategory {
+    /// Stable, globally scoped category identity.
+    pub code: String,
+    /// Localized display names keyed by locale, for example `zh-CN`.
+    pub names: std::collections::BTreeMap<String, String>,
+}
+
+impl ToolCategory {
+    pub fn new(code: impl Into<String>, names: std::collections::BTreeMap<String, String>) -> Self {
+        Self {
+            code: code.into(),
+            names,
+        }
+    }
+    pub fn localized(
+        code: impl Into<String>,
+        zh: impl Into<String>,
+        en: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            code,
+            [("zh-CN".into(), zh.into()), ("en-US".into(), en.into())]
+                .into_iter()
+                .collect(),
+        )
+    }
+}
+
+/// Provenance attached by the host and registration machinery, not by the model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolSource {
+    pub provider_id: Option<String>,
+    pub plugin_id: Option<String>,
+    pub pack_id: Option<String>,
+    pub adapter_id: Option<String>,
+}
+
+/// Read-only catalog metadata, independent of an executable tool lease.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCatalogEntry {
+    pub descriptor: ToolDescriptor,
+    pub domain_code: Option<String>,
+    pub category: Option<ToolCategory>,
+}
+
+#[cfg(test)]
+mod tool_category_tests {
+    use super::*;
+
+    #[test]
+    fn category_round_trips_without_changing_model_descriptor() {
+        let category = ToolCategory::new(
+            "example.documents",
+            [
+                ("zh-CN".into(), "文档工具".into()),
+                ("en-US".into(), "Documents".into()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let encoded = serde_json::to_value(&category).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ToolCategory>(encoded).unwrap(),
+            category
+        );
+        let descriptor = ToolDescriptor::new(
+            "example.read",
+            "example_read",
+            "Read",
+            serde_json::json!({}),
+        );
+        assert!(
+            serde_json::to_value(descriptor)
+                .unwrap()
+                .get("category")
+                .is_none()
+        );
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolBinding {
     pub descriptor: ToolDescriptor,
@@ -1060,6 +1271,10 @@ pub struct ToolBinding {
     /// into their instructions. Purely descriptive discovery metadata: it never
     /// affects admission, policy or exposure.
     pub domain_code: Option<String>,
+    /// Optional business category declared by the tool provider.
+    pub category: Option<ToolCategory>,
+    /// Actual provider and registration provenance, when known.
+    pub source: ToolSource,
 }
 
 impl ToolBinding {
@@ -1070,6 +1285,8 @@ impl ToolBinding {
             exposed: true,
             parallel_safe: false,
             domain_code: None,
+            category: None,
+            source: ToolSource::default(),
         }
     }
     /// Label this binding with its capability group so `tool_search` can list
@@ -1077,6 +1294,21 @@ impl ToolBinding {
     pub fn with_domain_code(mut self, domain_code: impl Into<String>) -> Self {
         self.domain_code = Some(domain_code.into());
         self
+    }
+    pub fn with_category(mut self, category: ToolCategory) -> Self {
+        self.category = Some(category);
+        self
+    }
+    pub fn with_source(mut self, source: ToolSource) -> Self {
+        self.source = source;
+        self
+    }
+    pub fn catalog_entry(&self) -> ToolCatalogEntry {
+        ToolCatalogEntry {
+            descriptor: self.descriptor.clone(),
+            domain_code: self.domain_code.clone(),
+            category: self.category.clone(),
+        }
     }
     pub fn hidden(mut self) -> Self {
         self.exposed = false;
@@ -1131,6 +1363,23 @@ pub trait ToolProvider: Send + Sync {
     fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
         None
     }
+    /// Static management inventory. Dynamic providers return None and are
+    /// catalogued from actual leases; this never authorizes execution or adds
+    /// category metadata to model-facing tool descriptors. Providers may
+    /// declare a category per entry or binding; hosts assign provenance from
+    /// their registration context. `StaticToolProvider` projects its bindings.
+    fn catalog_metadata(&self) -> Option<Vec<ToolCatalogEntry>> {
+        self.descriptors().map(|descriptors| {
+            descriptors
+                .into_iter()
+                .map(|descriptor| ToolCatalogEntry {
+                    descriptor,
+                    domain_code: None,
+                    category: None,
+                })
+                .collect()
+        })
+    }
     async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError>;
 }
 
@@ -1142,8 +1391,6 @@ pub struct AgentServices {
     pub operations: Arc<dyn crate::ModelOperations>,
     pub interactions: Option<crate::InteractionManager>,
     pub lifecycle_hooks: Vec<Arc<dyn crate::RunLifecycleHook>>,
-    pub node_middleware: Vec<Arc<dyn crate::WorkflowNodeMiddleware>>,
-    pub workflow_nodes: crate::WorkflowNodeRegistry,
     pub models: Option<Arc<dyn crate::ChatExecutor>>,
     pub tool_invoker: Arc<crate::ToolInvoker>,
     pub run_middleware: Vec<Arc<dyn crate::RunMiddleware>>,
@@ -1187,8 +1434,6 @@ pub struct RunContext {
     pub model: Option<crate::ModelRef>,
     #[doc(hidden)]
     pub limits: RunLimits,
-    #[doc(hidden)]
-    pub node_execution: Option<crate::WorkflowNodeExecution>,
     #[doc(hidden)]
     pub execution_counters: Option<Arc<crate::budget::ExecutionCounters>>,
     #[doc(hidden)]
@@ -1312,9 +1557,6 @@ impl RunContext {
     }
 
     /// Durable node invocation and the current attempt. Absent outside a node.
-    pub fn node_execution(&self) -> Option<&crate::WorkflowNodeExecution> {
-        self.node_execution.as_ref()
-    }
     pub fn is_tool_revoked(&self, id: &str) -> bool {
         self.revoked_tools
             .lock()
@@ -1493,7 +1735,6 @@ impl RunContext {
                 .min(u64::MAX as u128) as u64,
             run_id: self.run_id,
             session_id: self.session_id.clone(),
-            node_execution: self.node_execution().cloned(),
             event,
         }
     }

@@ -491,7 +491,14 @@ async fn plugin_exposes_metadata_then_loads_skill_and_resource_on_demand() {
             .iter()
             .all(|message| !message.contains("Write concise release notes."))
     );
-    assert_eq!(context.tools, vec!["skill_load", "skill_read_resource"]);
+    assert_eq!(
+        context.tools,
+        vec!["skill_diagnostics", "skill_load", "skill_read_resource"]
+    );
+
+    let healthy = run_probe(plugin.clone(), ProbeAction::Diagnostics).await;
+    assert!(healthy.errors.is_empty());
+    assert_eq!(healthy.values[0]["diagnostics"], json!([]));
 
     let loaded = run_probe(
         plugin.clone(),
@@ -614,7 +621,14 @@ async fn plugin_enforces_selection_and_resource_paths() {
             .iter()
             .all(|message| !message.contains("<available_skills>"))
     );
-    assert!(no_skills.tools.is_empty());
+    assert_eq!(no_skills.tools, vec!["skill_diagnostics"]);
+    let empty_diagnostics = run_probe(
+        SkillsPlugin::filesystem(skills_config(&system, &local)).only_skills(Vec::<String>::new()),
+        ProbeAction::Diagnostics,
+    )
+    .await;
+    assert!(empty_diagnostics.errors.is_empty());
+    assert_eq!(empty_diagnostics.values[0]["diagnostics"], json!([]));
 }
 
 #[tokio::test]

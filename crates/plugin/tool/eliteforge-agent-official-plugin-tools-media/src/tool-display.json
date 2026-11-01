@@ -1,0 +1,39 @@
+{
+  "defaultLocale": "en-US",
+  "tools": {
+    "media.read_image": {
+      "en-US": {
+        "name": "Media Read Image",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "读取图片",
+        "description": "读取授权范围内的本地图片或附件，返回图片内容。"
+      }
+    },
+    "media.read_pdf": {
+      "en-US": {
+        "name": "Media Read Pdf",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "读取 PDF",
+        "description": "读取授权范围内 PDF 的指定页面，返回文字和页码。"
+      }
+    }
+  },
+  "parameters": {
+    "en-US": {
+      "/properties/path": "File path",
+      "/properties/fileRef": "Authorized file reference",
+      "/properties/pages": "Page numbers",
+      "/properties/text": "Text content"
+    },
+    "zh-CN": {
+      "/properties/path": "文件路径",
+      "/properties/fileRef": "已授权的文件或附件引用",
+      "/properties/pages": "页码列表",
+      "/properties/text": "文本内容"
+    }
+  }
+}

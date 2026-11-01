@@ -33,6 +33,7 @@ pub(crate) fn read_only_bindings(filesystem: FileSystemRoot) -> Vec<ToolBinding>
         ),
     ]
     .into_iter()
+    .map(|tool| tool.with_domain_code("fs"))
     .chain(crate::search::bindings(filesystem))
     .collect()
 }
@@ -52,7 +53,7 @@ pub(crate) fn write_bindings(filesystem: FileSystemRoot) -> Vec<ToolBinding> {
             },
         ),
         edits::binding(filesystem),
-    ]
+    ].into_iter().map(|tool| tool.with_domain_code("fs")).collect()
 }
 
 pub(crate) fn system_command_bindings(
@@ -64,7 +65,10 @@ pub(crate) fn system_command_bindings(
             {
                 let mut descriptor = system_command_descriptor();
                 if config.uses_shell() {
-                    descriptor.description.push_str(" Host shell mode: omitting args executes command as a shell string; supplying args, even [], executes literal argv.");
+                    descriptor.description.push_str(" Host shell mode: omitting args executes command as a shell string; supplying args, even [], executes literal argv. Use the host shell's syntax; commands are not translated between operating systems.");
+                    if let Some(shell) = config.configured_shell() {
+                        descriptor.description.push_str(&format!(" Host OS: {}; shell: {}.", std::env::consts::OS, shell.display()));
+                    }
                 }
                 descriptor
             },
@@ -100,7 +104,7 @@ pub(crate) fn system_command_bindings(
             SystemCommandListTool { tasks, config },
         )
         .parallel_safe(),
-    ]
+    ].into_iter().map(|tool| tool.with_domain_code("command")).collect()
 }
 
 fn read_text_descriptor() -> ToolDescriptor {
@@ -118,7 +122,7 @@ fn read_text_descriptor() -> ToolDescriptor {
                 "maxBytes":{"type":"integer", "minimum":1}
             }
         }),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn list_descriptor() -> ToolDescriptor {
@@ -138,7 +142,7 @@ fn list_descriptor() -> ToolDescriptor {
                 "maxResults":{"type":"integer", "minimum":1}
             }
         }),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn stat_descriptor() -> ToolDescriptor {
@@ -150,7 +154,7 @@ fn stat_descriptor() -> ToolDescriptor {
             "type":"object", "additionalProperties":false, "required":["path"],
             "properties": { "path":{"type":"string", "minLength":1}, "followSymlink":{"type":"boolean"} }
         }),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn write_text_descriptor() -> ToolDescriptor {
@@ -168,7 +172,7 @@ fn write_text_descriptor() -> ToolDescriptor {
                 "expectedVersion":{"type":"string", "minLength":1}
             }
         }),
-    )
+    ).with_display_resource(include_str!("tool-display.json"))
     .with_single_input()
     .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
@@ -197,14 +201,14 @@ fn patch_descriptor() -> ToolDescriptor {
                 "expectedVersion":{"type":"string", "minLength":1}
             }
         }),
-    ).with_single_input().with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    ).with_display_resource(include_str!("tool-display.json")).with_single_input().with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "system.command.exec",
-        "system_exec",
-        "Run an executable with literal arguments. If it is still running after 10 seconds, return its taskId and captured output. Use system_exec_task_read to check status and read more output, or system_exec_task_stop to stop it. The Agent configuration can restrict executable names. This is not a sandbox.",
+        "command_exec",
+        "Run an executable with literal arguments. If it is still running after 10 seconds, return its taskId and captured output. Use command_exec_read to check status and read more output, or command_exec_stop to stop it. The Agent configuration can restrict executable names. This is not a sandbox.",
         json!({
             "type":"object", "additionalProperties":false, "required":["command"],
             "properties": {
@@ -212,20 +216,20 @@ fn system_command_descriptor() -> ToolDescriptor {
                 "args":{"type":"array", "items":{"type":"string"}},
                 "cwd":{"type":"string", "minLength":1},
                 "stdin":{"type":"string", "maxLength":65536},
-                "interactive":{"type":"boolean", "description":"Keep stdin open for system_exec_task_write."},
+                "interactive":{"type":"boolean", "description":"Keep stdin open for command_exec_write."},
                 "tty":{"type":"boolean", "description":"Use a PTY; implies interactive input and combines stdout/stderr into stdout."},
                 "rows":{"type":"integer", "minimum":1, "maximum":1000},
                 "cols":{"type":"integer", "minimum":1, "maximum":1000},
                 "env":{"type":"object", "additionalProperties":{"type":"string"}}
             }
         }),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_task_read_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "system.command.task.read",
-        "system_exec_task_read",
+        "command_exec_read",
         "Read a command task's status and the next stdout/stderr bytes using the returned cursors. A short waitMs can wait for more output. Tasks are available only in the session that started them.",
         json!({
             "type":"object", "additionalProperties":false, "required":["taskId"],
@@ -237,13 +241,13 @@ fn system_command_task_read_descriptor() -> ToolDescriptor {
                 "maxBytes":{"type":"integer", "minimum":1, "maximum":65536}
             }
         }),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn system_command_task_stop_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "system.command.task.stop",
-        "system_exec_task_stop",
+        "command_exec_stop",
         "Stop a running command task from this session and return its status and the next stdout/stderr bytes. Pass the cursors returned by the last read to continue from there.",
         json!({
             "type":"object", "additionalProperties":false, "required":["taskId"],
@@ -254,31 +258,31 @@ fn system_command_task_stop_descriptor() -> ToolDescriptor {
                 "maxBytes":{"type":"integer", "minimum":1, "maximum":65536}
             }
         }),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_task_write_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "system.command.task.write",
-        "system_exec_task_write",
+        "command_exec_write",
         "Write stdin to an interactive command from this session. closeStdin sends EOF after the data. Input may be partially delivered on failure; read command output before retrying.",
         json!({"type":"object", "additionalProperties":false, "required":["taskId"], "properties":{
             "taskId":{"type":"string", "minLength":1}, "data":{"type":"string", "maxLength":65536},
             "closeStdin":{"type":"boolean"}, "stdoutCursor":{"type":"integer", "minimum":0},
             "stderrCursor":{"type":"integer", "minimum":0}, "waitMs":{"type":"integer", "minimum":0, "maximum":10000}
         }}),
-    ).with_single_input().with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+    ).with_display_resource(include_str!("tool-display.json")).with_single_input().with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
 }
 
 fn system_command_list_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "system.command.list",
-        "system_exec_list",
+        "command_exec_list",
         "Read the command inventory (命令清单) for this session, including command IDs and status. Completed records are optional and bounded by the Agent retention limit.",
         json!({"type":"object", "additionalProperties":false, "properties":{
             "includeCompleted":{"type":"boolean"}
         }}),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 #[derive(Clone)]
@@ -876,7 +880,9 @@ impl Tool for SystemCommandTool {
         if command.is_empty() {
             return Err(ToolError::Failed("command is required".into()));
         }
-        let (command, args) = self.config.invocation(command, input.args)?;
+        let (command, args) =
+            self.config
+                .invocation(command, input.args, input.interactive || input.tty)?;
         if !self.config.allows(&command) {
             return Err(ToolError::Failed(format!(
                 "command `{command}` is not permitted by this Agent configuration"

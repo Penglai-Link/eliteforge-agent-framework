@@ -167,5 +167,5 @@ flowchart LR
     end
     Bridge <-->|RPC| Backend[外部能力包后端进程]
     Native -->|按配置启动| MCP[MCP stdio 服务进程]
-    Native -->|调用 system_exec| Command[命令任务进程]
+    Native -->|调用 command_exec| Command[命令任务进程]
 ```

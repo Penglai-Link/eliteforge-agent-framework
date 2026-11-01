@@ -129,6 +129,125 @@ fn request() -> ModelRequest {
         previous_response_id: None,
     }
 }
+
+#[tokio::test]
+async fn responses_sse_preserves_message_boundaries_and_late_phase() {
+    let commentary = json!({"type":"message","id":"m1","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking"}]});
+    let final_answer = json!({"type":"message","id":"m2","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Done"}]});
+    let frames = vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m1","role":"assistant"}}),
+        json!({"type":"response.output_text.delta","output_index":0,"item_id":"m1","delta":"Checking"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":commentary}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"m2","role":"assistant","phase":"final_answer"}}),
+        json!({"type":"response.output_text.delta","output_index":1,"item_id":"m2","delta":"Done"}),
+        json!({"type":"response.output_item.done","output_index":1,"item":final_answer}),
+        json!({"type":"response.completed","response":{"id":"resp-1","status":"completed","output":[commentary,final_answer]}}),
+    ];
+    let body = frames.into_iter().map(|frame| format!("data: {frame}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+    let non_stream = json!({"id":"resp-1","status":"completed","output":[commentary,final_answer]}).to_string();
+    let server = server(vec![("text/event-stream", body), ("application/json", non_stream)]).await;
+    let config = config(AgentModelProtocol::Responses, &server.url);
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let captured = observed.clone();
+    let result = client(&config).generate_stream(&config, &request(), Arc::new(move |event| captured.lock().unwrap().push(event))).await.unwrap();
+    let non_stream = client(&config).generate(&config, &request()).await.unwrap();
+    assert_eq!(result.output_text(), "Done");
+    assert_eq!(result.output_items.len(), 2);
+    assert_eq!(result.output_items, non_stream.output_items);
+    let events = observed.lock().unwrap();
+    assert_eq!(events.iter().filter(|event| event.kind == ModelStreamEventKind::MessageStart).count(), 2);
+    let done = events.iter().find(|event| event.kind == ModelStreamEventKind::MessageEnd && event.output_index == Some(0)).unwrap();
+    assert_eq!(done.phase.as_deref(), Some("commentary"));
+    assert_eq!(done.delta, "Checking");
+    assert_eq!(events.iter().filter(|event| event.kind == ModelStreamEventKind::Text).map(|event| event.delta.as_str()).collect::<String>(), "CheckingDone");
+}
+
+#[tokio::test]
+async fn responses_sse_correlates_item_ids_and_rejects_conflicting_identity() {
+    let message = json!({"type":"message","id":"m1","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Done"}]});
+    for conflicting in [false, true] {
+        let frames = vec![
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"m1"}}),
+            json!({"type":"response.output_text.delta","item_id":if conflicting { "other" } else { "m1" },"output_index":if conflicting { Some(0) } else { None },"delta":"Done"}),
+            json!({"type":"response.completed","response":{"id":"resp","output":[message]}}),
+        ];
+        let body = frames.into_iter().map(|frame| format!("data: {frame}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+        let server = server(vec![("text/event-stream", body)]).await;
+        let config = config(AgentModelProtocol::Responses, &server.url);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let captured = observed.clone();
+        let result = client(&config).generate_stream(&config, &request(), Arc::new(move |event| captured.lock().unwrap().push(event))).await;
+        if conflicting {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().output_text(), "Done");
+            let events = observed.lock().unwrap();
+            assert_eq!(events.iter().find(|event| event.kind == ModelStreamEventKind::Text).unwrap().output_index, Some(0));
+        }
+    }
+}
+
+#[tokio::test]
+async fn responses_sse_reports_a_tool_boundary_between_message_items() {
+    let before = json!({"type":"message","id":"before","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking"}]});
+    let call = json!({"type":"function_call","id":"fc1","call_id":"call1","name":"lookup","arguments":"{\"key\":\"x\"}"});
+    let after = json!({"type":"message","id":"after","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Done"}]});
+    let frames = vec![
+        json!({"type":"response.output_item.added","output_index":0,"item":before}),
+        json!({"type":"response.output_item.done","output_index":0,"item":before}),
+        json!({"type":"response.output_item.added","output_index":1,"item":call}),
+        json!({"type":"response.output_item.done","output_index":1,"item":call}),
+        json!({"type":"response.output_item.added","output_index":2,"item":after}),
+        json!({"type":"response.output_item.done","output_index":2,"item":after}),
+        json!({"type":"response.completed","response":{"id":"resp","output":[before,call,after]}}),
+    ];
+    let body = frames.into_iter().map(|frame| format!("data: {frame}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+    let server = server(vec![("text/event-stream", body)]).await;
+    let config = config(AgentModelProtocol::Responses, &server.url);
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let captured = observed.clone();
+    let result = client(&config).generate_stream(&config, &request(), Arc::new(move |event| captured.lock().unwrap().push(event))).await.unwrap();
+    assert_eq!(result.finish, ModelFinish::ToolCalls);
+    let events = observed.lock().unwrap();
+    let boundary = events.iter().position(|event| event.kind == ModelStreamEventKind::ToolBoundary && event.output_index == Some(1)).unwrap();
+    let after = events.iter().position(|event| event.kind == ModelStreamEventKind::MessageStart && event.output_index == Some(2)).unwrap();
+    assert!(boundary < after);
+}
+
+#[tokio::test]
+async fn responses_unindexed_legacy_stream_keeps_one_aggregate_message() {
+    let message = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]});
+    let frames = vec![
+        json!({"type":"response.output_text.delta","delta":"Done"}),
+        json!({"type":"response.completed","response":{"id":"resp","output":[message]}}),
+    ];
+    let body = frames.into_iter().map(|frame| format!("data: {frame}\n\n")).collect::<String>() + "data: [DONE]\n\n";
+    let server = server(vec![("text/event-stream", body)]).await;
+    let config = config(AgentModelProtocol::Responses, &server.url);
+    let result = client(&config).generate_stream(&config, &request(), Arc::new(|_| {})).await.unwrap();
+    assert!(result.output_items.is_empty());
+    assert_eq!(result.output_text(), "Done");
+}
+
+#[test]
+fn ordered_assistant_segments_keep_tool_results_during_sdk_round_trip() {
+    let mut before = AgentMessage::assistant("Checking");
+    before.phase = Some("commentary".into());
+    before.output_group_id = Some("step-1".into());
+    before.parts.extend(AgentMessage::assistant_tool_calls(vec![(Some("call-1".into()), "lookup".into(), json!({"key":"x"}))]).parts);
+    let mut after = AgentMessage::assistant("Waiting for result");
+    after.phase = Some("commentary".into());
+    after.output_group_id = Some("step-1".into());
+    let mut input = request();
+    input.messages = vec![AgentMessage::user("Hello"), before, after, AgentMessage::tool_result("lookup", Some("call-1".into()), "found")];
+    let native = request_to_framework(input).unwrap();
+    eliteforge_agent_core::validate_messages(&native.messages).unwrap();
+    let replay = request_from_framework(&native).unwrap();
+    assert_eq!(replay.messages.len(), 4);
+    assert_eq!(replay.messages[1].phase.as_deref(), Some("commentary"));
+    assert_eq!(replay.messages[2].plain_text_content(), "Waiting for result");
+    assert!(matches!(&replay.messages[3].parts[0], AgentMessagePart::ToolResult { call_id: Some(id), output, .. } if id == "call-1" && output == "found"));
+}
 fn anthropic(events: &[(&str, Value)]) -> (&'static str, String) {
     (
         "text/event-stream",
@@ -388,4 +507,50 @@ async fn missing_usage_stays_unknown_and_invalid_headers_never_reach_network() {
         assert!(!error.contains("secret"));
     }
     assert_eq!(fixture.captured.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn text_rerank_adapter_rejects_media_before_transport_instead_of_discarding_it() {
+    use eliteforge_agent_core as fw;
+    use fw::RerankModel;
+    struct NoTransport;
+    #[async_trait::async_trait]
+    impl ModelTransportFactory for NoTransport {
+        async fn create(
+            &self,
+            _: &AgentModelConfig,
+        ) -> Result<Arc<dyn ModelTransport>, fw::ModelError> {
+            panic!("unsupported media must be rejected before creating transport")
+        }
+    }
+    let model = HttpRerankModel {
+        config: config(AgentModelProtocol::ChatCompletions, "http://127.0.0.1:1"),
+        factory: Arc::new(NoTransport),
+        chat_fallback: false,
+        chat_instruction: None,
+    };
+    let mut image = fw::Content::from("caption");
+    image.0.push(fw::ContentBlock::Media {
+        media: fw::MediaContent {
+            mime_type: "image/png".into(),
+            source: fw::MediaSource::Base64("AA==".into()),
+            name: None,
+            estimated_tokens: Some(10),
+        },
+    });
+    let error = model
+        .rerank(
+            "test",
+            fw::RerankRequest {
+                choice: Default::default(),
+                query: "query".into(),
+                documents: vec![image],
+                top_n: Some(1),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error,fw::ModelError::Fatal(message) if message.contains("media-capable adapter"))
+    );
 }

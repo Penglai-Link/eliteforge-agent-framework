@@ -263,7 +263,6 @@ async fn cancellation_timeout_drop_and_close_drain_direct_transports() {
         let control = options.run.as_ref().unwrap();
         assert!(control.session_id.is_empty());
         assert!(control.execution_counters.is_none());
-        assert!(control.node_execution.is_none());
         assert!(control.budget_journal.is_none());
         let cancel = options.cancellation.clone();
         let bound = client
@@ -339,6 +338,8 @@ impl ChatModel for Capture {
     ) -> Result<ChatResponse, ModelError> {
         self.requests.lock().unwrap().push(request);
         Ok(ChatResponse {
+            output_items: Vec::new(),
+            disposition: None,
             public_content: None,
             reasoning: None,
             content: "ok".into(),

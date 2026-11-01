@@ -479,8 +479,6 @@ pub struct ContextAssemblyReport {
     pub stage: String,
     pub step: usize,
     pub attempt: usize,
-    #[serde(default)]
-    pub node_execution: Option<WorkflowNodeExecution>,
     pub input_capacity: usize,
     pub protocol_tokens: usize,
     pub estimated_input_tokens: usize,
@@ -490,8 +488,6 @@ pub struct ContextAssemblyReport {
 pub struct ContextFailureReport {
     pub model: ModelRef,
     pub attempt: usize,
-    #[serde(default)]
-    pub node_execution: Option<WorkflowNodeExecution>,
     pub stage: String,
     pub step: usize,
     pub blocks: Vec<ContextBlockReport>,
@@ -503,7 +499,6 @@ impl ContextFailureReport {
         stage: String,
         step: usize,
         attempt: usize,
-        node_execution: Option<WorkflowNodeExecution>,
         blocks: Vec<ContextBlockReport>,
         error: &AgentError,
     ) -> Self {
@@ -512,7 +507,7 @@ impl ContextFailureReport {
             stage,
             step,
             attempt,
-            node_execution,
+
             blocks,
             error: error.report(&OmitErrorMessages),
         }
@@ -1694,7 +1689,6 @@ impl DefaultContextAssembler {
                 stage: input.stage.into(),
                 step: input.step,
                 attempt: input.attempt,
-                node_execution: input.run.node_execution().cloned(),
                 input_capacity: input.budget.max_tokens,
                 protocol_tokens: protocol,
                 estimated_input_tokens: total,
@@ -1874,7 +1868,6 @@ fn context_assembly_failure(
             input.stage.into(),
             input.step,
             input.attempt,
-            input.run.node_execution().cloned(),
             reports,
             &error,
         )),

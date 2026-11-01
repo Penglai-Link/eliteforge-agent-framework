@@ -817,6 +817,11 @@ async fn legacy_content_length_uses_sdk_discovery_and_calls() {
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].descriptor.id, "mcp/legacy/echo");
         assert_eq!(
+            bindings[0].source.provider_id.as_deref(),
+            Some("mcp/legacy")
+        );
+        assert!(bindings[0].category.is_none());
+        assert_eq!(
             bindings[0].descriptor.operation_kind,
             eliteforge_agent_framework::ToolOperationKind::Unknown
         );

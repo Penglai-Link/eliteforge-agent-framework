@@ -17,6 +17,12 @@ pub enum OutputEvent {
     MessageStarted {
         message_id: String,
     },
+    MessageMetadata {
+        message_id: String,
+        step_id: String,
+        output_index: usize,
+        phase: Option<String>,
+    },
     TextDelta {
         message_id: String,
         delta: String,
@@ -33,6 +39,10 @@ pub enum OutputEvent {
     },
     MessageAborted {
         message_id: String,
+    },
+    ToolCalls {
+        message_id: String,
+        calls: Vec<ToolCall>,
     },
     ToolResult {
         /// Retain the originating call's invocation_id, including after resume.

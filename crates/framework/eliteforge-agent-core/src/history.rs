@@ -92,6 +92,10 @@ pub struct HistoryMessage {
     pub step_id: Option<String>,
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<MessageProvenance>,
     pub content: Vec<HistoryContentBlock>,
     pub structured: Option<Value>,
@@ -117,6 +121,8 @@ impl HistoryMessage {
             run_id,
             step_id: None,
             role: Role::User,
+            phase: None,
+            output_index: None,
             provenance: None,
             annotations: Vec::new(),
             requested_skills: Vec::new(),
@@ -132,7 +138,6 @@ impl HistoryMessage {
 pub struct HistoryStep {
     pub id: String,
     pub run_id: RunId,
-    pub node_invocation_id: Option<RunId>,
     pub sequence: usize,
     pub attempt: usize,
     pub name: String,
@@ -266,13 +271,28 @@ impl HistoryRecords {
                 .iter()
                 .find(|m| m.id == old.id)
                 .ok_or_else(|| StateError::Invalid("history messages cannot be removed".into()))?;
+            // A completed stream item may acquire metadata when the provider's
+            // terminal response arrives, but its identity and content cannot change.
+            let completed_metadata_update = if old.status == HistoryStatus::Completed
+                && new.status == HistoryStatus::Completed
+                && (old.phase.is_none() || old.phase == new.phase)
+                && (old.structured.is_none() || old.structured == new.structured)
+            {
+                let mut enriched = old.clone();
+                enriched.phase = new.phase.clone();
+                enriched.structured = new.structured.clone();
+                enriched == *new
+            } else {
+                false
+            };
             if old.run_id != new.run_id
                 || old.role != new.role
+                || old.output_index != new.output_index
                 || old.annotations != new.annotations
                 || old.provenance != new.provenance
                 || old.step_id != new.step_id
                 || old.created_at_ms != new.created_at_ms
-                || (old.status != HistoryStatus::Running && old != new)
+                || (old.status != HistoryStatus::Running && old != new && !completed_metadata_update)
             {
                 return Err(StateError::Invalid(
                     "finished history messages are immutable".into(),
@@ -458,7 +478,16 @@ impl HistoryService {
         let mut history = self.0.read_session(session_id, query).await?;
         crate::normalize_external_tool_history(&mut history.records.tool_invocations);
         for tool in &mut history.records.tool_invocations {
-            if history.runs.iter().any(|run| run.id == tool.run_id && matches!(run.status, HistoryStatus::Completed | HistoryStatus::Failed | HistoryStatus::Interrupted | HistoryStatus::Unknown)) {
+            if history.runs.iter().any(|run| {
+                run.id == tool.run_id
+                    && matches!(
+                        run.status,
+                        HistoryStatus::Completed
+                            | HistoryStatus::Failed
+                            | HistoryStatus::Interrupted
+                            | HistoryStatus::Unknown
+                    )
+            }) {
                 crate::finalize_external_tool_observation(tool);
             }
         }
@@ -477,8 +506,9 @@ pub trait HistoryCommitter: Send + Sync {
     async fn model_attempt(
         &self,
         step: HistoryStep,
-        message: HistoryMessage,
+        messages: Vec<HistoryMessage>,
         response: Option<ChatResponse>,
+        tool_parents: std::collections::BTreeMap<RunId, String>,
     ) -> Result<(), StateError>;
 }
 #[doc(hidden)]

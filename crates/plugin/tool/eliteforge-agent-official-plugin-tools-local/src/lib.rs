@@ -27,6 +27,8 @@ use eliteforge_agent_core::{
 };
 
 pub use filesystem::{FileSystemToolsConfig, SystemCommandConfig};
+mod command_shell;
+pub use command_shell::default_shell_program;
 
 /// Host authority resolved once per run lease, never supplied by model arguments.
 /// Implementations must validate the run's tenant/session permissions before
@@ -63,6 +65,14 @@ impl FileSystemScope {
 /// as execution, without opening files, starting commands or installing a plugin.
 /// The catalog grants no authority; hosts must still select the corresponding packs.
 pub fn local_tool_catalog() -> Vec<eliteforge_agent_core::ToolDescriptor> {
+    local_tool_catalog_metadata()
+        .into_iter()
+        .map(|entry| entry.descriptor)
+        .collect()
+}
+
+/// Complete registration inventory, independent of the current run's grant.
+pub fn local_tool_catalog_metadata() -> Vec<eliteforge_agent_core::ToolCatalogEntry> {
     let root = filesystem::FileSystemRoot::new(FileSystemToolsConfig::new("."));
     tools::read_only_bindings(root.clone())
         .into_iter()
@@ -71,9 +81,21 @@ pub fn local_tool_catalog() -> Vec<eliteforge_agent_core::ToolDescriptor> {
             SystemCommandConfig::new(),
             tasks::CommandTaskManager::default(),
         ))
-        .map(|binding| binding.descriptor)
-        .chain(pty_tools::terminal_tool_catalog())
+        .map(|binding| binding.with_category(local_tool_category()).catalog_entry())
+        .chain(pty_tools::terminal_tool_catalog().into_iter().map(|descriptor| {
+            eliteforge_agent_core::ToolCatalogEntry {
+                descriptor,
+                domain_code: Some("terminal".into()),
+                category: Some(local_tool_category()),
+            }
+        }))
         .collect()
+}
+
+fn local_tool_category() -> eliteforge_agent_core::ToolCategory {
+    eliteforge_agent_core::ToolCategory::localized(
+        "system.command", "系统命令工具", "System command tools",
+    )
 }
 
 /// Shared path confinement for optional local readers. Refuses absolute paths,
@@ -135,10 +157,22 @@ impl ReadOnlyFileSystemPlugin {
 
 #[async_trait]
 impl ToolProvider for ReadOnlyFileSystemPlugin {
+    fn catalog_metadata(&self) -> Option<Vec<eliteforge_agent_core::ToolCatalogEntry>> {
+        Some(local_tool_catalog_metadata().into_iter().filter(|entry| matches!(entry.domain_code.as_deref(), Some("fs" | "search")) && entry.descriptor.operation_kind == eliteforge_agent_core::ToolOperationKind::Query).collect())
+    }
     async fn lease(&self, run: &RunContext) -> Result<ToolLease, AgentError> {
-        Ok(ToolLease::new(tools::read_only_bindings(
-            self.filesystem.lease(run).await?,
-        )))
+        Ok(ToolLease::new(
+            tools::read_only_bindings(self.filesystem.lease(run).await?)
+                .into_iter()
+                .map(|tool| {
+                    tool.with_category(eliteforge_agent_core::ToolCategory::localized(
+                        "system.command",
+                        "系统命令工具",
+                        "System command tools",
+                    ))
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -182,10 +216,22 @@ impl WriteFileSystemPlugin {
 
 #[async_trait]
 impl ToolProvider for WriteFileSystemPlugin {
+    fn catalog_metadata(&self) -> Option<Vec<eliteforge_agent_core::ToolCatalogEntry>> {
+        Some(local_tool_catalog_metadata().into_iter().filter(|entry| entry.domain_code.as_deref() == Some("fs") && entry.descriptor.operation_kind == eliteforge_agent_core::ToolOperationKind::Command).collect())
+    }
     async fn lease(&self, run: &RunContext) -> Result<ToolLease, AgentError> {
-        Ok(ToolLease::new(tools::write_bindings(
-            self.filesystem.lease(run).await?,
-        )))
+        Ok(ToolLease::new(
+            tools::write_bindings(self.filesystem.lease(run).await?)
+                .into_iter()
+                .map(|tool| {
+                    tool.with_category(eliteforge_agent_core::ToolCategory::localized(
+                        "system.command",
+                        "系统命令工具",
+                        "System command tools",
+                    ))
+                })
+                .collect(),
+        ))
     }
 }
 
@@ -221,11 +267,22 @@ struct SystemCommandTools {
 
 #[async_trait]
 impl ToolProvider for SystemCommandTools {
+    fn catalog_metadata(&self) -> Option<Vec<eliteforge_agent_core::ToolCatalogEntry>> {
+        Some(local_tool_catalog_metadata().into_iter().filter(|entry| entry.domain_code.as_deref() == Some("command")).collect())
+    }
     async fn lease(&self, _: &RunContext) -> Result<ToolLease, AgentError> {
-        Ok(ToolLease::new(tools::system_command_bindings(
-            self.config.clone(),
-            self.tasks.clone(),
-        )))
+        Ok(ToolLease::new(
+            tools::system_command_bindings(self.config.clone(), self.tasks.clone())
+                .into_iter()
+                .map(|tool| {
+                    tool.with_category(eliteforge_agent_core::ToolCategory::localized(
+                        "system.command",
+                        "系统命令工具",
+                        "System command tools",
+                    ))
+                })
+                .collect(),
+        ))
     }
 }
 

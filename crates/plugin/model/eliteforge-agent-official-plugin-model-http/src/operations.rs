@@ -148,6 +148,11 @@ impl fw::RerankModel for HttpRerankModel {
         request: fw::RerankRequest,
         output_limit: Option<u32>,
     ) -> Result<fw::RerankModelOutput, fw::ModelError> {
+        // This adapter's wire contract is text-only. A provider-specific
+        // RerankModel must encode media; never silently drop image/audio blocks.
+        if std::iter::once(&request.query).chain(request.documents.iter()).any(|content| content.0.iter().any(|block| !matches!(block, fw::ContentBlock::Text { .. }))) {
+            return Err(fw::ModelError::Fatal("HTTP rerank requires a media-capable adapter".into()));
+        }
         let usage;
         let documents = request
             .documents

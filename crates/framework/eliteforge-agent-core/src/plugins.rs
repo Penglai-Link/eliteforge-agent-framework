@@ -26,7 +26,6 @@ impl Plugin for ContextLayoutPlugin {
         context.provide(ContextLayoutService(self.0.clone()))
     }
 }
-pub struct WorkflowNodeService(pub Arc<dyn WorkflowNode>);
 
 macro_rules! unique_plugin {
     ($name:ident, $interface:ident, $service:ident, $id:literal) => {
@@ -200,7 +199,6 @@ macro_rules! contribution_plugin {
 contribution_plugin!(ToolProviderPlugin, ToolProvider, ToolProviderService);
 contribution_plugin!(EventPlugin, EventSink, EventService);
 contribution_plugin!(RunOutputPlugin, RunOutputFactory, RunOutputService);
-contribution_plugin!(WorkflowNodePlugin, WorkflowNode, WorkflowNodeService);
 
 pub type EventSinkPlugin = EventPlugin;
 
@@ -224,6 +222,9 @@ impl ToolProvider for StaticToolProvider {
                 .map(|tool| tool.descriptor.clone())
                 .collect(),
         )
+    }
+    fn catalog_metadata(&self) -> Option<Vec<crate::ToolCatalogEntry>> {
+        Some(self.tools.iter().map(ToolBinding::catalog_entry).collect())
     }
     async fn lease(&self, _context: &RunContext) -> Result<ToolLease, AgentError> {
         Ok(ToolLease::new(self.tools.clone()))
@@ -275,12 +276,6 @@ contribution_plugin!(
     RunLifecycleHook,
     RunLifecycleHookService
 );
-pub struct WorkflowNodeMiddlewareService(pub Arc<dyn WorkflowNodeMiddleware>);
-contribution_plugin!(
-    WorkflowNodeMiddlewarePlugin,
-    WorkflowNodeMiddleware,
-    WorkflowNodeMiddlewareService
-);
 pub struct ContextContributorService(pub Arc<dyn ContextContributor>);
 contribution_plugin!(
     ModelMiddlewarePlugin,
@@ -319,7 +314,8 @@ impl ContextContributor for RegisteredInstructionSource {
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let mut block = self.implementation.contribute(input).await?;
         if block.id != self.implementation.block_id()
-            || !matches!(block.trust, ContextTrust::Instruction | ContextTrust::Mixed) {
+            || !matches!(block.trust, ContextTrust::Instruction | ContextTrust::Mixed)
+        {
             return Err(AgentError::InvalidConfiguration(
                 "instruction source changed its identity or trust".into(),
             ));

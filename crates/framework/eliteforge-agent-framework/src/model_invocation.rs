@@ -74,6 +74,9 @@ impl ModelClient {
             (a, b) => a.or(b),
         };
         effective.max_model_retries = effective.max_model_retries.min(parent.max_model_retries);
+        effective.max_phase_continuations = effective
+            .max_phase_continuations
+            .min(parent.max_phase_continuations);
         effective.max_overflow_recoveries = effective
             .max_overflow_recoveries
             .min(parent.max_overflow_recoveries);

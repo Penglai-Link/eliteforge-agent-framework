@@ -5,9 +5,10 @@ use std::{collections::BTreeMap, sync::Arc};
 
 pub const CHAT_AUTO_ROUTE_NAME: &str = "对话自动路由";
 pub const TEXT_GENERATION_AUTO_ROUTE_NAME: &str = "文本生成自动路由";
-pub const TEXT_EMBEDDING_AUTO_ROUTE_NAME: &str = "向量自动路由";
+pub const TEXT_EMBEDDING_AUTO_ROUTE_NAME: &str = "文本向量自动路由";
 pub const MULTIMODAL_EMBEDDING_AUTO_ROUTE_NAME: &str = "多模态向量自动路由";
-pub const RERANK_AUTO_ROUTE_NAME: &str = "重排自动路由";
+pub const RERANK_AUTO_ROUTE_NAME: &str = "文本重排自动路由";
+pub const MULTIMODAL_RERANK_AUTO_ROUTE_NAME: &str = "多模态重排自动路由";
 
 #[derive(Debug, Clone)]
 pub struct AutoRouteCandidate {
@@ -80,7 +81,11 @@ router_contract!(
     TextEmbeddingAutoRouter,
     "向量自动路由。Accepts plain text inputs only."
 );
-router_contract!(RerankAutoRouter, "重排自动路由。");
+router_contract!(RerankAutoRouter, "Text reranking route.");
+router_contract!(
+    MultimodalRerankAutoRouter,
+    "Multimodal reranking route, including text queries in the same candidate set."
+);
 router_contract!(
     MultimodalEmbeddingAutoRouter,
     "多模态向量自动路由。The host supplies candidates for the requested input modalities."
@@ -97,10 +102,12 @@ pub struct AutoRouters {
     pub embedding: Option<Arc<dyn TextEmbeddingAutoRouter>>,
     pub multimodal_embedding: Option<Arc<dyn MultimodalEmbeddingAutoRouter>>,
     pub rerank: Option<Arc<dyn RerankAutoRouter>>,
+    pub multimodal_rerank: Option<Arc<dyn MultimodalRerankAutoRouter>>,
 }
 enum RouteKind {
     Default,
     MultimodalEmbedding,
+    MultimodalRerank,
     TextGeneration,
 }
 impl AutoRouters {
@@ -135,6 +142,18 @@ impl AutoRouters {
             ));
         }
         self.select_inner(context, available, RouteKind::MultimodalEmbedding)
+    }
+    pub fn select_multimodal_rerank(
+        &self,
+        context: &AutoRouteContext<'_>,
+        available: &[AutoRouteCandidate],
+    ) -> Result<ModelRef, AgentError> {
+        if context.operation != ModelOperation::Rerank {
+            return Err(AgentError::InvalidConfiguration(
+                "multimodal rerank route requires a rerank operation".into(),
+            ));
+        }
+        self.select_inner(context, available, RouteKind::MultimodalRerank)
     }
     fn select_inner(
         &self,
@@ -175,6 +194,11 @@ impl AutoRouters {
                 .embedding
                 .as_ref()
                 .ok_or(AgentError::MissingService("TextEmbeddingAutoRouter"))?
+                .select(context, &candidates)?,
+            ModelOperation::Rerank if matches!(kind, RouteKind::MultimodalRerank) => self
+                .multimodal_rerank
+                .as_ref()
+                .ok_or(AgentError::MissingService("MultimodalRerankAutoRouter"))?
                 .select(context, &candidates)?,
             ModelOperation::Rerank => self
                 .rerank
@@ -240,14 +264,7 @@ impl ModelSelectionStrategy for ChatAutoRoutingStrategy {
                 })
             })
             .collect::<Vec<_>>();
-        let call_key = format!(
-            "{:?}",
-            (
-                context.run.node_execution().map(|node| node.invocation_id),
-                context.stage,
-                context.step
-            )
-        );
+        let call_key = format!("{:?}", (context.stage, context.step));
         self.routers.select(
             &AutoRouteContext {
                 operation: ModelOperation::Chat,

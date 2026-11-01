@@ -596,7 +596,6 @@ impl ModelInvocationOptions {
         let run = RunContext {
             model: None,
             limits: limits.clone(),
-            node_execution: None,
             execution_counters: None,
             tool_dispatch_gate: Arc::default(),
             tool_slots: Arc::new(tokio::sync::Semaphore::new(0)),

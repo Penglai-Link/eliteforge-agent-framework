@@ -118,7 +118,6 @@ impl Fixture {
             .publish(&InteractionRecord {
                 session_id: id.into(),
                 run_id: second.run_id,
-                node_invocation_id: None,
                 request: request.clone(),
                 tool_call: None,
                 response: None,

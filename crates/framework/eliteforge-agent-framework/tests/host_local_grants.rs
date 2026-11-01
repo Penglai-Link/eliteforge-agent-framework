@@ -257,7 +257,7 @@ async fn host_grants_confine_multiple_directories_and_commands_survive_turns() {
         &agent,
         "s",
         scope.clone(),
-        "system_exec",
+        "command_exec",
         json!({"command":"printf start; sleep 20"}),
     )
     .await;
@@ -266,7 +266,7 @@ async fn host_grants_confine_multiple_directories_and_commands_survive_turns() {
         &agent,
         "other",
         scope.clone(),
-        "system_exec_task_read",
+        "command_exec_read",
         json!({"taskId":id}),
     )
     .await;
@@ -275,7 +275,7 @@ async fn host_grants_confine_multiple_directories_and_commands_survive_turns() {
         &agent,
         "s",
         scope.clone(),
-        "system_exec_task_stop",
+        "command_exec_stop",
         json!({"taskId":id}),
     )
     .await;
@@ -284,7 +284,7 @@ async fn host_grants_confine_multiple_directories_and_commands_survive_turns() {
         &agent,
         "s",
         scope.clone(),
-        "system_exec",
+        "command_exec",
         json!({"command":"printf not-a-program", "args":[]}),
     )
     .await;
@@ -298,7 +298,7 @@ async fn host_grants_confine_multiple_directories_and_commands_survive_turns() {
         &agent,
         "s",
         scope,
-        "system_exec",
+        "command_exec",
         json!({"command":"printf should-not-run", "cwd":a}),
     )
     .await;

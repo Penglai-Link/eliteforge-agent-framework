@@ -251,6 +251,8 @@ impl GenaiChatAdapter {
                             native.with_reasoning_content(end.captured_reasoning_content.clone());
                     }
                     let response = ChatResponse {
+                        output_items: Vec::new(),
+                        disposition: None,
                         public_content: None,
                         content: framework_content,
                         reasoning: end.captured_reasoning_content.clone(),

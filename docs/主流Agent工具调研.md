@@ -123,12 +123,12 @@ MCP 工具按服务器动态发现，资源工具按服务器声明生成，不�
 
 | 实现位置 | 已有工具 | 启用和边界 |
 | --- | --- | --- |
-| [tools-local](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-local/src/tools.rs) | `fs_read_text`、`fs_list`、`fs_stat`、`search_grep`、`search_glob`、`search_path`、`fs_write_text`、`fs_apply_patch`、`fs_apply_unified_patch`、`system_exec`、`system_exec_task_read`、`system_exec_task_stop`、`system_exec_task_write`、`system_exec_list` | 读取、写入、命令分别显式启用；文件工具限制在配置的根目录，命令不由该根目录自动隔离 |
+| [tools-local](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-local/src/tools.rs) | `fs_read_text`、`fs_list`、`fs_stat`、`search_grep`、`search_glob`、`search_path`、`fs_write_text`、`fs_apply_patch`、`fs_apply_unified_patch`、`command_exec`、`command_exec_read`、`command_exec_stop`、`command_exec_write`、`command_exec_list` | 读取、写入、命令分别显式启用；文件工具限制在配置的根目录，命令不由该根目录自动隔离 |
 | [tools-human](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-human/src/lib.rs) | `ask_user` | 1–3 个问题、每题 2–5 个选项，允许文本回答／跳过；返回 `AwaitInput`，宿主提交答案后恢复；没有多选或无选项提问 |
 | [tools-agents](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-agents/src/lib.rs) | `agent_spawn`、`thread_create`、`thread_send`、`thread_answer`、`thread_wait`、`thread_read`、`thread_list`、`thread_close` | 子 Agent 继承运行约束；默认 Thread registry 在进程内，不提供跨宿主团队或 Git worktree 隔离 |
 | [tools-mcp](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-mcp/src/lib.rs) | 服务器发现的工具 | stdio／HTTP transport、工具分页、命名空间、取消及关闭；已接入资源列表、模板与读取；未提供 prompts API |
 | [tools-discovery](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-discovery/src/lib.rs) | `tool_search` | 显式包装授权 Provider，按 run 公开 Schema；保留原调用链与租约生命周期 |
-| [tools-web](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-web/src/lib.rs) | `web_search`、`web_fetch` | 后端和域名策略由宿主配置；来源 URL、大小限制、取消和超时；不执行浏览器脚本 |
+| [tools-web](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-web/src/lib.rs) | `web_search`、`web_read` | 后端和域名策略由宿主配置；来源 URL、大小限制、取消和超时；不执行浏览器脚本 |
 | [tools-media](../crates/plugin/tool/eliteforge-agent-official-plugin-tools-media/src/lib.rs) | `media_read_image`、`media_read_pdf` | 目录约束、图片媒体块和 PDF 分页文本；不含 OCR、渲染或 Notebook |
 | [plugin/skill](../crates/plugin/skill/eliteforge-agent-official-plugin-skills/src/tools.rs) | `skill_load`、`skill_read_resource`、`skill_diagnostics` | 已有聚合清单与按需读取；未提供技能创建、修改和删除工具 |
 | [plugin/memory](../crates/plugin/memory/eliteforge-agent-memory/src/components.rs) | `memory_search`、`memory_get`、`memory_save`、`memory_delete` | 需宿主注册 MemoryTools；默认只读，写入需 `allow_writes()`；命名空间由宿主绑定；不等于历史会话搜索 |
@@ -141,7 +141,7 @@ SQLite 默认保存记忆，不表示模型默认拥有记忆写入工具。
 
 | 能力 | 当前状态 | 实现或边界 | 状态分类 |
 | --- | --- | --- | --- |
-| 超过 10 秒返回任务 ID、后续读取和停止 | 已支持 | `system_exec` 等待超过 10 秒后返回命令 ID；`system_exec_task_read` 读取状态与输出，`system_exec_task_stop` 停止命令。命令记录在 Agent 内按会话隔离 | 已支持 |
+| 超过 10 秒返回任务 ID、后续读取和停止 | 已支持 | `command_exec` 等待超过 10 秒后返回命令 ID；`command_exec_read` 读取状态与输出，`command_exec_stop` 停止命令。命令记录在 Agent 内按会话隔离 | 已支持 |
 | 交互式命令与进程管理 | 已支持 | 支持持续 stdin、PTY、命令清单和受管进程组清理；平台验收范围见[实现状态与验收证据](实现状态与验收证据.md) | 已支持 |
 | 多文件补丁与编辑冲突 | 已支持 | 支持多文件增删改/移动、版本前置条件、diff 预览和失败回滚；跨文件提交及外部并发修改边界见[本地文件工具](本地文件工具.md) | 已支持 |
 | 代码搜索与稳定分页 | 已支持 | 支持 glob、ignore/exclude、文本/正则和多种查询模式；扫描有界，分页使用会话快照并支持取消 | 已支持 |

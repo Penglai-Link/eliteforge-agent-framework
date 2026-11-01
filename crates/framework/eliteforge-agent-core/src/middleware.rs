@@ -3,83 +3,9 @@ use crate::*;
 use async_trait::async_trait;
 use std::sync::Arc;
 
-/// Wraps one admitted node attempt, including resumed attempts. Middleware is
-/// ordered by plugin registration; the first contribution is outermost. A
-/// wrapper can deny execution or await `next.run` and observe its result.
-/// Cancellation drops the future: use RAII for cleanup, not only code after await.
-#[crate::extension_point(adapter = crate::WorkflowNodeMiddlewarePlugin, contribute)]
-#[async_trait]
-pub trait WorkflowNodeMiddleware: Send + Sync {
-    async fn intercept(
-        &self,
-        input: WorkflowNodeInput,
-        context: &WorkflowNodeContext,
-        next: WorkflowNodeNext<'_>,
-    ) -> Result<WorkflowNodeResult, AgentError>;
-}
-
-pub struct WorkflowNodeNext<'a> {
-    #[doc(hidden)]
-    pub definition: &'a DagWorkflowDefinition,
-    #[doc(hidden)]
-    pub middleware: &'a [Arc<dyn WorkflowNodeMiddleware>],
-    #[doc(hidden)]
-    pub node: &'a dyn WorkflowNode,
-    #[doc(hidden)]
-    pub services: &'a AgentServices,
-}
-impl WorkflowNodeNext<'_> {
-    pub async fn run(
-        self,
-        input: WorkflowNodeInput,
-        context: &WorkflowNodeContext,
-    ) -> Result<WorkflowNodeResult, AgentError> {
-        use futures::FutureExt;
-        // Catch at every boundary so outer wrappers can report inner panics.
-        std::panic::AssertUnwindSafe(async {
-            let identity = context
-                .run
-                .node_execution()
-                .ok_or_else(|| AgentError::Run("missing node execution identity".into()))?;
-            if input.node_id != identity.node_id || input.invocation_id != identity.invocation_id {
-                return Err(AgentError::InvalidConfiguration(
-                    "middleware cannot change node identity".into(),
-                ));
-            }
-            let result = if let Some((first, remaining)) = self.middleware.split_first() {
-                first
-                    .intercept(
-                        input,
-                        context,
-                        WorkflowNodeNext {
-                            middleware: remaining,
-                            ..self
-                        },
-                    )
-                    .await
-            } else {
-                context.run.check_cancelled()?;
-                self.node.execute(input, context, self.services).await
-            }?;
-            self.definition
-                .validate_result(&identity.node_id, &result)?;
-            Ok(result)
-        })
-        .catch_unwind()
-        .await
-        .unwrap_or_else(|_| {
-            Err(AgentError::Run(
-                "workflow node or middleware panicked".into(),
-            ))
-        })
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelDispatchReport {
     pub model: ModelRef,
-    #[serde(default)]
-    pub node_execution: Option<WorkflowNodeExecution>,
     pub stage: String,
     pub step: usize,
     pub attempt: usize,
@@ -246,7 +172,6 @@ impl ModelNext<'_> {
             };
             let report = ModelDispatchReport {
                 model: self.target.clone(),
-                node_execution: self.run.node_execution().cloned(),
                 stage: context.stage.into(),
                 step: context.step,
                 attempt: context.attempt,
@@ -372,7 +297,9 @@ pub fn validate_model_response(
     response: &mut ChatResponse,
     options: &GenerationOptions,
 ) -> Result<(), ModelError> {
-    if response.tool_calls.is_empty()
+    response.normalize_output_items()?;
+    if response.disposition != Some(crate::ModelDisposition::Continue)
+        && response.tool_calls.is_empty()
         && let Some(output) = &options.output_schema
     {
         let value = if response.content.is_empty() {

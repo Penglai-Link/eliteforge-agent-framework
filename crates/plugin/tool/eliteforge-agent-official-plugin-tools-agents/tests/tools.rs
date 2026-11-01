@@ -76,7 +76,9 @@ fn detached_script(request: &ChatRequest, input: &str, has_tool: bool) -> Option
             }
             let values = tool_values(request);
             let latest = values.first().expect("tool output is JSON");
-            if let Some(child_run_id) = latest.get("child_run_id").and_then(Value::as_str) {
+            if latest.get("output").and_then(Value::as_str) != Some("child result")
+                && let Some(child_run_id) = latest.get("child_run_id").and_then(Value::as_str)
+            {
                 return Some(ChatResponse::tool_calls(vec![ToolCall::new(
                     "detached-wait",
                     "child_wait",
@@ -150,7 +152,9 @@ fn detached_script(request: &ChatRequest, input: &str, has_tool: bool) -> Option
             let values = tool_values(request);
             let child_run_id = any_child_run_id(&values).expect("history keeps the child run ID");
             let latest = values.first().expect("tool output is JSON");
-            if latest.get("child_run_id").is_some() {
+            if latest.get("output").and_then(Value::as_str) != Some("child result")
+                && latest.get("child_run_id").is_some()
+            {
                 return Some(ChatResponse::tool_calls(vec![ToolCall::new(
                     "orphan-wait",
                     "child_wait",
@@ -244,16 +248,54 @@ impl ChatModel for CollaborationModel {
             } else {
                 ChatResponse::tool_calls(vec![ToolCall::new(
                     "ask-thread-user",
-                    "ask_user",
-                    json!({
-                        "intro":"Choose a deployment target",
-                        "questions":[{
-                            "question":"Where should this run?",
-                            "options":[{"label":"staging"},{"label":"production"}]
-                        }]
-                    }),
+                    "ask_caller",
+                    json!({"question":"Where should this run?"}),
                 )])
             });
+        }
+        if request.messages.iter().any(|message| {
+            message.role == Role::User && message.content.text() == "interactive child task"
+        }) {
+            return Ok(if has_tool {
+                ChatResponse::text("interactive child result")
+            } else {
+                ChatResponse::tool_calls(vec![ToolCall::new(
+                    "ask-child-caller",
+                    "ask_caller",
+                    json!({"question":"Which target?"}),
+                )])
+            });
+        }
+        if input == "use interactive child" {
+            if !has_tool {
+                return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "interactive-child-create",
+                    "agent_spawn",
+                    json!({"task":"interactive child task","background":true}),
+                )]));
+            }
+            let values = tool_values(&request);
+            let child_run_id = any_child_run_id(&values).expect("child has an ID");
+            let latest = values.first().expect("child result is JSON");
+            if latest.get("output").and_then(Value::as_str) == Some("interactive child result") {
+                return Ok(ChatResponse::text("parent answered child"));
+            }
+            if let Some(interaction) = latest
+                .get("interactions")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+            {
+                return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
+                    "interactive-child-answer",
+                    "child_answer",
+                    json!({"child_run_id":child_run_id,"interaction_id":interaction["id"],"answer":"staging"}),
+                )]));
+            }
+            return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
+                format!("interactive-child-wait-{}", values.len()),
+                "child_wait",
+                json!({"child_run_id":child_run_id}),
+            )]));
         }
         if input == "child task" || input == "thread task" || input == "thread followup" {
             return Ok(ChatResponse::text(match input.as_str() {
@@ -428,20 +470,13 @@ impl ChatModel for CollaborationModel {
                 .and_then(|interactions| interactions.first())
             {
                 let interaction_id = interaction["id"].as_str().expect("interaction has an ID");
-                let question = &interaction["presentation"]["questions"][0];
-                let question_id = question["id"].as_str().expect("question has an ID");
-                let option_id = question["options"][0]["id"]
-                    .as_str()
-                    .expect("option has an ID");
-                let mut answers = serde_json::Map::new();
-                answers.insert(question_id.into(), json!({"option_id":option_id}));
                 return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
                     call_id,
                     "thread_answer",
                     json!({
                         "session_id":session_id,
                         "interaction_id":interaction_id,
-                        "answer":{"answers":answers}
+                        "answer":"staging"
                     }),
                 )]));
             }
@@ -553,6 +588,23 @@ async fn background_spawn_returns_a_child_run_and_wait_collects_it() {
         .await
         .unwrap();
     assert_eq!(result.output, "parent received detached child");
+    assert!(agent.framework().close().await.is_success());
+}
+
+#[tokio::test]
+async fn child_answer_resumes_a_delegated_interaction() {
+    let agent = agent().await;
+    let result = agent
+        .run(RunRequest::new(
+            "parent-interactive-child",
+            "use interactive child",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        result.output, "parent answered child",
+        "result: {result:#?}"
+    );
     assert!(agent.framework().close().await.is_success());
 }
 
@@ -671,7 +723,8 @@ async fn collaboration_runtime_publishes_child_and_thread_lifecycle_events() {
             .iter()
             .filter(|event| matches!(event, CollaborationEvent::ChildRunStarted { .. }))
             .count(),
-        1
+        1,
+        "events: {events:#?}"
     );
     assert_eq!(
         events
@@ -719,7 +772,8 @@ async fn collaboration_runtime_publishes_child_and_thread_lifecycle_events() {
                 }
             ))
             .count(),
-        1
+        1,
+        "events: {events:#?}"
     );
     assert!(events.iter().any(|event| matches!(event,
         CollaborationEvent::ThreadRunFinished {

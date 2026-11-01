@@ -31,11 +31,17 @@ impl ToolProvider for Provider {
             ToolBinding::new(
                 ToolDescriptor::new("native.load", "load", "native", json!({"type":"object"})),
                 Endpoint("native", self.native.clone()),
-            ),
+            )
+            .with_category(ToolCategory::localized("fixture.native", "原生", "Native")),
             ToolBinding::new(
                 ToolDescriptor::new("product.load", "load", "product", json!({"type":"object"})),
                 Endpoint("product", self.product.clone()),
-            ),
+            )
+            .with_category(ToolCategory::localized(
+                "fixture.product",
+                "产品",
+                "Product",
+            )),
         ])
         .with_cleanup(move || {
             closed.fetch_add(1, Ordering::SeqCst);
@@ -52,6 +58,13 @@ impl ToolPolicy for Policy {
         binding: &ToolBinding,
         _: &RunContext,
     ) -> Result<ToolBindingAdmission, AgentError> {
+        assert_eq!(binding.source.plugin_id.as_deref(), Some("admission.tools"));
+        assert!(
+            binding
+                .category
+                .as_ref()
+                .is_some_and(|category| category.code.starts_with("fixture."))
+        );
         if self.pending {
             std::future::pending::<()>().await;
         }
@@ -143,6 +156,9 @@ async fn exclusion_selects_original_product_binding_before_duplicate_detection_a
     assert_eq!(requests.len(), 2);
     assert_eq!(requests[0].tools.len(), 1);
     assert_eq!(requests[0].tools[0].id, "product.load");
+    let tools_json = serde_json::to_string(&requests[0].tools).unwrap();
+    assert!(!tools_json.contains("fixture.product"));
+    assert!(!tools_json.contains("admission.tools"));
     assert!(
         requests[1]
             .messages
@@ -156,4 +172,26 @@ async fn pending_catalog_policy_is_deadline_bounded_and_keeps_original_lease_cle
     assert!(result.is_err());
     assert_eq!((closed, native, product), (1, 0, 0));
     assert!(requests.lock().unwrap().is_empty());
+}
+
+#[test]
+fn static_provider_exposes_categories_without_leasing_tools() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = StaticToolProvider::new(vec![
+        ToolBinding::new(
+            ToolDescriptor::new("example.one", "example_one", "one", json!({})),
+            Endpoint("one", calls.clone()),
+        )
+        .with_category(ToolCategory::localized("example.read", "读取", "Read")),
+        ToolBinding::new(
+            ToolDescriptor::new("example.two", "example_two", "two", json!({})),
+            Endpoint("two", calls.clone()),
+        )
+        .with_category(ToolCategory::localized("example.write", "写入", "Write")),
+    ]);
+    let catalog = provider.catalog_metadata().unwrap();
+    assert_eq!(catalog.len(), 2);
+    assert_eq!(catalog[0].category.as_ref().unwrap().code, "example.read");
+    assert_eq!(catalog[1].category.as_ref().unwrap().code, "example.write");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
 }

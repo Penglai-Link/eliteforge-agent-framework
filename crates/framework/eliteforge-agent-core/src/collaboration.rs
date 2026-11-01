@@ -9,6 +9,11 @@ use crate::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// Trusted host capability: this run may suspend for an answer from its caller.
+/// Tool arguments cannot grant this capability to a top-level run.
+#[derive(Clone, Copy, Debug)]
+pub struct CallerInteractionScope;
+
 /// A runtime-owned conversation that can be addressed by collaboration tools.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ThreadStatus {
@@ -30,7 +35,7 @@ pub enum ThreadRunCause {
     InteractionResponse,
 }
 
-/// Lifecycle of one addressable detached child run.
+/// Lifecycle of one addressable child run, including a paused synchronous child.
 ///
 /// A detached child is an in-tree delegation that outlives the parent run:
 /// it keeps the parent's lineage and budget reservation, but owns its own

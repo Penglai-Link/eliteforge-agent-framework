@@ -15,16 +15,21 @@ mod tools;
 pub use auto_routing::*;
 pub use document_parsing::{PersonAiDocumentParsingIntent, personai_document_parse_mode};
 pub use embedding_candidates::{
-    PersonAiEmbeddingKind, PersonAiEmbeddingModel, personai_embedding_candidates, personai_embedding_batch_limit,
+    PersonAiEmbeddingKind, PersonAiEmbeddingModel, personai_embedding_batch_limit,
+    personai_embedding_candidates,
 };
 
 pub use connection::PersonAiConnection;
 pub use context::{AccountContext, PersonAiContextHandle, PersonAiContextProvider};
 pub use crab_serverapi as sdk;
-pub use models::{PersonAiModels, personai_embedding_request_body, personai_generation_request_body};
+pub use models::{
+    PersonAiModels, personai_embedding_request_body, personai_generation_request_body,
+};
 pub use services::{PersonAiServices, detect_device_id, validate_device_id};
 pub use sync::{PersonAiModelSync, PersonAiSyncStatus, SyncDomainStatus};
-pub use tools::{PersonAiToolProvider, personai_tool_catalog};
+pub use tools::{
+    PersonAiToolProvider, personai_tool_catalog, personai_tool_catalog_with_categories,
+};
 
 use async_trait::async_trait;
 use eliteforge_agent_core::{

@@ -128,13 +128,6 @@ pub fn fixture_selection(framework: &Framework) -> Result<AgentSelection, AgentE
                 .map(str::to_owned)
                 .collect(),
         ),
-        workflow_nodes: Some(
-            registry
-                .providers::<WorkflowNodeService>()
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-        ),
         ..AgentSelection::default()
     })
 }

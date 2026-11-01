@@ -16,6 +16,9 @@ pub(super) struct StreamAccumulator {
     pub(super) terminal_response: Option<ModelResponse>,
     response_id: Option<String>,
     chat_tool_calls: BTreeMap<usize, ChatToolCallAccumulator>,
+    response_message_ids: BTreeMap<usize, String>,
+    pub(super) unindexed_response_text: bool,
+    pub(super) indexed_response_message: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -26,11 +29,51 @@ struct ChatToolCallAccumulator {
 }
 
 impl StreamAccumulator {
+    /// Bind the provider's item IDs to output positions, including providers
+    /// that omit an index from a later delta but retain the item ID.
+    pub(super) fn associate_response_message(&mut self, event: &mut ModelStreamEvent) -> Result<(), String> {
+        if !matches!(event.kind, ModelStreamEventKind::Text | ModelStreamEventKind::MessageStart | ModelStreamEventKind::MessageEnd) {
+            return Ok(());
+        }
+        if event.output_index.is_none() {
+            if let Some(id) = &event.item_id {
+                event.output_index = self.response_message_ids.iter().find_map(|(index, known)| (known == id).then_some(*index));
+            }
+        }
+        if let Some(index) = event.output_index {
+            self.indexed_response_message = true;
+            if let Some(id) = &event.item_id {
+                if self.response_message_ids.get(&index).is_some_and(|known| known != id)
+                    || self.response_message_ids.iter().any(|(known_index, known)| *known_index != index && known == id)
+                {
+                    return Err("model stream output item identity changed".into());
+                }
+                self.response_message_ids.insert(index, id.clone());
+            }
+        } else if event.kind == ModelStreamEventKind::Text && !event.delta.is_empty() {
+            self.unindexed_response_text = true;
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_response_items(&self, response: &ModelResponse) -> Result<(), String> {
+        for item in &response.output_items {
+            if let crate::ModelOutputItem::Message { output_index, item_id: Some(id), .. } = item
+                && (self.response_message_ids.get(output_index).is_some_and(|known| known != id)
+                    || self.response_message_ids.iter().any(|(index, known)| index != output_index && known == id))
+            {
+                return Err("model terminal output item identity changed".into());
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn observe_delta(&mut self, delta: &ModelStreamEvent) {
         match delta.kind {
             ModelStreamEventKind::Text => self.text.push_str(&delta.delta),
             ModelStreamEventKind::Reasoning => self.reasoning.push_str(&delta.delta),
             ModelStreamEventKind::ReasoningSummary => self.reasoning_summary.push_str(&delta.delta),
+            ModelStreamEventKind::MessageStart | ModelStreamEventKind::MessageEnd | ModelStreamEventKind::ToolBoundary => {}
         }
     }
 

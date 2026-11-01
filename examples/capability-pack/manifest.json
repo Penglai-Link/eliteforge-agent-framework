@@ -259,20 +259,6 @@
       "metadata": {}
     },
     {
-      "id": "demo.node",
-      "extension": "framework.workflow-node",
-      "contract": "^1",
-      "metadata": {
-        "kind": "remote.echo"
-      }
-    },
-    {
-      "id": "demo.node-middleware",
-      "extension": "framework.node-middleware",
-      "contract": "^1",
-      "metadata": {}
-    },
-    {
       "id": "demo.lifecycle",
       "extension": "framework.lifecycle-hook",
       "contract": "^1",

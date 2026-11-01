@@ -85,7 +85,7 @@ pub(crate) fn binding(filesystem: FileSystemRoot) -> ToolBinding {
                 "expectedVersions":{"type":"object","additionalProperties":{"type":"string","minLength":1}},
                 "dryRun":{"type":"boolean"}
             }}),
-        ).with_single_input().with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command),
+        ).with_display_resource(include_str!("tool-display.json")).with_single_input().with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command),
         UnifiedPatchTool { filesystem },
     )
 }
@@ -148,6 +148,17 @@ fn apply_patch(
         PatchFormat::Unified => 0,
         PatchFormat::Git => 1,
     });
+    // Normalize version keys through the same authorized root resolution as
+    // patch paths. Hosts with multiple roots display absolute paths, while
+    // callers may still supply the documented relative paths.
+    let mut expected_versions = std::collections::HashMap::new();
+    for (raw, version) in &input.expected_versions {
+        let resolved = filesystem.resolve(raw)?;
+        let path = filesystem.display(&resolved.root, &resolved.path);
+        if expected_versions.insert(path, version).is_some() {
+            return Err(failed("expectedVersions contains duplicate paths"));
+        }
+    }
     let mut changes = Vec::new();
     let mut total = 0usize;
     for patch in PatchSet::parse(&input.patch, options) {
@@ -189,8 +200,7 @@ fn apply_patch(
         if changes.iter().any(|change: &Change| change.path == path) {
             return Err(failed("duplicate patch path"));
         }
-        let expected = input
-            .expected_versions
+        let expected = expected_versions
             .get(&path)
             .ok_or_else(|| failed(format!("expectedVersions missing {path}")))?;
         let before = read(&resolved.path, filesystem.max_edit_bytes())?;
@@ -204,8 +214,7 @@ fn apply_patch(
             if name == path || changes.iter().any(|c: &Change| c.path == name) {
                 return Err(failed("duplicate rename path"));
             }
-            let expected = input
-                .expected_versions
+            let expected = expected_versions
                 .get(&name)
                 .ok_or_else(|| failed(format!("expectedVersions missing {name}")))?;
             let existing = read(&target.path, filesystem.max_edit_bytes())?;
@@ -270,7 +279,7 @@ fn apply_patch(
     if changes.is_empty() {
         return Err(failed("patch contains no file changes"));
     }
-    if changes.len() != input.expected_versions.len() {
+    if changes.len() != expected_versions.len() {
         return Err(failed(
             "expectedVersions contains paths not modified by this patch",
         ));

@@ -32,32 +32,9 @@ impl AgentLoop for ReactAgentLoop {
         context: &RunContext,
         services: &AgentServices,
     ) -> Result<RunResult, AgentError> {
-        let definition = if let Some(resume) = &request.resume {
-            let checkpoint = services
-                .state
-                .as_ref()
-                .ok_or(AgentError::MissingService("StateStore"))?
-                .load(resume.run_id)
-                .await?;
-            if checkpoint.loop_id != "framework.react" {
-                return Err(AgentError::InvalidConfiguration(
-                    "resume requires a ReAct execution".into(),
-                ));
-            }
-            let state: WorkflowState = serde_json::from_value(checkpoint.state).map_err(|_| {
-                AgentError::State(StateError::Invalid("invalid ReAct checkpoint".into()))
-            })?;
-            state.definition
-        } else {
-            WorkflowDefinition {
-                id: "framework.react".into(),
-                version: 1,
-                stages: vec![WorkflowStage::new(&request.model_stage)],
-            }
-        };
-        let mut execution = crate::model_execution::ModelExecutionLoop::new(definition)?;
-        execution.conversation = true;
-        execution.run(request, context, services).await
+        crate::model_execution::ModelExecutionLoop::new()
+            .run(request, context, services)
+            .await
     }
 }
 
