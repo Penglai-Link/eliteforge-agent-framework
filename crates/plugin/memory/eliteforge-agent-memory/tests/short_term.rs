@@ -67,7 +67,7 @@ fn block_order_actual_metadata_budget_and_output_reserve_are_independent() {
                 entries: vec!["full latest turn".to_string()],
             },
             MemoryBlock {
-                kind: MemoryBlockKind::CurrentSessionCheckpoint,
+                kind: MemoryBlockKind::ConversationHistorySummary,
                 entries: vec!["é".repeat(500)],
             },
             MemoryBlock {
@@ -77,7 +77,7 @@ fn block_order_actual_metadata_budget_and_output_reserve_are_independent() {
         ],
     };
     let mut budgets = ContextBlockBudgets::default();
-    budgets.current_session_checkpoint.max_tokens = Some(80);
+    budgets.conversation_history_summary.max_tokens = Some(80);
     let plan = budgets.plan(1_000, 200);
     let assembled = ShortTermMemoryEngine::assemble(
         &source,
@@ -92,7 +92,7 @@ fn block_order_actual_metadata_budget_and_output_reserve_are_independent() {
     let checkpoint = assembled
         .reports
         .iter()
-        .find(|r| r.kind == MemoryBlockKind::CurrentSessionCheckpoint)
+        .find(|r| r.kind == MemoryBlockKind::ConversationHistorySummary)
         .unwrap();
     assert!(checkpoint.tokens <= 80);
     assert_eq!(checkpoint.entries, 1);
@@ -168,8 +168,8 @@ fn block_bound_keeps_the_largest_feasible_target_including_json_framing() {
     for text in ["x".repeat(200), "文".repeat(200)] {
         let scope = MemoryScope::new("workspace", "session").unwrap();
         let mut budgets = ContextBlockBudgets::default();
-        budgets.current_session_checkpoint.max_tokens = Some(80);
-        budgets.current_session_checkpoint.max_ratio_bps = None;
+        budgets.conversation_history_summary.max_tokens = Some(80);
+        budgets.conversation_history_summary.max_ratio_bps = None;
         let source = MemorySnapshot {
             revision: MemoryRevision {
                 scope: scope.clone(),
@@ -177,7 +177,7 @@ fn block_bound_keeps_the_largest_feasible_target_including_json_framing() {
                 revision: 1,
             },
             blocks: vec![MemoryBlock {
-                kind: MemoryBlockKind::CurrentSessionCheckpoint,
+                kind: MemoryBlockKind::ConversationHistorySummary,
                 entries: vec![text.clone()],
             }],
         };
@@ -194,7 +194,7 @@ fn block_bound_keeps_the_largest_feasible_target_including_json_framing() {
         let report = assembled
             .reports
             .iter()
-            .find(|r| r.kind == MemoryBlockKind::CurrentSessionCheckpoint)
+            .find(|r| r.kind == MemoryBlockKind::ConversationHistorySummary)
             .unwrap();
         let estimate = |text: &str| {
             estimate_serialized_tokens(&serde_json::json!({"metadata":"source","text":text}))
@@ -203,8 +203,7 @@ fn block_bound_keeps_the_largest_feasible_target_including_json_framing() {
         // character count equals its serialized Unicode-aware token estimate.
         let (target, expected) = (0..=80)
             .map(|target| (target, bound_text(&text, target)))
-            .filter(|(_, candidate)| estimate(candidate) <= 80)
-            .last()
+            .rfind(|(_, candidate)| estimate(candidate) <= 80)
             .unwrap();
         assert_eq!(assembled.messages, vec![expected.clone()]);
         assert_eq!(report.tokens, estimate(&expected));

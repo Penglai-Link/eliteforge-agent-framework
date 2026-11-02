@@ -8,7 +8,7 @@ pub struct ContextBlockBudgetConfig {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct ContextBlockBudgets {
     pub seed_prompt_prefix: ContextBlockBudgetConfig,
-    pub current_session_checkpoint: ContextBlockBudgetConfig,
+    pub conversation_history_summary: ContextBlockBudgetConfig,
     pub current_session_working_state: ContextBlockBudgetConfig,
     pub tool_schema: ContextBlockBudgetConfig,
 }
@@ -22,7 +22,7 @@ pub struct ModelContextBudgetPlan {
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct ContextBlockBudgetPlans {
     pub seed_prompt_prefix: ContextBlockBudgetPlan,
-    pub current_session_checkpoint: ContextBlockBudgetPlan,
+    pub conversation_history_summary: ContextBlockBudgetPlan,
     pub current_session_working_state: ContextBlockBudgetPlan,
     pub tool_schema: ContextBlockBudgetPlan,
     pub current_session_history: ContextBlockBudgetPlan,
@@ -44,7 +44,7 @@ impl Default for ContextBlockBudgets {
         Self {
             // Instructions have no independent cap; the model input capacity still applies.
             seed_prompt_prefix: cap(10_000, None),
-            current_session_checkpoint: cap(2_000, Some(6_000)),
+            conversation_history_summary: cap(2_000, Some(6_000)),
             current_session_working_state: cap(1_000, Some(2_000)),
             tool_schema: cap(10_000, None),
         }
@@ -75,9 +75,9 @@ impl ContextBlockBudgets {
             effective_input_budget: available,
             block_budgets: ContextBlockBudgetPlans {
                 seed_prompt_prefix: block("seed_prompt_prefix", &self.seed_prompt_prefix),
-                current_session_checkpoint: block(
-                    "current_session_checkpoint",
-                    &self.current_session_checkpoint,
+                conversation_history_summary: block(
+                    "conversation_history_summary",
+                    &self.conversation_history_summary,
                 ),
                 current_session_working_state: block(
                     "current_session_working_state",

@@ -90,7 +90,7 @@ impl MemoryRevision {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemoryBlockKind {
     SeedPromptPrefix,
-    CurrentSessionCheckpoint,
+    ConversationHistorySummary,
     CurrentSessionWorkingState,
     CurrentSessionHistory,
 }
@@ -98,7 +98,7 @@ impl MemoryBlockKind {
     pub fn id(self) -> &'static str {
         match self {
             Self::SeedPromptPrefix => "seed_prompt_prefix",
-            Self::CurrentSessionCheckpoint => "current_session_checkpoint",
+            Self::ConversationHistorySummary => "conversation_history_summary",
             Self::CurrentSessionWorkingState => "current_session_working_state",
             Self::CurrentSessionHistory => "current_session_history",
         }
@@ -163,7 +163,7 @@ impl ShortTermMemoryEngine {
         }
         let order = [
             MemoryBlockKind::SeedPromptPrefix,
-            MemoryBlockKind::CurrentSessionCheckpoint,
+            MemoryBlockKind::ConversationHistorySummary,
             MemoryBlockKind::CurrentSessionWorkingState,
             MemoryBlockKind::CurrentSessionHistory,
         ];
@@ -172,8 +172,8 @@ impl ShortTermMemoryEngine {
         for kind in order {
             let config = match kind {
                 MemoryBlockKind::SeedPromptPrefix => &plan.block_budgets.seed_prompt_prefix,
-                MemoryBlockKind::CurrentSessionCheckpoint => {
-                    &plan.block_budgets.current_session_checkpoint
+                MemoryBlockKind::ConversationHistorySummary => {
+                    &plan.block_budgets.conversation_history_summary
                 }
                 MemoryBlockKind::CurrentSessionWorkingState => {
                     &plan.block_budgets.current_session_working_state
@@ -198,7 +198,7 @@ impl ShortTermMemoryEngine {
                     let mut item = entry.clone();
                     if matches!(
                         kind,
-                        MemoryBlockKind::CurrentSessionCheckpoint
+                        MemoryBlockKind::ConversationHistorySummary
                             | MemoryBlockKind::CurrentSessionWorkingState
                     ) {
                         let remaining = config.effective_limit_tokens.saturating_sub(tokens);
