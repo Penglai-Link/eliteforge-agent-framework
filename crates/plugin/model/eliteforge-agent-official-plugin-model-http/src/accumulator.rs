@@ -73,7 +73,7 @@ impl StreamAccumulator {
             ModelStreamEventKind::Text => self.text.push_str(&delta.delta),
             ModelStreamEventKind::Reasoning => self.reasoning.push_str(&delta.delta),
             ModelStreamEventKind::ReasoningSummary => self.reasoning_summary.push_str(&delta.delta),
-            ModelStreamEventKind::MessageStart | ModelStreamEventKind::MessageEnd | ModelStreamEventKind::ToolBoundary => {}
+            ModelStreamEventKind::MessageStart | ModelStreamEventKind::MessageEnd | ModelStreamEventKind::ToolBoundary | ModelStreamEventKind::ToolCallDelta => {}
         }
     }
 

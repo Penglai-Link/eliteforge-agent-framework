@@ -150,9 +150,15 @@ pub enum ModelStreamEventKind {
     MessageStart,
     MessageEnd,
     ToolBoundary,
+    ToolCallDelta,
 }
 
 impl ModelStreamEvent {
+    /// Generated tool name/argument fragments; never assistant-visible text.
+    pub fn tool_call_delta(delta: impl Into<String>) -> Self {
+        Self { kind: ModelStreamEventKind::ToolCallDelta, delta: delta.into(), output_index: None, item_id: None, phase: None }
+    }
+
     pub fn text_delta(delta: impl Into<String>) -> Self {
         Self {
             kind: ModelStreamEventKind::Text,

@@ -142,7 +142,7 @@ fn parse_responses_stream_event(body: &Value) -> Option<ModelStreamEvent> {
         let item = body.get("item")?;
         let item_type = item.get("type").and_then(Value::as_str);
         if matches!(item_type, Some("function_call" | "custom_tool_call")) {
-            return Some(ModelStreamEvent { kind: ModelStreamEventKind::ToolBoundary, delta: String::new(),
+            return Some(ModelStreamEvent { kind: ModelStreamEventKind::ToolBoundary, delta: if event_type.ends_with(".added") { item.get("name").and_then(Value::as_str).unwrap_or_default().to_owned() } else { String::new() },
                 output_index: body.get("output_index").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()),
                 item_id: item.get("id").and_then(Value::as_str).map(str::to_owned), phase: None });
         }
@@ -156,6 +156,7 @@ fn parse_responses_stream_event(body: &Value) -> Option<ModelStreamEvent> {
         });
     }
     let mut event = match event_type {
+        "response.function_call_arguments.delta" | "response.custom_tool_call_input.delta" => body.get("delta").and_then(Value::as_str).map(ModelStreamEvent::tool_call_delta),
         "response.output_text.delta" | "response.refusal.delta" => body
             .get("delta")
             .and_then(Value::as_str)

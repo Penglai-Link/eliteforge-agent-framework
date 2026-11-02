@@ -51,7 +51,7 @@ impl ModelProtocolAdapter for ChatCompletionsAdapter {
         };
         // Compatible providers can return text and reasoning in one packet.
         // They are independent channels, not mutually exclusive alternatives.
-        Ok([
+        let mut events: Vec<_> = [
             chat_reasoning_delta(delta).map(ModelStreamEvent::reasoning_delta),
             chat_compatible_reasoning_summary(delta).map(ModelStreamEvent::reasoning_summary_delta),
             delta
@@ -62,7 +62,16 @@ impl ModelProtocolAdapter for ChatCompletionsAdapter {
         .into_iter()
         .flatten()
         .filter(|event| !event.delta.is_empty())
-        .collect())
+        .collect();
+        let functions = delta.get("tool_calls").and_then(Value::as_array).into_iter().flatten()
+            .filter_map(|call| call.get("function"))
+            .chain(delta.get("function_call"));
+        for function in functions {
+            let generated = ["name", "arguments"].into_iter()
+                .filter_map(|key| function.get(key).and_then(Value::as_str)).collect::<String>();
+            if !generated.is_empty() { events.push(ModelStreamEvent::tool_call_delta(generated)); }
+        }
+        Ok(events)
     }
 
     fn parse_usage(&self, body: &Value) -> Option<ModelTokenUsage> {

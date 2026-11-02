@@ -128,6 +128,7 @@ async fn emit(stream: &dyn fw::ChatStream, event: ModelStreamEvent) {
         ModelStreamEventKind::Reasoning => {}
         ModelStreamEventKind::MessageStart => if let Some(index) = event.output_index { stream.message_start(index, event.phase.as_deref()).await },
         ModelStreamEventKind::MessageEnd => if let Some(index) = event.output_index { stream.message_end(index, event.phase.as_deref(), &event.delta).await },
+        ModelStreamEventKind::ToolCallDelta => {},
         ModelStreamEventKind::ToolBoundary => if let Some(index) = event.output_index { stream.tool_boundary(index).await },
     }
 }
