@@ -105,12 +105,29 @@ pub trait ContextContributor: Send + Sync {
         ContextSourceKind::Data
     }
     fn block_id(&self) -> &str;
+    /// Human-readable information for hosts that let users arrange context blocks.
+    fn layout_metadata(&self) -> ContextBlockMetadata {
+        ContextBlockMetadata {
+            display_name: self.block_id().to_owned(),
+            description: String::new(),
+            default_order: 0,
+        }
+    }
     /// Standalone layout declaration. Explicit host layouts must still name this block.
     fn default_block_config(&self) -> Option<ContextBlockConfig> {
         None
     }
     /// Bound upstream queries by the supplied quota and cancellation signal.
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError>;
+}
+
+/// Display metadata for a context contributor in host layout controls.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContextBlockMetadata {
+    pub display_name: String,
+    pub description: String,
+    /// Relative default ordering for newly discovered blocks. Existing user order wins.
+    pub default_order: i32,
 }
 
 /// A configured data/instruction block without an external query.

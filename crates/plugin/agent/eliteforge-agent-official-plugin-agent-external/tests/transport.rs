@@ -53,6 +53,7 @@ async fn cli_arguments_are_literal_and_native_session_stream_is_preserved() {
     for kind in [ExternalCliKind::Codex, ExternalCliKind::OpenCode] {
         let dir = tempfile::tempdir().unwrap();
         let event = match kind {
+            ExternalCliKind::Dsh => unreachable!(),
             ExternalCliKind::Codex => {
                 r#"echo '{"type":"thread.started","thread_id":"session-2"}'
 echo '{"type":"item.completed","item":{"type":"agent_message","text":"中文回复"}}'"#

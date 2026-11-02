@@ -29,6 +29,7 @@ pub(super) fn parse_stream_line(
 ) -> Vec<ModelStreamEvent> {
     let previous_session = parsed.system_agent_session_id.clone();
     let mut events = match kind {
+        SystemAgentCliKind::Dsh => Vec::new(),
         SystemAgentCliKind::Codex => parse_codex_stdout_line(line, parsed),
         SystemAgentCliKind::OpenCode => parse_opencode_stdout_line(line, parsed),
     };

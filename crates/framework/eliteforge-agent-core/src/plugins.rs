@@ -311,6 +311,15 @@ impl ContextContributor for RegisteredInstructionSource {
     fn block_id(&self) -> &str {
         &self.id
     }
+    fn layout_metadata(&self) -> ContextBlockMetadata {
+        self.implementation.layout_metadata()
+    }
+    fn default_block_config(&self) -> Option<ContextBlockConfig> {
+        self.implementation.default_block_config().map(|mut config| {
+            config.id.clone_from(&self.id);
+            config
+        })
+    }
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let mut block = self.implementation.contribute(input).await?;
         if block.id != self.implementation.block_id()

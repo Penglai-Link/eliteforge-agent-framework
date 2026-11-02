@@ -21,6 +21,7 @@ pub struct ExternalCli {
     working_directory: Option<String>,
     reasoning_effort: Option<String>,
     fast_mode: Option<bool>,
+    dsh_options: crate::DshCliOptions,
 }
 
 impl ExternalCli {
@@ -35,6 +36,7 @@ impl ExternalCli {
             working_directory,
             reasoning_effort: None,
             fast_mode: None,
+            dsh_options: crate::DshCliOptions::default(),
         }
     }
 
@@ -52,6 +54,8 @@ impl ExternalCli {
         self
     }
 
+    pub fn with_dsh_options(mut self, options: crate::DshCliOptions) -> Self { self.dsh_options = options; self }
+
     pub fn with_fast_mode(mut self, enabled: bool) -> Self {
         self.fast_mode = Some(enabled);
         self
@@ -62,6 +66,9 @@ impl ExternalCli {
         context: ExternalCliRequest,
         sink: Option<TransportSink>,
     ) -> Result<ExternalAgentResult, TransportError> {
+        if self.kind == SystemAgentCliKind::Dsh {
+            return crate::dsh::invoke(&self.command_name, self.working_directory.as_deref(), &self.dsh_options, self.reasoning_effort.as_deref(), context, sink.unwrap_or_else(|| std::sync::Arc::new(|_| {}))).await;
+        }
         self.invoke_stream(context, sink.unwrap_or_else(|| std::sync::Arc::new(|_| {})))
             .await
     }
@@ -91,6 +98,7 @@ impl ExternalCli {
         command.current_dir(working_directory);
 
         match self.kind {
+            SystemAgentCliKind::Dsh => unreachable!("dsh uses its own protocol"),
             SystemAgentCliKind::Codex => {
                 command.arg("exec");
                 if resume_session_id.is_some() {
@@ -378,6 +386,7 @@ fn system_agent_name(kind: SystemAgentCliKind) -> &'static str {
     match kind {
         SystemAgentCliKind::Codex => "codex",
         SystemAgentCliKind::OpenCode => "opencode",
+        SystemAgentCliKind::Dsh => "dsh",
     }
 }
 

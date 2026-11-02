@@ -7,6 +7,8 @@ pub use bridge::JsonAgentBridge;
 mod adapter;
 pub use adapter::*;
 mod output;
+mod dsh;
+pub use dsh::{DshCliOptions, DshModelProbe, DshModelRecord};
 pub use cli::ExternalCli;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -15,6 +17,7 @@ use std::sync::Arc;
 pub enum ExternalCliKind {
     Codex,
     OpenCode,
+    Dsh,
 }
 #[derive(Debug, Clone)]
 pub struct ExternalCliRequest {
