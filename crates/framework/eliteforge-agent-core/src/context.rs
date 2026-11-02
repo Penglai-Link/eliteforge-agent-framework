@@ -887,10 +887,10 @@ impl DefaultContextAssembler {
         let history = self.layout.0.iter().position(|b| b.id == HISTORY_BLOCK);
         if recent_turns == 0
             || is_builtin(&id)
-            || summary.zip(history).is_none_or(|(a, b)| a >= b)
+            || summary.zip(history).is_none()
             || self.layout.0[summary.unwrap()].failure != BlockFailure::Error
         {
-            return Err(AgentError::InvalidConfiguration("history summary requires a preceding required data block and positive recent-turn retention".into()));
+            return Err(AgentError::InvalidConfiguration("history summary requires a required data block, history and positive recent-turn retention".into()));
         }
         self.history_summary = Some((id, recent_turns));
         Ok(self)

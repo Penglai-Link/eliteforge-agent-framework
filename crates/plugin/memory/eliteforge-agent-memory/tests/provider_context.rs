@@ -1054,3 +1054,24 @@ async fn platform_semantic_summary_cache_is_distinct_from_same_named_namespace()
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
     store.close().await.unwrap();
 }
+
+#[test]
+fn percentage_allocations_require_exact_totals_and_preserve_every_token() {
+    let shares = |a, b| std::collections::BTreeMap::from([("a".into(), a), ("b".into(), b)]);
+    assert!(eliteforge_agent_memory::ContextShareAllocation::new(shares(5000, 4999)).is_err());
+    assert!(eliteforge_agent_memory::ContextShareAllocation::new(shares(5000, 5001)).is_err());
+    let allocation = eliteforge_agent_memory::ContextShareAllocation::new(shares(3333, 6667)).unwrap();
+    for budget in [1, 128_001, 1_000_000] {
+        let result = allocation.allocate(budget);
+        assert_eq!(result.values().sum::<usize>(), budget);
+    }
+    assert_eq!(allocation.allocate(1_000_000)["a"], 333_300);
+}
+
+#[tokio::test]
+async fn shared_percentages_lend_unused_capacity_to_history() {
+    let blocks = vec![config(INSTRUCTIONS_BLOCK, 200), config("data", 100), config(HISTORY_BLOCK, 700)];
+    let budgets = SharedContextBudget.allocate_sources(&blocks, ContextBudget { max_tokens: 1000, max_messages: 100 }, &[50, 25, 900]).await.unwrap();
+    assert_eq!(budgets.iter().map(|budget| budget.max_tokens).collect::<Vec<_>>(), vec![50, 25, 925]);
+    assert_eq!(budgets.iter().map(|budget| budget.max_tokens).sum::<usize>(), 1000);
+}

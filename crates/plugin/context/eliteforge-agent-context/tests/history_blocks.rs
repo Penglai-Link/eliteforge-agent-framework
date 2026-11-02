@@ -110,8 +110,7 @@ impl AgentLoop for Split {
             messages,
         );
         history.revision = 7;
-        let assembler = DefaultContextAssembler::new(
-            ContextLayout(vec![
+        let mut layout = vec![
                 ContextBlockConfig::new(INSTRUCTIONS_BLOCK, BlockBudget::tokens(100)),
                 if self.pressure {
                     ContextBlockConfig::new("summary", BlockBudget::tokens(self.summary_tokens))
@@ -122,7 +121,11 @@ impl AgentLoop for Split {
                 ContextBlockConfig::new(HISTORY_BLOCK, BlockBudget::tokens(500))
                     .reduce_with(reducer)
                     .compress_at(10_000, 2000),
-            ]),
+            ];
+        // Cached projection must also preserve an explicitly reordered prompt.
+        if self.cached { layout.swap(1, 2); }
+        let assembler = DefaultContextAssembler::new(
+            ContextLayout(layout),
             vec![Arc::new(EmptySummary)],
         )?
         .with_history_summary_block("summary", 2)?
@@ -165,12 +168,13 @@ impl AgentLoop for Split {
         assert!(summary.final_tokens <= self.summary_tokens);
         assert_eq!(summary.configured_tokens, Some(self.summary_tokens));
         assert_eq!(recent.final_message_count, original.len() - 2);
-        assert_eq!(
-            &result.messages[1..],
-            &original[2..],
-            "all recent native fields survive exactly"
-        );
-        assert!(result.messages[0].content.text().contains("青松"));
+        let (summary_message, recent_messages) = if self.cached {
+            (result.messages.last().unwrap(), &result.messages[..result.messages.len() - 1])
+        } else {
+            (&result.messages[0], &result.messages[1..])
+        };
+        assert_eq!(recent_messages, &original[2..], "all recent native fields survive exactly");
+        assert!(summary_message.content.text().contains("青松"));
         assert!(result.report.estimated_input_tokens <= result.report.input_capacity);
         Ok(RunResult {
             output: result.messages[0].content.text(),

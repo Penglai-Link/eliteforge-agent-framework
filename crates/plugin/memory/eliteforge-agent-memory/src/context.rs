@@ -310,3 +310,34 @@ impl ContextReducer for MemorySemanticDataReducer {
         }
     }
 }
+
+/// Percentage allocations define nominal quotas. History may borrow unused
+/// capacity after bounded data is reduced, without imposing a second token cap.
+pub struct SharedContextBudget;
+#[async_trait]
+impl ContextBudgetPolicy for SharedContextBudget {
+    async fn allocate(
+        &self,
+        blocks: &[ContextBlockConfig],
+        available: ContextBudget,
+    ) -> Result<Vec<ContextBudget>, AgentError> {
+        IndependentBlockBudget.allocate(blocks, available).await
+    }
+    async fn allocate_sources(
+        &self,
+        blocks: &[ContextBlockConfig],
+        available: ContextBudget,
+        source_tokens: &[usize],
+    ) -> Result<Vec<ContextBudget>, AgentError> {
+        let mut borrowing = blocks.to_vec();
+        for block in &mut borrowing {
+            if block.id == HISTORY_BLOCK {
+                block.budget.max_tokens = Some(available.max_tokens);
+                block.budget.max_ratio_bps = None;
+            }
+        }
+        BorrowUnusedMemoryBudget
+            .allocate_sources(&borrowing, available, source_tokens)
+            .await
+    }
+}
