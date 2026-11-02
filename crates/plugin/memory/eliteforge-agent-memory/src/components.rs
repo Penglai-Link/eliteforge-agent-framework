@@ -128,7 +128,13 @@ impl MemoryTools {
             .map(|operation| {
                 let (name, description, schema) = operation.schema();
                 let binding = ToolBinding::new(
-                    ToolDescriptor::new(name, name, description, schema),
+                    ToolDescriptor::new(name, name, description, schema).with_operation_kind(
+                        if operation.writes() {
+                            eliteforge_agent_core::ToolOperationKind::Command
+                        } else {
+                            eliteforge_agent_core::ToolOperationKind::Query
+                        },
+                    ),
                     MemoryTool {
                         configured: self.clone(),
                         operation,

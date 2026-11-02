@@ -8,9 +8,8 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InteractionRecord {
     pub session_id: String,
-    /// Stable execution identity, including the parent run for a DAG node.
+    /// Stable logical run identity.
     pub run_id: RunId,
-    pub node_invocation_id: Option<RunId>,
     pub request: InteractionRequest,
     /// The original provider call and arguments. Approval always targets this call.
     pub tool_call: Option<ToolCall>,
@@ -138,7 +137,7 @@ impl InteractionManager {
     pub async fn publish(
         &self,
         requests: &[InteractionRequest],
-        cursor: &WorkflowCursor,
+        cursor: &ReactCursor,
         context: &RunContext,
     ) -> Result<(), AgentError> {
         let mut publications = Vec::new();
@@ -149,20 +148,17 @@ impl InteractionManager {
         let previous = self.0.find_many(&context.session_id, &ids).await?;
         for (request, previous) in requests.iter().zip(previous) {
             let call = match cursor {
-                WorkflowCursor::Tools { executions, .. } => executions.iter().find(|e| match request.kind {
+                ReactCursor::Tools { executions, .. } => executions.iter().find(|e| match request.kind {
                     InteractionKind::Approval { invocation_id } => e.invocation_id == invocation_id,
                     InteractionKind::Input => matches!(&e.state, ToolExecutionState::Finished(output) if matches!(&output.effect, ToolEffect::RequestInput(r) if r.id == request.id)),
                 }).map(|e| e.call.clone()),
-                WorkflowCursor::Model => None,
+                ReactCursor::Model => None,
             };
             // A previously published question may already have left the tool cursor.
             if call.is_none() {
                 match previous {
                     Some(previous)
-                        if previous.run_id == context.run_id
-                            && previous.request == *request
-                            && previous.node_invocation_id
-                                == context.node_execution().map(|n| n.invocation_id) =>
+                        if previous.run_id == context.run_id && previous.request == *request =>
                     {
                         continue;
                     }
@@ -173,7 +169,6 @@ impl InteractionManager {
             publications.push(InteractionRecord {
                 session_id: context.session_id.clone(),
                 run_id: context.run_id,
-                node_invocation_id: context.node_execution().map(|n| n.invocation_id),
                 request: request.clone(),
                 tool_call: call,
                 response: None,

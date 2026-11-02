@@ -583,56 +583,6 @@ async fn gateway_approval_gates_the_inner_tool() {
 }
 
 #[tokio::test]
-async fn stage_restricted_workflows_keep_the_gateway_pair_visible() {
-    let allowed = CountingTool::returning(ToolOutput::text("allowed"));
-    let denied = CountingTool::returning(ToolOutput::text("must not run"));
-    let model = ScriptedModel::new([
-        envelope("allowed", "allowed_tool", json!({})),
-        // The stage forbids this inner tool even though the model tries.
-        envelope("denied", "forbidden_tool", json!({})),
-        text("done"),
-    ]);
-    // A single react stage that only permits one inner tool id.
-    let mut stage = WorkflowStage::new("stage");
-    stage.tools = Some(["discovery.allowed".to_owned()].into_iter().collect());
-    let workflow = WorkflowLoop::new(WorkflowDefinition {
-        id: "restricted".into(),
-        version: 1,
-        stages: vec![stage],
-    })
-    .unwrap();
-    let agent = TestBuilder::default()
-        .plugin(ChatModelPlugin::new(model.clone()))
-        .plugin(
-            ToolDiscoveryPlugin::new().provider(StaticToolProvider::new(vec![
-                binding("discovery.allowed", "allowed_tool", allowed.clone()),
-                binding("discovery.forbidden", "forbidden_tool", denied.clone()),
-            ])),
-        )
-        .plugin(AgentLoopPlugin::new(workflow))
-        .build()
-        .await
-        .unwrap();
-    agent
-        .run(RunRequest::new("staged", "run the stage"))
-        .await
-        .unwrap();
-    assert_eq!(allowed.count(), 1);
-    assert_eq!(denied.count(), 0);
-    let requests = model.requests();
-    // The gateway pair stays visible inside the restricted stage.
-    assert_stable_gateway_catalog(&requests);
-    let last = requests.last().unwrap();
-    assert!(
-        last.messages
-            .iter()
-            .any(|m| m.role == Role::Tool && m.content.text().contains("not exposed")),
-        "the stage-forbidden inner tool must be rejected"
-    );
-    assert!(agent.framework().close().await.is_success());
-}
-
-#[tokio::test]
 async fn wrap_all_gateway_discovers_and_executes_other_providers_tools() {
     // The host installs the gateway with no explicit providers; every other
     // installed provider becomes wrapped, searchable inventory.

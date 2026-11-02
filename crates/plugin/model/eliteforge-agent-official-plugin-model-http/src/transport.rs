@@ -449,8 +449,13 @@ pub fn status_error(status: u16, body: &Value) -> ModelError {
         code
     };
     let category = match (status, code) {
-        (_, "device_unbound" | "decrypt_error" | "DecryptFailed") => {
+        (_, "device_unbound") => {
             ProviderErrorCategory::AccountChanged
+        }
+        (400, "decrypt_error" | "DecryptFailed")
+            if message == "Decrypt failed" || message == "Client private key not found" =>
+        {
+            ProviderErrorCategory::Authentication
         }
         (429, _)
             if message.contains("积分")

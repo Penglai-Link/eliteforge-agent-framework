@@ -27,7 +27,10 @@ impl Agent {
         let (generation, _lease) = self.admit("operation", "generate_image")?;
         generation.generate_image(request).await
     }
-    pub async fn submit_image(&self, request: ImageGenerationRequest) -> Result<ImageJob, AgentError> {
+    pub async fn submit_image(
+        &self,
+        request: ImageGenerationRequest,
+    ) -> Result<ImageJob, AgentError> {
         let (generation, _lease) = self.admit("operation", "submit_image")?;
         generation.submit_image(request).await
     }
@@ -39,7 +42,10 @@ impl Agent {
         let (generation, _lease) = self.admit("operation", "cancel_image")?;
         generation.cancel_image(job).await
     }
-    pub async fn detect_content(&self, request: ContentDetectionRequest) -> Result<ContentDetectionResponse, AgentError> {
+    pub async fn detect_content(
+        &self,
+        request: ContentDetectionRequest,
+    ) -> Result<ContentDetectionResponse, AgentError> {
         let (generation, _lease) = self.admit("operation", "detect_content")?;
         generation.detect_content(request).await
     }
@@ -131,6 +137,18 @@ impl Agent {
         let (generation, _lease) = self.admit("operation", "answer")?;
         generation.answer(session, interaction_id, value).await
     }
+    pub async fn answer_with_provenance(
+        &self,
+        session: &str,
+        interaction_id: RunId,
+        value: serde_json::Value,
+        provenance: Option<MessageProvenance>,
+    ) -> Result<RunRequest, AgentError> {
+        let (generation, _lease) = self.admit("operation", "answer_with_provenance")?;
+        generation
+            .answer_with_provenance(session, interaction_id, value, provenance)
+            .await
+    }
     pub async fn conversation(
         &self,
         key: &ConversationKey,
@@ -218,32 +236,58 @@ impl Agent {
         let generation = self.snapshot();
         generation.budget_usage(run)
     }
-    pub fn execution_snapshot(&self, run: &impl AsRef<RunControl>, result: &RunResult) -> Result<RunExecutionSnapshot, AgentError> {
+    pub fn execution_snapshot(
+        &self,
+        run: &impl AsRef<RunControl>,
+        result: &RunResult,
+    ) -> Result<RunExecutionSnapshot, AgentError> {
         self.snapshot().execution_snapshot(run, result)
     }
-    pub async fn start_child_owned(&self, request: RunRequest, parent: &RunContext) -> Result<ChildRunHandle, AgentError> {
+    pub async fn start_child_owned(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<ChildRunHandle, AgentError> {
         let (generation, lease) = self.admit("task", &request.session_id)?;
         let mut child = generation.start_child_owned(request, parent).await?;
         child.handle.as_mut().expect("child handle").occupancy = Some(lease);
         Ok(child)
     }
-    pub async fn start_child_with_output_owned<T: Send + 'static>(&self, request: RunRequest, parent: &RunContext) -> Result<(ChildRunHandle, T), AgentError> {
+    pub async fn start_child_with_output_owned<T: Send + 'static>(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<(ChildRunHandle, T), AgentError> {
         let (generation, lease) = self.admit("task", &request.session_id)?;
-        let (mut child, output) = generation.start_child_with_output_owned(request, parent).await?;
+        let (mut child, output) = generation
+            .start_child_with_output_owned(request, parent)
+            .await?;
         child.handle.as_mut().expect("child handle").occupancy = Some(lease);
         Ok((child, output))
     }
     /// Detached variant of [`start_child_owned`]: the child outlives the parent
     /// run and is governed by the caller that owns the returned handle.
-    pub async fn start_child_detached_owned(&self, request: RunRequest, parent: &RunContext) -> Result<ChildRunHandle, AgentError> {
+    pub async fn start_child_detached_owned(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<ChildRunHandle, AgentError> {
         let (generation, lease) = self.admit("task", &request.session_id)?;
-        let mut child = generation.start_child_detached_owned(request, parent).await?;
+        let mut child = generation
+            .start_child_detached_owned(request, parent)
+            .await?;
         child.handle.as_mut().expect("child handle").occupancy = Some(lease);
         Ok(child)
     }
-    pub async fn start_child_detached_with_output_owned<T: Send + 'static>(&self, request: RunRequest, parent: &RunContext) -> Result<(ChildRunHandle, T), AgentError> {
+    pub async fn start_child_detached_with_output_owned<T: Send + 'static>(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+    ) -> Result<(ChildRunHandle, T), AgentError> {
         let (generation, lease) = self.admit("task", &request.session_id)?;
-        let (mut child, output) = generation.start_child_detached_with_output_owned(request, parent).await?;
+        let (mut child, output) = generation
+            .start_child_detached_with_output_owned(request, parent)
+            .await?;
         child.handle.as_mut().expect("child handle").occupancy = Some(lease);
         Ok((child, output))
     }
@@ -264,10 +308,6 @@ impl Agent {
     pub async fn wait(&self, handle: RunHandle) -> Result<RunResult, AgentError> {
         let generation = self.snapshot();
         generation.wait(handle).await
-    }
-    pub fn workflow_node_descriptors(&self) -> Vec<WorkflowNodeDescriptor> {
-        let generation = self.snapshot();
-        generation.workflow_node_descriptors()
     }
     pub async fn run(&self, request: RunRequest) -> Result<RunResult, AgentError> {
         let (generation, _lease) = self.admit("operation", "run")?;

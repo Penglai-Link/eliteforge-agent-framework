@@ -51,6 +51,27 @@ impl Plugin for ToolDiscoveryPlugin {
 
 #[async_trait]
 impl ToolProvider for ToolDiscoveryPlugin {
+    fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
+        Some(vec![search_descriptor(), execute_descriptor()])
+    }
+
+    fn catalog_metadata(&self) -> Option<Vec<ToolCatalogEntry>> {
+        Some(
+            vec![search_descriptor(), execute_descriptor()]
+                .into_iter()
+                .map(|descriptor| ToolCatalogEntry {
+                    descriptor,
+                    domain_code: Some("tool".into()),
+                    category: Some(ToolCategory::localized(
+                        "execution",
+                        "执行工具",
+                        "Execution tools",
+                    )),
+                })
+                .collect(),
+        )
+    }
+
     async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError> {
         let mut tools = Vec::new();
         let mut ids = BTreeSet::from([TOOL_SEARCH_ID.to_owned(), TOOL_EXECUTE_ID.to_owned()]);
@@ -106,11 +127,24 @@ impl ToolProvider for ToolDiscoveryPlugin {
                 }
             })
             .collect();
-        tools.push(ToolBinding::new(
-            search_descriptor(),
-            GatewaySearch { entries },
-        ));
-        tools.push(ToolBinding::new(execute_descriptor(), GatewayExecute));
+        tools.push(
+            ToolBinding::new(search_descriptor(), GatewaySearch { entries })
+                .with_domain_code("tool")
+                .with_category(ToolCategory::localized(
+                    "execution",
+                    "执行工具",
+                    "Execution tools",
+                )),
+        );
+        tools.push(
+            ToolBinding::new(execute_descriptor(), GatewayExecute)
+                .with_domain_code("tool")
+                .with_category(ToolCategory::localized(
+                    "execution",
+                    "执行工具",
+                    "Execution tools",
+                )),
+        );
         Ok(ToolLease::new(tools))
     }
 }

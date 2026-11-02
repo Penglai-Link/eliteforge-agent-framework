@@ -145,7 +145,10 @@ impl McpClient {
                 format!("mcp.resource/{}/{name}", self.0.config.namespace),
                 format!("mcp_resources__{}__{name}", self.0.config.namespace),
                 description, schema,
-            ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query), ResourceTool { client: self.clone(), operation })
+            ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query), ResourceTool { client: self.clone(), operation }).with_source(eliteforge_agent_core::ToolSource {
+                provider_id: Some(format!("mcp/{}", self.0.config.namespace)),
+                ..Default::default()
+            })
         }).collect()
     }
 }

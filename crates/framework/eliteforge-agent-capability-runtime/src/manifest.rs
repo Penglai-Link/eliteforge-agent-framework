@@ -105,6 +105,10 @@ pub enum McpDeclarationTransport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CapabilityPackManifest {
+    /// Inert provider-owned tool catalogue, including localized display resources.
+    /// Publishing metadata never registers executors or grants tool permissions.
+    #[serde(default)]
+    pub tools: Vec<eliteforge_agent_core::ToolCatalogEntry>,
     pub manifest_version: u32,
     pub id: String,
     pub name: String,
@@ -204,6 +208,14 @@ impl CapabilityPackManifest {
                 )));
             }
         }
+        let mut tool_ids=std::collections::HashSet::new();
+        let mut call_names=std::collections::HashSet::new();
+        for tool in &self.tools {
+            validate_id(&tool.descriptor.id)?;
+            if tool.descriptor.call_name.is_empty() || !tool_ids.insert(&tool.descriptor.id) || !call_names.insert(&tool.descriptor.call_name) {
+                return Err(RuntimeError::Invalid("duplicate or invalid tool catalog identity".into()));
+            }
+        }
         let mut contracts = std::collections::HashSet::new();
         for contract in &self.extension_points {
             validate_id(&contract.id)?;
@@ -275,7 +287,7 @@ impl CapabilityPackManifest {
 pub fn framework_extension_contracts() -> Vec<ExtensionContract> {
     use ExtensionCategory::*;
     let groups = [
-        (Execution, vec!["agent-loop", "workflow-node"]),
+        (Execution, vec!["agent-loop"]),
         (
             Model,
             vec![
@@ -315,7 +327,6 @@ pub fn framework_extension_contracts() -> Vec<ExtensionContract> {
                 "run-middleware",
                 "model-middleware",
                 "tool-middleware",
-                "node-middleware",
                 "lifecycle-hook",
             ],
         ),

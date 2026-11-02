@@ -254,7 +254,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stage: params["stage"].as_str().unwrap_or("plugin").into(),
                 step: params["step"].as_u64().unwrap_or(0) as usize,
                 attempt: params["attempt"].as_u64().unwrap_or(0) as usize,
-                node_execution: None,
                 input_capacity: params["budget"]["max_tokens"].as_u64().unwrap_or(1000) as usize,
                 protocol_tokens: 0,
                 estimated_input_tokens: 0,
@@ -264,16 +263,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     backend.method("demo.model-middleware","intercept",|params:Value,ctx|async move{ctx.host_call("host.next",params["request"].clone()).await})?;
-    backend.method("demo.node", "validate", |_: Value, _| async { Ok(()) })?;
-    backend.method("demo.node", "execute", |params: Value, ctx| async move {
-        let snapshot: ConversationSnapshot = serde_json::from_value(ctx.host_call("host.node.snapshot", Value::Null).await?).map_err(|e| RpcFault::new(e.to_string()))?;
-        let output = params["input"]["config"].clone();
-        ctx.host_call("host.node.save_with_conversation", json!({"checkpoint":{"output":output},"revision":snapshot.revision,"messages":[Message::assistant("remote node checkpoint")]})).await?;
-        let updated: ConversationSnapshot = serde_json::from_value(ctx.host_call("host.node.snapshot", Value::Null).await?).map_err(|e| RpcFault::new(e.to_string()))?;
-        if updated.revision <= snapshot.revision { return Err(RpcFault::new("conversation CAS did not advance")); }
-        Ok(WorkflowNodeResult::completed(output))
-    })?;
-    backend.method("demo.node-middleware","intercept",|params:Value,ctx|async move{ctx.host_call("host.next",params["input"].clone()).await})?;
     for operation in ["on_started", "on_finished"] {
         backend.method("demo.lifecycle", operation, |_: Value, _| async { Ok(()) })?;
     }
@@ -456,7 +445,6 @@ async fn remote_wait(params: Value, ctx: BackendCallContext) -> Result<RunResult
         let record = InteractionRecord {
             session_id: checkpoint.session_id.clone(),
             run_id: checkpoint.run_id,
-            node_invocation_id: None,
             request: request.clone(),
             tool_call: None,
             response: None,

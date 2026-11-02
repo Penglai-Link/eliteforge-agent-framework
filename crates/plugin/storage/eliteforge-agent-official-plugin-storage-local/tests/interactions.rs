@@ -71,54 +71,7 @@ fn selected(request: &InteractionRequest) -> Value {
         q[2].id.to_string():{"skip":true}
     }})
 }
-async fn build(
-    path: &Path,
-    mode: &str,
-    first: Option<ToolCall>,
-    seen: Arc<Mutex<Vec<ChatRequest>>>,
-    count: Arc<Mutex<Vec<Value>>>,
-    approval: bool,
-) -> Agent {
-    let artifacts = path.with_extension("artifacts");
-    if !artifacts.exists() {
-        std::fs::create_dir(&artifacts).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&artifacts, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-    }
-    let mut builder = TestBuilder::new().plugin(LocalStoragePlugin::new(path, artifacts))
-        .plugin(ChatModelPlugin::new(Script { first, requests: seen })).plugin(HumanInteractionPlugin)
-        .plugin(ToolProviderPlugin::new("work", StaticToolProvider::new(vec![ToolBinding::new(
-            ToolDescriptor::new("work", "work", "work", json!({"type":"object","required":["value"],"properties":{"value":{"type":"integer"}},"additionalProperties":false})), Counted(count)
-        )]))).plugin(AgUiPlugin::default());
-    if approval {
-        builder = builder.plugin(ToolPolicyPlugin::new("approve", Approve));
-    }
-    if mode == "workflow" {
-        builder = builder.plugin(AgentLoopPlugin::new(
-            WorkflowLoop::new(WorkflowDefinition {
-                id: "questions".into(),
-                version: 1,
-                stages: vec![WorkflowStage::new("react")],
-            })
-            .unwrap(),
-        ));
-    } else if mode == "dag" {
-        builder = builder.plugin(AgentLoopPlugin::new(
-            DagWorkflowLoop::new(DagWorkflowDefinition {
-                id: "questions".into(),
-                version: 1,
-                nodes: vec![DagNode::react(WorkflowStage::new("react"))],
-                edges: vec![],
-                max_parallel_nodes: 1,
-            })
-            .unwrap(),
-        ));
-    }
-    builder.build().await.unwrap()
-}
+
 #[tokio::test]
 async fn all_loops_persist_questions_answers_and_agui_interrupts_across_restart() {
     for mode in ["react", "workflow", "dag"] {

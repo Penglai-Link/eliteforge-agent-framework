@@ -503,13 +503,19 @@ impl McpClient {
                     },
                 );
                 // Server annotations are hints, not authority to grant parallel safety.
-                tools.push(ToolBinding::new(
-                    descriptor,
-                    McpTool {
-                        client: self.clone(),
-                        name,
-                    },
-                ));
+                tools.push(
+                    ToolBinding::new(
+                        descriptor,
+                        McpTool {
+                            client: self.clone(),
+                            name,
+                        },
+                    )
+                    .with_source(eliteforge_agent_core::ToolSource {
+                        provider_id: Some(format!("mcp/{}", self.0.config.namespace)),
+                        ..Default::default()
+                    }),
+                );
             }
             match page.next_cursor {
                 None => {

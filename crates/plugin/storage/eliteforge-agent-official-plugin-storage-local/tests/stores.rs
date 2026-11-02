@@ -208,7 +208,6 @@ async fn sqlite_interaction_answers_have_atomic_competition_and_idempotency() {
     let record = InteractionRecord {
         session_id: "s".into(),
         run_id: RunId::new_v4(),
-        node_invocation_id: None,
         request: request.clone(),
         tool_call: None,
         response: None,

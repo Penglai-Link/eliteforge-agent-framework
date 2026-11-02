@@ -99,6 +99,23 @@ async fn check_personai_error(
 async fn personai_encrypted_model_transport_preserves_product_header_and_provider_error_categories()
 {
     use eliteforge_agent_core::ProviderErrorCategory;
+    for message in ["Decrypt failed", "Client private key not found"] {
+        check_personai_error(
+            400,
+            &json!({"error":{"type":"decrypt_error","message":message}}).to_string(),
+            ProviderErrorCategory::Authentication,
+        ).await;
+    }
+    check_personai_error(
+        400,
+        r#"{"error":{"type":"decrypt_error","message":"Invalid JSON"}}"#,
+        ProviderErrorCategory::Other,
+    ).await;
+    check_personai_error(
+        401,
+        r#"{"error":{"type":"decrypt_error","message":"Token已过期"}}"#,
+        ProviderErrorCategory::Authentication,
+    ).await;
     check_personai_error(401, "设备已解绑", ProviderErrorCategory::AccountChanged).await;
     check_personai_error(
         429,

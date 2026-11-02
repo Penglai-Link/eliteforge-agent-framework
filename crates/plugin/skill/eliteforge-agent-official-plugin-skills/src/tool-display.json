@@ -1,0 +1,45 @@
+{
+  "defaultLocale": "en-US",
+  "tools": {
+    "skills.load": {
+      "en-US": {
+        "name": "Skills Load",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "加载技能",
+        "description": "读取已启用技能的使用说明及资源列表。"
+      }
+    },
+    "skills.read_resource": {
+      "en-US": {
+        "name": "Skills Read Resource",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "读取技能资源",
+        "description": "读取已启用技能中的文本资源。"
+      }
+    },
+    "skills.diagnostics": {
+      "en-US": {
+        "name": "Skills Diagnostics",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "查看技能诊断",
+        "description": "查看技能目录中的发现和配置问题。"
+      }
+    }
+  },
+  "parameters": {
+    "en-US": {
+      "/properties/path": "File path",
+      "/properties/name": "Resource name"
+    },
+    "zh-CN": {
+      "/properties/path": "文件路径",
+      "/properties/name": "资源名称"
+    }
+  }
+}

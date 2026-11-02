@@ -1,6 +1,6 @@
 //! Standalone durable approval with a deterministic protocol fixture, not an LLM.
 //! Each command is a separate process. Replace Arithmetic with a ChatModel
-//! plugin (e.g. genai) to drive the same workflow with an actual model.
+//! plugin (e.g. genai) to drive the same ReAct loop with an actual model.
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
 use eliteforge_agent_official_plugin_storage_local::LocalStoragePlugin;
@@ -89,7 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::set_permissions(&artifact_root, std::fs::Permissions::from_mode(0o700))?;
     }
     let framework = FrameworkBuilder::new().plugin(LocalStoragePlugin::new(&args[2], artifact_root)).plugin(ChatModelPlugin::new(Arithmetic))
-        .plugin(AgentLoopPlugin::new(WorkflowLoop::new(WorkflowDefinition { id:"approval-example".into(), version:1, stages:vec![WorkflowStage::new("calculate")] })?))
+        .plugin(AgentLoopPlugin::new(ReactAgentLoop))
         .plugin(ToolPolicyPlugin::new("approval", Approval))
         .plugin(ToolProviderPlugin::new("tools", StaticToolProvider::new(vec![ToolBinding::new(ToolDescriptor::new("double", "double", "Double an integer", json!({"type":"object","properties":{"amount":{"type":"integer"}},"required":["amount"],"additionalProperties":false})), Double)])))
         .build().await?;

@@ -132,7 +132,6 @@ impl HistoryMessage {
 pub struct HistoryStep {
     pub id: String,
     pub run_id: RunId,
-    pub node_invocation_id: Option<RunId>,
     pub sequence: usize,
     pub attempt: usize,
     pub name: String,
@@ -458,7 +457,16 @@ impl HistoryService {
         let mut history = self.0.read_session(session_id, query).await?;
         crate::normalize_external_tool_history(&mut history.records.tool_invocations);
         for tool in &mut history.records.tool_invocations {
-            if history.runs.iter().any(|run| run.id == tool.run_id && matches!(run.status, HistoryStatus::Completed | HistoryStatus::Failed | HistoryStatus::Interrupted | HistoryStatus::Unknown)) {
+            if history.runs.iter().any(|run| {
+                run.id == tool.run_id
+                    && matches!(
+                        run.status,
+                        HistoryStatus::Completed
+                            | HistoryStatus::Failed
+                            | HistoryStatus::Interrupted
+                            | HistoryStatus::Unknown
+                    )
+            }) {
                 crate::finalize_external_tool_observation(tool);
             }
         }

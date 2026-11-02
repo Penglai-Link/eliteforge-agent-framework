@@ -130,7 +130,7 @@ impl ChatModel for CommandModel {
         } else {
             ChatResponse::tool_calls(vec![ToolCall::new(
                 "command",
-                "system_exec",
+                "command_exec",
                 json!({"command":"sleep 0.3; touch late-command"}),
             )])
         })

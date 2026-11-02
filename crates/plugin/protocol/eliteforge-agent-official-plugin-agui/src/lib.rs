@@ -77,7 +77,6 @@ impl AgUiPlugin {
             timestamp_unix_ms: u64::MAX,
             run_id,
             session_id: request.session_id.clone(),
-            node_execution: None,
             event: AgentEvent::RunStarted {
                 run_id,
                 session_id: request.session_id.clone(),
@@ -218,7 +217,6 @@ fn relevant(event: &AgentEvent) -> bool {
         event,
         AgentEvent::RunStarted { .. }
             | AgentEvent::Output(_)
-            | AgentEvent::WorkflowNodeChanged { .. }
             | AgentEvent::Collaboration(_)
             | AgentEvent::Steered(_)
             | AgentEvent::RunFinished { .. }

@@ -241,7 +241,7 @@ impl AgentLoop for ContinuationLoop {
         let lease = store
             .claim(context.run_id, context.execution_id(), ttl)
             .await?;
-        let guard = crate::model_execution::WorkflowLease::new(
+        let guard = crate::model_execution::RunLeaseGuard::new(
             store.clone(),
             lease.clone(),
             ttl,

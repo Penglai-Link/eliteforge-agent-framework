@@ -7,6 +7,7 @@ description = "In-process filesystem and asynchronous system-command plugins"
 [dependencies]
 eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
 async-trait.workspace = true
+base64 = "0.22"
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "process"] }

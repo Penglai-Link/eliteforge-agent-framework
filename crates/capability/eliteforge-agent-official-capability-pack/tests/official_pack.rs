@@ -229,9 +229,9 @@ impl ChatModel for LocalToolCatalog {
         for name in [
             "fs_read_text",
             "fs_write_text",
-            "system_exec",
-            "system_exec_task_read",
-            "system_exec_task_stop",
+            "command_exec",
+            "command_exec_read",
+            "command_exec_stop",
         ] {
             assert_eq!(
                 request.tools.iter().any(|tool| tool.call_name == name),
@@ -363,7 +363,7 @@ impl ChatModel for OptionalCatalog {
         }
         for name in [
             "web_search",
-            "web_fetch",
+            "web_read",
             "media_read_image",
             "media_read_pdf",
         ] {
@@ -398,7 +398,7 @@ impl ChatModel for OptionalCatalog {
         // Discovery output proves the optional plugins were actually installed.
         for name in [
             "web_search",
-            "web_fetch",
+            "web_read",
             "media_read_image",
             "media_read_pdf",
         ] {

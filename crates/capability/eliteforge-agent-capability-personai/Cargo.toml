@@ -9,7 +9,7 @@ eliteforge-agent-capability-auto-routing = { path = "../eliteforge-agent-capabil
 eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core", version = "0.1.0" }
 eliteforge-agent-official-plugin-tools-discovery = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-discovery", version = "0.1.0" }
 eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", version = "0.1.0", default-features = false }
-crab-serverapi = { git = "https://gitee.com/person-ai/person-ai-index-rust-sdk.git", rev = "b1e63a5e0199d09f000ad1d23b7e5559ee95710c" }
+crab-serverapi = { git = "https://gitee.com/person-ai/person-ai-index-rust-sdk.git", rev = "3baeeaaa69f04d883ada509c391dbd474d205429" }
 async-trait.workspace = true
 base64 = "0.22"
 futures.workspace = true

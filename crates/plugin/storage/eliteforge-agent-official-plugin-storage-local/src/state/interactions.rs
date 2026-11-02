@@ -117,7 +117,7 @@ impl InteractionStore for SqliteStateStore {
             for (record,encoded) in encoded {
                 if let Some(old) = previous.get(&record.request.id) {
                     if old.session_id != record.session_id || old.run_id != record.run_id
-                        || old.node_invocation_id != record.node_invocation_id || old.request != record.request || old.tool_call != record.tool_call {
+                        || old.request != record.request || old.tool_call != record.tool_call {
                         return Err(StateError::Conflict);
                     }
                 } else {

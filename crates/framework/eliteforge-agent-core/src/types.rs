@@ -263,6 +263,9 @@ pub struct ToolDescriptor {
     pub call_name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Human-facing plugin resources; excluded from model function projections.
+    #[serde(default)]
+    pub display: Option<crate::ToolDisplayMetadata>,
     /// A declaration, not a guarantee that the executor cannot modify data.
     #[serde(default)]
     pub operation_kind: ToolOperationKind,
@@ -284,6 +287,7 @@ impl ToolDescriptor {
             call_name: call_name.into(),
             description: description.into(),
             input_schema,
+            display: None,
             operation_kind: ToolOperationKind::Unknown,
             timeout_scope: ToolTimeoutScope::Tool,
             input_mode: ToolInputMode::Batch,
@@ -736,7 +740,11 @@ pub struct RunRequest {
     pub agent_code: Option<String>,
     /// Requested child working directory. The host resolves relative paths against
     /// the caller's directory and validates its existing filesystem authority.
-    #[serde(default, rename = "workingDirectory", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        rename = "workingDirectory",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub working_directory: Option<String>,
     /// Host admission identity, shared by control, events and durable run records.
     #[serde(default)]
@@ -829,10 +837,6 @@ pub enum AgentEvent {
         phase: crate::RunLifecyclePhase,
         failure: crate::LifecycleHookFailure,
     },
-    WorkflowNodeChanged {
-        node_id: String,
-        status: crate::WorkflowNodeStatus,
-    },
     Collaboration(Box<crate::CollaborationEvent>),
     ModelSelected {
         stage: String,
@@ -888,8 +892,6 @@ pub struct EventEnvelope {
     pub run_id: RunId,
     pub session_id: String,
     /// Execution identity for parallel node streams. Absent for run-wide events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_execution: Option<crate::WorkflowNodeExecution>,
     pub event: AgentEvent,
 }
 
@@ -1048,6 +1050,90 @@ pub trait Tool: Send + Sync {
     async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError>;
 }
 
+/// Provider-declared catalog grouping. This metadata is kept apart from the
+/// model-facing tool descriptor and does not grant execution authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolCategory {
+    /// Stable, globally scoped category identity.
+    pub code: String,
+    /// Localized display names keyed by locale, for example `zh-CN`.
+    pub names: std::collections::BTreeMap<String, String>,
+}
+
+impl ToolCategory {
+    pub fn new(code: impl Into<String>, names: std::collections::BTreeMap<String, String>) -> Self {
+        Self {
+            code: code.into(),
+            names,
+        }
+    }
+    pub fn localized(
+        code: impl Into<String>,
+        zh: impl Into<String>,
+        en: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            code,
+            [("zh-CN".into(), zh.into()), ("en-US".into(), en.into())]
+                .into_iter()
+                .collect(),
+        )
+    }
+}
+
+/// Provenance attached by the host and registration machinery, not by the model.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolSource {
+    pub provider_id: Option<String>,
+    pub plugin_id: Option<String>,
+    pub pack_id: Option<String>,
+    pub adapter_id: Option<String>,
+}
+
+/// Read-only catalog metadata, independent of an executable tool lease.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolCatalogEntry {
+    pub descriptor: ToolDescriptor,
+    pub domain_code: Option<String>,
+    pub category: Option<ToolCategory>,
+}
+
+#[cfg(test)]
+mod tool_category_tests {
+    use super::*;
+
+    #[test]
+    fn category_round_trips_without_changing_model_descriptor() {
+        let category = ToolCategory::new(
+            "example.documents",
+            [
+                ("zh-CN".into(), "文档工具".into()),
+                ("en-US".into(), "Documents".into()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let encoded = serde_json::to_value(&category).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ToolCategory>(encoded).unwrap(),
+            category
+        );
+        let descriptor = ToolDescriptor::new(
+            "example.read",
+            "example_read",
+            "Read",
+            serde_json::json!({}),
+        );
+        assert!(
+            serde_json::to_value(descriptor)
+                .unwrap()
+                .get("category")
+                .is_none()
+        );
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolBinding {
     pub descriptor: ToolDescriptor,
@@ -1060,6 +1146,10 @@ pub struct ToolBinding {
     /// into their instructions. Purely descriptive discovery metadata: it never
     /// affects admission, policy or exposure.
     pub domain_code: Option<String>,
+    /// Optional business category declared by the tool provider.
+    pub category: Option<ToolCategory>,
+    /// Actual provider and registration provenance, when known.
+    pub source: ToolSource,
 }
 
 impl ToolBinding {
@@ -1070,6 +1160,8 @@ impl ToolBinding {
             exposed: true,
             parallel_safe: false,
             domain_code: None,
+            category: None,
+            source: ToolSource::default(),
         }
     }
     /// Label this binding with its capability group so `tool_search` can list
@@ -1077,6 +1169,21 @@ impl ToolBinding {
     pub fn with_domain_code(mut self, domain_code: impl Into<String>) -> Self {
         self.domain_code = Some(domain_code.into());
         self
+    }
+    pub fn with_category(mut self, category: ToolCategory) -> Self {
+        self.category = Some(category);
+        self
+    }
+    pub fn with_source(mut self, source: ToolSource) -> Self {
+        self.source = source;
+        self
+    }
+    pub fn catalog_entry(&self) -> ToolCatalogEntry {
+        ToolCatalogEntry {
+            descriptor: self.descriptor.clone(),
+            domain_code: self.domain_code.clone(),
+            category: self.category.clone(),
+        }
     }
     pub fn hidden(mut self) -> Self {
         self.exposed = false;
@@ -1131,6 +1238,23 @@ pub trait ToolProvider: Send + Sync {
     fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
         None
     }
+    /// Static management inventory. Dynamic providers return None and are
+    /// catalogued from actual leases; this never authorizes execution or adds
+    /// category metadata to model-facing tool descriptors. Providers may
+    /// declare a category per entry or binding; hosts assign provenance from
+    /// their registration context. `StaticToolProvider` projects its bindings.
+    fn catalog_metadata(&self) -> Option<Vec<ToolCatalogEntry>> {
+        self.descriptors().map(|descriptors| {
+            descriptors
+                .into_iter()
+                .map(|descriptor| ToolCatalogEntry {
+                    descriptor,
+                    domain_code: None,
+                    category: None,
+                })
+                .collect()
+        })
+    }
     async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError>;
 }
 
@@ -1142,8 +1266,6 @@ pub struct AgentServices {
     pub operations: Arc<dyn crate::ModelOperations>,
     pub interactions: Option<crate::InteractionManager>,
     pub lifecycle_hooks: Vec<Arc<dyn crate::RunLifecycleHook>>,
-    pub node_middleware: Vec<Arc<dyn crate::WorkflowNodeMiddleware>>,
-    pub workflow_nodes: crate::WorkflowNodeRegistry,
     pub models: Option<Arc<dyn crate::ChatExecutor>>,
     pub tool_invoker: Arc<crate::ToolInvoker>,
     pub run_middleware: Vec<Arc<dyn crate::RunMiddleware>>,
@@ -1187,8 +1309,6 @@ pub struct RunContext {
     pub model: Option<crate::ModelRef>,
     #[doc(hidden)]
     pub limits: RunLimits,
-    #[doc(hidden)]
-    pub node_execution: Option<crate::WorkflowNodeExecution>,
     #[doc(hidden)]
     pub execution_counters: Option<Arc<crate::budget::ExecutionCounters>>,
     #[doc(hidden)]
@@ -1312,9 +1432,6 @@ impl RunContext {
     }
 
     /// Durable node invocation and the current attempt. Absent outside a node.
-    pub fn node_execution(&self) -> Option<&crate::WorkflowNodeExecution> {
-        self.node_execution.as_ref()
-    }
     pub fn is_tool_revoked(&self, id: &str) -> bool {
         self.revoked_tools
             .lock()
@@ -1493,7 +1610,6 @@ impl RunContext {
                 .min(u64::MAX as u128) as u64,
             run_id: self.run_id,
             session_id: self.session_id.clone(),
-            node_execution: self.node_execution().cloned(),
             event,
         }
     }

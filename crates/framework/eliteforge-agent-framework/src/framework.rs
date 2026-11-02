@@ -34,7 +34,6 @@ pub struct AgentSelection {
     pub skills_from_host: bool,
     pub outputs: Option<Vec<String>>,
     pub context_sources: Option<Vec<String>>,
-    pub workflow_nodes: Option<Vec<String>>,
 }
 impl AgentSelection {
     pub(crate) fn validate_choices(&self, registry: &ServiceRegistry) -> Result<(), AgentError> {
@@ -137,13 +136,10 @@ impl AgentSelection {
         if let Some(ids) = &self.context_sources {
             registry.bind_many::<ContextContributorService>(ids)?;
         }
-        if let Some(ids) = &self.workflow_nodes {
-            registry.bind_many::<WorkflowNodeService>(ids)?;
-        }
         Ok(registry)
     }
     fn with_defaults(mut self, defaults: &Self) -> Self {
-        macro_rules! fill { ($($field:ident),*) => { $(if self.$field.is_none() { self.$field = defaults.$field.clone(); })* }; }
+        macro_rules! fill { ($($field:ident),* $(,)?) => { $(if self.$field.is_none() { self.$field = defaults.$field.clone(); })* }; }
         fill!(
             agent_loop,
             external_agent,
@@ -157,7 +153,6 @@ impl AgentSelection {
             skills,
             outputs,
             context_sources,
-            workflow_nodes
         );
         self
     }
@@ -177,7 +172,6 @@ impl Default for FrameworkBuilder {
                 tool_providers: Some(Vec::new()),
                 skills: Some(Vec::new()),
                 context_sources: Some(Vec::new()),
-                workflow_nodes: Some(vec!["builtin.framework-defaults".into()]),
                 ..AgentSelection::default()
             },
         }
@@ -219,9 +213,6 @@ impl FrameworkBuilder {
         defaults.tool_providers.get_or_insert_with(Vec::new);
         defaults.skills.get_or_insert_with(Vec::new);
         defaults.context_sources.get_or_insert_with(Vec::new);
-        defaults
-            .workflow_nodes
-            .get_or_insert_with(|| vec!["builtin.framework-defaults".into()]);
         self.defaults = defaults;
         self
     }
@@ -263,6 +254,12 @@ impl ToolProvider for SelectedTools {
             tools
         })
     }
+    fn catalog_metadata(&self) -> Option<Vec<ToolCatalogEntry>> {
+        self.provider.catalog_metadata().map(|mut tools| {
+            tools.retain(|tool| self.allowed.contains(&tool.descriptor.id));
+            tools
+        })
+    }
     async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError> {
         let mut lease = self.provider.lease(context).await?;
         lease
@@ -287,13 +284,7 @@ fn validate_registry(registry: &ServiceRegistry) -> Result<(), AgentError> {
         ContextReducerService
     );
     ModelRuntime::from_registry(registry)?;
-    WorkflowNodeRegistry::new(
-        registry
-            .all::<WorkflowNodeService>()
-            .iter()
-            .map(|service| service.0.clone())
-            .collect(),
-    )?;
+
     let mut ids = std::collections::HashSet::new();
     let mut names = std::collections::HashSet::new();
     for provider in registry.all::<ToolProviderService>() {
@@ -334,9 +325,6 @@ fn validate_defaults(
     }
     if let Some(ids) = &defaults.context_sources {
         registry.bind_many::<ContextContributorService>(ids)?;
-    }
-    if let Some(ids) = &defaults.workflow_nodes {
-        registry.bind_many::<WorkflowNodeService>(ids)?;
     }
     Ok(())
 }

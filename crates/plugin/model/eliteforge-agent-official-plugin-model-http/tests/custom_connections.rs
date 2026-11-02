@@ -389,3 +389,49 @@ async fn missing_usage_stays_unknown_and_invalid_headers_never_reach_network() {
     }
     assert_eq!(fixture.captured.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn text_rerank_adapter_rejects_media_before_transport_instead_of_discarding_it() {
+    use eliteforge_agent_core as fw;
+    use fw::RerankModel;
+    struct NoTransport;
+    #[async_trait::async_trait]
+    impl ModelTransportFactory for NoTransport {
+        async fn create(
+            &self,
+            _: &AgentModelConfig,
+        ) -> Result<Arc<dyn ModelTransport>, fw::ModelError> {
+            panic!("unsupported media must be rejected before creating transport")
+        }
+    }
+    let model = HttpRerankModel {
+        config: config(AgentModelProtocol::ChatCompletions, "http://127.0.0.1:1"),
+        factory: Arc::new(NoTransport),
+        chat_fallback: false,
+        chat_instruction: None,
+    };
+    let mut image = fw::Content::from("caption");
+    image.0.push(fw::ContentBlock::Media {
+        media: fw::MediaContent {
+            mime_type: "image/png".into(),
+            source: fw::MediaSource::Base64("AA==".into()),
+            name: None,
+            estimated_tokens: Some(10),
+        },
+    });
+    let error = model
+        .rerank(
+            "test",
+            fw::RerankRequest {
+                choice: Default::default(),
+                query: "query".into(),
+                documents: vec![image],
+                top_n: Some(1),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error,fw::ModelError::Fatal(message) if message.contains("media-capable adapter"))
+    );
+}

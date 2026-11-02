@@ -84,6 +84,15 @@ macro_rules! implement {
                 $select(context, candidates)
             }
         }
+        impl MultimodalRerankAutoRouter for $router {
+            fn select(
+                &self,
+                context: &AutoRouteContext<'_>,
+                candidates: &[AutoRouteCandidate],
+            ) -> Result<ModelRef, AgentError> {
+                $select(context, candidates)
+            }
+        }
         impl RerankAutoRouter for $router {
             fn select(
                 &self,
@@ -152,6 +161,46 @@ mod tests {
         assert_ne!(
             selected,
             ChatAutoRouter::select(&StableAutoRouter, &context, &[a.clone(), b]).unwrap()
+        );
+    }
+    #[test]
+    fn text_and_multimodal_rerank_have_separate_policies_and_operation_guards() {
+        let available = vec![AutoRouteCandidate::new(ModelRef::new("host", "multi"))];
+        let routers = AutoRouters {
+            rerank: Some(Arc::new(OrderedAutoRouter)),
+            ..Default::default()
+        };
+        let context = AutoRouteContext {
+            operation: ModelOperation::Rerank,
+            stage: "rerank",
+            affinity: "workspace",
+            call_key: "rerank",
+            previous: None,
+            transient_failures: 0,
+        };
+        assert!(matches!(
+            routers.select_multimodal_rerank(&context, &available),
+            Err(AgentError::MissingService("MultimodalRerankAutoRouter"))
+        ));
+        let routers = AutoRouters {
+            multimodal_rerank: Some(Arc::new(StableAutoRouter)),
+            ..Default::default()
+        };
+        assert_eq!(
+            routers
+                .select_multimodal_rerank(&context, &available)
+                .unwrap(),
+            available[0].model
+        );
+        assert!(routers.select(&context, &available).is_err());
+        let wrong = AutoRouteContext {
+            operation: ModelOperation::Embedding,
+            ..context
+        };
+        assert!(
+            routers
+                .select_multimodal_rerank(&wrong, &available)
+                .is_err()
         );
     }
     #[test]

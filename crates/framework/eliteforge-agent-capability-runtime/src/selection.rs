@@ -558,7 +558,6 @@ impl Plugin for RemoteMemberPlugin {
         }
         match self.declaration.extension.as_str() {
             "framework.agent-loop" => multiple!(LoopService, AgentLoop),
-            "framework.workflow-node" => multiple!(WorkflowNodeService, WorkflowNode),
             "framework.chat-model" => {
                 let connection = self.declaration.metadata["connection"]
                     .as_str()
@@ -666,9 +665,6 @@ impl Plugin for RemoteMemberPlugin {
             "framework.run-middleware" => multiple!(RunMiddlewareService, RunMiddleware),
             "framework.model-middleware" => multiple!(ModelMiddlewareService, ModelMiddleware),
             "framework.tool-middleware" => multiple!(ToolMiddlewareService, ToolMiddleware),
-            "framework.node-middleware" => {
-                multiple!(WorkflowNodeMiddlewareService, WorkflowNodeMiddleware)
-            }
             "framework.lifecycle-hook" => multiple!(RunLifecycleHookService, RunLifecycleHook),
             "framework.event-sink" => {
                 let sink: Arc<dyn EventSink> =

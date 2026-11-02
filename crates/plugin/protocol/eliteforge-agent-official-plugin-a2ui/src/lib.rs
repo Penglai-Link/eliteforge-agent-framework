@@ -12,10 +12,7 @@ pub const VERSION: &str = "v0.9.1";
 pub const MINIMAL_CATALOG_ID: &str = "https://eliteforge.dev/a2ui/v0.9.1/minimal";
 pub const AGENT_CATALOG_ID: &str = "https://eliteforge.dev/a2ui/v0.9.1/agent";
 mod guidance;
-pub use guidance::{
-    A2UI_PACK_ID, A2UI_SKILL_NAME, A2uiPack, is_a2ui_tool,
-    negotiated,
-};
+pub use guidance::{A2UI_PACK_ID, A2UI_SKILL_NAME, A2uiPack, is_a2ui_tool, negotiated};
 const KEY: &str = "framework.a2ui.v1";
 const MAX_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -732,12 +729,27 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         if input {"a2ui_request_input"} else {"a2ui_publish"},
         if input {"Publish a schema-validated SubmitOnce form and wait for its response to resume this run. Use the negotiated catalog and bind submit context.response to the response data model. Follow the a2ui-interface skill."} else {"Create, update or delete validated A2UI v0.9.1 surfaces. Choose Display for read-only reports or Reusable for repeated actions. Use the negotiated catalog, root component and complete envelopes; follow the a2ui-interface skill."},
         json!({"type":"object","additionalProperties":false,"required":["mode","messages"],"properties":{"mode":{"enum":if input{vec!["SubmitOnce"]}else{vec!["Display","Reusable"]}},"messages":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object"}},"responseSchema":{"type":"object"}}})
-    ).with_single_input()).collect()
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command).with_single_input()).collect()
+}
+pub fn tool_category() -> eliteforge_agent_core::ToolCategory {
+    eliteforge_agent_core::ToolCategory::localized("interaction", "交互工具", "Interaction tools")
 }
 #[async_trait]
 impl ToolProvider for A2uiService {
     fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
         Some(tool_descriptors())
+    }
+    fn catalog_metadata(&self) -> Option<Vec<eliteforge_agent_core::ToolCatalogEntry>> {
+        Some(
+            tool_descriptors()
+                .into_iter()
+                .map(|descriptor| eliteforge_agent_core::ToolCatalogEntry {
+                    descriptor,
+                    domain_code: Some("a2ui".into()),
+                    category: Some(tool_category()),
+                })
+                .collect(),
+        )
     }
     async fn lease(&self, run: &RunContext) -> Result<ToolLease, AgentError> {
         if !negotiated(&run.extensions) {
@@ -758,7 +770,11 @@ impl ToolProvider for A2uiService {
         Ok(ToolLease::new(
             tool_descriptors()
                 .into_iter()
-                .map(|descriptor| ToolBinding::new(descriptor, A2uiTool(self.clone())).with_domain_code("a2ui"))
+                .map(|descriptor| {
+                    ToolBinding::new(descriptor, A2uiTool(self.clone()))
+                        .with_domain_code("a2ui")
+                        .with_category(tool_category())
+                })
                 .collect(),
         ))
     }
@@ -777,6 +793,9 @@ impl Tool for A2uiTool {
             .ok_or_else(|| ToolError::Failed("A2UI not negotiated".into()))?;
         let result=async {
             if identity.tool_id=="a2ui.request_input"{
+                if run.extensions.get::<eliteforge_agent_core::CallerInteractionScope>().is_some() {
+                    return Err(invalid("delegated runs must use ask_caller instead of requesting user input"));
+                }
                 let input:PublishInput=serde_json::from_value(args.clone()).map_err(|e|invalid(e.to_string()))?;
                 if input.mode!=SurfaceMode::SubmitOnce{return Err(invalid("Expected SubmitOnce"));}
                 let schema=input.response_schema.ok_or_else(||invalid("Missing responseSchema"))?;

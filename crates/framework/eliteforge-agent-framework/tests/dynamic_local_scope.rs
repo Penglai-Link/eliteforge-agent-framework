@@ -88,7 +88,7 @@ impl ChatModel for Model {
                     if s.mode == 3 {
                         "terminal_start"
                     } else {
-                        "system_exec"
+                        "command_exec"
                     },
                     json!({"command":"printf started; sleep 20"}),
                 )),
@@ -101,7 +101,7 @@ impl ChatModel for Model {
                             json!({"terminalId":out[0]["terminalId"],"data":"input"}),
                         )
                     } else {
-                        ("system_exec_task_read", json!({"taskId":out[0]["taskId"]}))
+                        ("command_exec_read", json!({"taskId":out[0]["taskId"]}))
                     })
                 }
                 2 => {
@@ -109,7 +109,7 @@ impl ChatModel for Model {
                     Some(if s.mode == 3 {
                         ("terminal_stop", json!({"terminalId":out[0]["terminalId"]}))
                     } else {
-                        ("system_exec_task_stop", json!({"taskId":out[0]["taskId"]}))
+                        ("command_exec_stop", json!({"taskId":out[0]["taskId"]}))
                     })
                 }
                 _ => None,
@@ -146,13 +146,16 @@ impl ChatModel for Model {
         } else {
             match step {
                 0 => Some(("fs_read_text", json!({"path":"value.txt"}))),
-                1 => Some(("system_exec", json!({"command":"printf started; sleep 20"}))),
+                1 => Some((
+                    "command_exec",
+                    json!({"command":"printf started; sleep 20"}),
+                )),
                 2 => {
                     *s.scope.0.lock().unwrap() =
                         snapshot("B", &s.b, vec![s.a.clone(), s.b.clone()]);
                     Some(("fs_read_text", json!({"path":"value.txt"})))
                 }
-                3 => Some(("system_exec", json!({"command":"pwd"}))),
+                3 => Some(("command_exec", json!({"command":"pwd"}))),
                 4 => Some(("terminal_start", json!({"command":"pwd; sleep 20"}))),
                 5 => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -165,7 +168,7 @@ impl ChatModel for Model {
                 }
                 7 => {
                     let task = s.outputs.lock().unwrap()[1]["taskId"].clone();
-                    Some(("system_exec_task_stop", json!({"taskId":task})))
+                    Some(("command_exec_stop", json!({"taskId":task})))
                 }
                 _ => None,
             }

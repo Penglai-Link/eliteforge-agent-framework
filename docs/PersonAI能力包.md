@@ -121,7 +121,7 @@ ModelRecoveryPlugin(ModelRecoveryPolicy {
 
 | 工具 | 输入 | 结果 |
 | --- | --- | --- |
-| `personai_search` | `query`，可选 `count`（1–20） | 标题、URL、摘要、来源 |
+| `web_search` | `query`，可选 `count`（1–20） | 标题、URL、摘要、来源 |
 | `personai_generate_image` | `prompt`，可选 `model`、`size`、`quality`、`count`（1–10） | `task_id` 与 `job` |
 | `personai_query_image` | `task_id` | `job` 中的状态、进度、图片 URL、错误 |
 | `personai_detect_text` | `text`，可选 `model` | 模型引用与检测结果 |

@@ -12,6 +12,40 @@ use tokio_util::sync::CancellationToken;
 
 use crate::*;
 
+/// Preserve the registration owner while leasing tools, including when a host
+/// wraps a provider or selects only a subset of its tools.
+struct RegisteredToolProvider {
+    plugin_id: String,
+    provider: Arc<dyn ToolProvider>,
+}
+
+#[async_trait::async_trait]
+impl ToolProvider for RegisteredToolProvider {
+    fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
+        self.provider.descriptors()
+    }
+    fn catalog_metadata(&self) -> Option<Vec<ToolCatalogEntry>> {
+        self.provider.catalog_metadata()
+    }
+
+    async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError> {
+        let mut lease = self.provider.lease(context).await?;
+        for binding in &mut lease.tools {
+            match binding.source.plugin_id.as_deref() {
+                None => binding.source.plugin_id = Some(self.plugin_id.clone()),
+                Some(owner) if owner != self.plugin_id && binding.source.adapter_id.is_none() => {
+                    binding.source.adapter_id = Some(self.plugin_id.clone());
+                }
+                _ => {}
+            }
+            if binding.source.provider_id.is_none() {
+                binding.source.provider_id = Some(self.plugin_id.clone());
+            }
+        }
+        Ok(lease)
+    }
+}
+
 /// Selects capabilities from an already installed Framework environment.
 #[derive(Clone)]
 pub struct AgentBuilder {
@@ -196,18 +230,6 @@ impl AgentBuilder {
                     .iter()
                     .map(|s| s.0.clone())
                     .collect(),
-                node_middleware: registry
-                    .all::<WorkflowNodeMiddlewareService>()
-                    .iter()
-                    .map(|s| s.0.clone())
-                    .collect(),
-                workflow_nodes: WorkflowNodeRegistry::new(
-                    registry
-                        .all::<WorkflowNodeService>()
-                        .iter()
-                        .map(|s| s.0.clone())
-                        .collect(),
-                )?,
                 models,
                 tool_invoker: Arc::new(ToolInvoker::new(
                     registry
@@ -239,7 +261,13 @@ impl AgentBuilder {
                 tools: registry
                     .all::<ToolProviderService>()
                     .iter()
-                    .map(|s| s.0.clone())
+                    .zip(registry.providers::<ToolProviderService>())
+                    .map(|(s, plugin_id)| {
+                        Arc::new(RegisteredToolProvider {
+                            plugin_id: plugin_id.to_owned(),
+                            provider: s.0.clone(),
+                        }) as Arc<dyn ToolProvider>
+                    })
                     .collect(),
                 context_sources: registry
                     .all::<ContextContributorService>()
@@ -974,6 +1002,22 @@ impl AgentGeneration {
         .await
     }
 
+    pub async fn answer_with_provenance(
+        &self,
+        session: &str,
+        interaction_id: RunId,
+        value: serde_json::Value,
+        provenance: Option<MessageProvenance>,
+    ) -> Result<RunRequest, AgentError> {
+        self.execute(AnswerInteractionWithProvenance {
+            session_id: session.into(),
+            interaction_id,
+            value,
+            provenance,
+        })
+        .await
+    }
+
     pub async fn conversation(
         &self,
         key: &ConversationKey,
@@ -1241,10 +1285,6 @@ impl AgentGeneration {
         handle.wait().await
     }
 
-    /// Configuration schemas and capabilities for host workflow editors.
-    pub fn workflow_node_descriptors(&self) -> Vec<WorkflowNodeDescriptor> {
-        self.inner.services.workflow_nodes.descriptors()
-    }
     /// Sessions are exclusive within this instance. Different sessions can run
     /// concurrently; a second active run on the same session returns SessionBusy.
     pub fn start(&self, request: RunRequest) -> Result<RunHandle, AgentError> {
@@ -1466,7 +1506,6 @@ impl AgentGeneration {
         let mut context = RunContext {
             model: request.model.clone(),
             limits: request.limits.clone(),
-            node_execution: None,
             execution_counters: request
                 .extensions
                 .get::<ContinuationBudget>()
@@ -2547,11 +2586,12 @@ impl DetachedChildRegistry {
             // Terminal runs whose result was already delivered keep only a
             // small snapshot; release them before refusing new work.
             state.records.retain(|_, record| {
-                !record
-                    .state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .delivered
+                let state = record.state.lock().unwrap_or_else(|e| e.into_inner());
+                !state.delivered
+                    || matches!(
+                        state.summary.status,
+                        ChildRunStatus::Running | ChildRunStatus::AwaitingInput
+                    )
             });
         }
         if state.records.len() >= MAX_IN_PROCESS_DETACHED_CHILDREN {
@@ -2717,6 +2757,7 @@ impl CollaborationRuntime {
     ) -> RunRequest {
         request.session_id = session_id;
         request.extensions = parent.extensions.clone();
+        request.extensions.insert(CallerInteractionScope);
         request.inherit_host_context(parent);
         if request.message_provenance.is_none() {
             request.message_provenance = parent.assistant_provenance();
@@ -2730,6 +2771,50 @@ impl CollaborationRuntime {
         request.limits.max_steps = request.limits.max_steps.min(parent.limits.max_steps);
         request.limits.max_total_tokens = request.limits.max_total_tokens.min(parent.token_ceiling);
         request
+    }
+
+    async fn start_registered_child(
+        &self,
+        request: RunRequest,
+        parent: &RunContext,
+        detached: bool,
+    ) -> Result<DetachedChildSummary, AgentError> {
+        let agent = self.agent()?;
+        let session_id = format!("tool-child-{}", RunId::new_v4());
+        let agent_code = request.agent_code.clone();
+        let request = Self::prepare_request(request, session_id.clone(), parent);
+        let handle = if detached {
+            agent.start_child_detached_owned(request, parent).await?
+        } else {
+            agent.start_child_owned(request, parent).await?
+        };
+        let child_run_id = handle.run_id();
+        let control = handle.control();
+        let run = Arc::new(DetachedChildRun::new(child_run_id, control));
+        let record = Arc::new(DetachedChildRecord {
+            child_run_id,
+            session_id: session_id.clone(),
+            transition: AsyncMutex::new(()),
+            state: Mutex::new(DetachedChildState {
+                summary: DetachedChildSummary {
+                    child_run_id,
+                    session_id,
+                    agent_code,
+                    status: ChildRunStatus::Running,
+                },
+                run: Some(run.clone()),
+                delivered: false,
+            }),
+        });
+        let summary = record
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .summary
+            .clone();
+        self.children.insert(record.clone())?;
+        self.launch_detached(record, run, handle.wait());
+        Ok(summary)
     }
 
     fn launch(
@@ -2875,6 +2960,7 @@ impl CollaborationRuntime {
             let mut state = record.state.lock().unwrap_or_else(|e| e.into_inner());
             state.run = Some(run.clone());
             state.summary.status = ChildRunStatus::Running;
+            state.delivered = false;
             state.summary.clone()
         };
         self.launch_detached(record, run, handle.wait());
@@ -2906,10 +2992,8 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
         request: RunRequest,
         parent: &RunContext,
     ) -> Result<ChildRunResult, AgentError> {
-        let agent = self.agent()?;
-        let request =
-            Self::prepare_request(request, format!("tool-child-{}", RunId::new_v4()), parent);
-        agent.run_child_with_id(request, parent).await
+        let summary = self.start_registered_child(request, parent, false).await?;
+        self.wait_child(summary.child_run_id, parent).await
     }
 
     async fn spawn_child_detached(
@@ -2917,38 +3001,7 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
         request: RunRequest,
         parent: &RunContext,
     ) -> Result<DetachedChildSummary, AgentError> {
-        let agent = self.agent()?;
-        let session_id = format!("tool-child-{}", RunId::new_v4());
-        let agent_code = request.agent_code.clone();
-        let request = Self::prepare_request(request, session_id.clone(), parent);
-        let handle = agent.start_child_detached_owned(request, parent).await?;
-        let child_run_id = handle.run_id();
-        let control = handle.control();
-        let run = Arc::new(DetachedChildRun::new(child_run_id, control));
-        let record = Arc::new(DetachedChildRecord {
-            child_run_id,
-            session_id: session_id.clone(),
-            transition: AsyncMutex::new(()),
-            state: Mutex::new(DetachedChildState {
-                summary: DetachedChildSummary {
-                    child_run_id,
-                    session_id,
-                    agent_code,
-                    status: ChildRunStatus::Running,
-                },
-                run: Some(run.clone()),
-                delivered: false,
-            }),
-        });
-        let summary = record
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .summary
-            .clone();
-        self.children.insert(record.clone())?;
-        self.launch_detached(record, run, handle.wait());
-        Ok(summary)
+        self.start_registered_child(request, parent, true).await
     }
 
     async fn wait_child(
@@ -3020,11 +3073,16 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
         }
         let agent = self.agent()?;
         let request = agent
-            .answer(&record.session_id, interaction_id, value)
+            .answer_with_provenance(
+                &record.session_id,
+                interaction_id,
+                value,
+                parent.assistant_provenance(),
+            )
             .await?;
         let request = Self::prepare_request(request, record.session_id.clone(), parent);
-        drop(_transition);
-        self.start_detached_run(agent, record, request).await
+        self.start_detached_run(agent, record.clone(), request)
+            .await
     }
 
     async fn cancel_child(
@@ -3212,7 +3270,12 @@ impl AgentCollaborationRuntime for CollaborationRuntime {
         }
         let agent = self.agent()?;
         let request = agent
-            .answer(&record.session_id, interaction_id, value)
+            .answer_with_provenance(
+                &record.session_id,
+                interaction_id,
+                value,
+                parent.assistant_provenance(),
+            )
             .await?;
         let request = Self::prepare_request(request, record.session_id.clone(), parent);
         self.start_thread_run(

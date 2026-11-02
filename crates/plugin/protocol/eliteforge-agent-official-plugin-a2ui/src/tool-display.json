@@ -1,0 +1,55 @@
+{
+  "defaultLocale": "en-US",
+  "tools": {
+    "a2ui.publish": {
+      "en-US": {
+        "name": "A2Ui Publish",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "展示交互界面",
+        "description": "创建或更新包含报告、图表和交互组件的界面。"
+      }
+    },
+    "a2ui.request_input": {
+      "en-US": {
+        "name": "A2Ui Request Input",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "收集用户输入",
+        "description": "展示表单并等待用户提交，随后继续当前运行。"
+      }
+    },
+    "agent.a2ui.publish": {
+      "en-US": {
+        "name": "Agent A2Ui Publish",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "询问用户",
+        "description": "向用户提出问题并等待回答。"
+      }
+    }
+  },
+  "parameters": {
+    "en-US": {
+      "/properties/path": "File path",
+      "/properties/action": "Editing action",
+      "/properties/name": "Resource name",
+      "/properties/question": "Question to answer",
+      "/properties/message": "Message text",
+      "/properties/tool": "Tool call name",
+      "/properties/arguments": "Tool arguments"
+    },
+    "zh-CN": {
+      "/properties/path": "文件路径",
+      "/properties/action": "编辑操作",
+      "/properties/name": "资源名称",
+      "/properties/question": "需要回答的问题",
+      "/properties/message": "消息内容",
+      "/properties/tool": "工具调用名称",
+      "/properties/arguments": "工具参数"
+    }
+  }
+}

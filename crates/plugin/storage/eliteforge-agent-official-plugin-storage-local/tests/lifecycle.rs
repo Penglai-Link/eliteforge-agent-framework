@@ -31,26 +31,8 @@ impl Fixture {
             .plugin(LocalStoragePlugin::new(&path, &root).with_database(database.clone()))
             .plugin(AgentLoopPlugin::named("worker", Echo))
             .plugin(AgentLoopPlugin::named("react", ReactAgentLoop))
-            .plugin(AgentLoopPlugin::named(
-                "workflow",
-                WorkflowLoop::new(WorkflowDefinition {
-                    id: "test.workflow".into(),
-                    version: 1,
-                    stages: vec![WorkflowStage::new("work")],
-                })
-                .unwrap(),
-            ))
-            .plugin(AgentLoopPlugin::named(
-                "dag",
-                DagWorkflowLoop::new(DagWorkflowDefinition {
-                    id: "test.dag".into(),
-                    version: 1,
-                    nodes: vec![DagNode::react(WorkflowStage::new("work"))],
-                    edges: vec![],
-                    max_parallel_nodes: 1,
-                })
-                .unwrap(),
-            ))
+            .plugin(AgentLoopPlugin::named("workflow", ReactAgentLoop))
+            .plugin(AgentLoopPlugin::named("dag", ReactAgentLoop))
             .plugin(AgentLoopPlugin::named("external", ExternalAgentLoop))
             .plugin(ExternalAgentPlugin::new(FakeExternal))
             .plugin(ChatModelPlugin::new(Provider))

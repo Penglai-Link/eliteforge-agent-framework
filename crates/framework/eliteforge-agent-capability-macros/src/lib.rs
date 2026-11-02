@@ -897,8 +897,6 @@ enum CapabilityInterface {
     RunMiddleware,
     ToolPolicy,
     RunLifecycleHook,
-    WorkflowNode,
-    WorkflowNodeMiddleware,
     RunOutputFactory,
     ConversationStore,
     LongTermMemory,
@@ -934,8 +932,6 @@ impl CapabilityInterface {
             "RunMiddleware" => Ok(Self::RunMiddleware),
             "ToolPolicy" => Ok(Self::ToolPolicy),
             "RunLifecycleHook" => Ok(Self::RunLifecycleHook),
-            "WorkflowNode" => Ok(Self::WorkflowNode),
-            "WorkflowNodeMiddleware" => Ok(Self::WorkflowNodeMiddleware),
             "RunOutputFactory" => Ok(Self::RunOutputFactory),
             "ConversationStore" => Ok(Self::ConversationStore),
             "LongTermMemory" => Ok(Self::LongTermMemory),
@@ -965,10 +961,6 @@ impl CapabilityInterface {
             Self::RunMiddleware => quote!(::eliteforge_agent_core::RunMiddlewarePlugin),
             Self::ToolPolicy => quote!(::eliteforge_agent_core::ToolPolicyPlugin),
             Self::RunLifecycleHook => quote!(::eliteforge_agent_core::RunLifecycleHookPlugin),
-            Self::WorkflowNode => quote!(::eliteforge_agent_core::WorkflowNodePlugin),
-            Self::WorkflowNodeMiddleware => {
-                quote!(::eliteforge_agent_core::WorkflowNodeMiddlewarePlugin)
-            }
             Self::RunOutputFactory => quote!(::eliteforge_agent_core::RunOutputPlugin),
             Self::ConversationStore => quote!(::eliteforge_agent_core::ConversationStorePlugin),
             Self::LongTermMemory => quote!(::eliteforge_agent_core::LongTermMemoryPlugin),
@@ -1371,11 +1363,6 @@ mod tests {
             ("RunMiddleware", Some("RunMiddlewarePlugin")),
             ("ToolPolicy", Some("ToolPolicyPlugin")),
             ("RunLifecycleHook", Some("RunLifecycleHookPlugin")),
-            ("WorkflowNode", Some("WorkflowNodePlugin")),
-            (
-                "WorkflowNodeMiddleware",
-                Some("WorkflowNodeMiddlewarePlugin"),
-            ),
             ("RunOutputFactory", Some("RunOutputPlugin")),
             ("ConversationStore", Some("ConversationStorePlugin")),
             ("LongTermMemory", Some("LongTermMemoryPlugin")),

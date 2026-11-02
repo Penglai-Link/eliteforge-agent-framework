@@ -295,7 +295,7 @@ impl ChatModel for RemoteImplementation {
     }
 }
 fn run_identity(run: &RunContext) -> Value {
-    json!({"run_id":run.run_id,"execution_id":run.execution_id(),"session_id":run.session_id,"model":run.model,"limits":run.limits,"node":run.node_execution(),"lineage":run.lineage})
+    json!({"run_id":run.run_id,"execution_id":run.execution_id(),"session_id":run.session_id,"model":run.model,"limits":run.limits,"lineage":run.lineage})
 }
 #[async_trait]
 impl ContextContributor for RemoteImplementation {
@@ -766,6 +766,9 @@ struct RemoteToolDescriptor {
     /// their `domainCode` listing at the gateway.
     #[serde(default)]
     domain_code: Option<String>,
+    /// Category declared by the remote tool provider.
+    #[serde(default)]
+    category: Option<ToolCategory>,
 }
 fn default_true() -> bool {
     true
@@ -825,6 +828,12 @@ impl ToolProvider for RemoteImplementation {
                 exposed: tool.exposed,
                 parallel_safe: tool.parallel_safe,
                 domain_code: tool.domain_code,
+                category: tool.category,
+                source: ToolSource {
+                    provider_id: Some(self.declaration.id.clone()),
+                    pack_id: Some(self.instance.identity.package.clone()),
+                    ..Default::default()
+                },
             })
             .collect();
         Ok(ToolLease::new(tools).with_shutdown(move || async move {
@@ -878,7 +887,7 @@ impl AgentLoop for RemoteImplementation {
         true
     }
     async fn validate_services_async(&self, services: &AgentServices) -> Result<(), AgentError> {
-        self.agent("validate",json!({"models":services.models.as_ref().map(|m|m.catalog().models()),"state":services.state.is_some(),"interactions":services.interactions.is_some(),"workflow_nodes":services.workflow_nodes.descriptors()})).await
+        self.agent("validate",json!({"models":services.models.as_ref().map(|m|m.catalog().models()),"state":services.state.is_some(),"interactions":services.interactions.is_some()})).await
     }
     async fn run(
         &self,
@@ -915,48 +924,6 @@ impl ContextAssembler for RemoteImplementation {
         host.models = Some(input.models);
         host.estimator = Some(input.estimator);
         self.scoped_agent("assemble",json!({"stage":input.stage,"attempt":input.attempt,"step":input.step,"model":input.model,"budget":input.budget,"history":input.history,"instructions":input.instructions,"tools":input.tools,"options":input.options,"run":run_identity(input.run),"limits":input.limits,"overflow_recoveries":input.overflow_recoveries}),&mut host).await
-    }
-}
-#[async_trait]
-impl WorkflowNode for RemoteImplementation {
-    fn kind(&self) -> &str {
-        self.declaration.metadata["kind"]
-            .as_str()
-            .unwrap_or(&self.declaration.id)
-    }
-    fn configuration_schema(&self) -> Value {
-        self.declaration
-            .metadata
-            .get("configuration_schema")
-            .cloned()
-            .unwrap_or(Value::Bool(true))
-    }
-    fn requires_model(&self) -> bool {
-        self.flag("requires_model", false)
-    }
-    fn supports_tool_policy(&self) -> bool {
-        self.flag("supports_tool_policy", false)
-    }
-    fn supports_resume(&self) -> bool {
-        self.flag("supports_resume", false)
-    }
-    async fn validate_async(&self, config: &Value) -> Result<(), AgentError> {
-        self.agent("validate", json!({"config":config})).await
-    }
-    async fn execute(
-        &self,
-        input: WorkflowNodeInput,
-        context: &WorkflowNodeContext,
-        services: &AgentServices,
-    ) -> Result<WorkflowNodeResult, AgentError> {
-        let mut host = crate::host::RunHost::new(
-            &context.run,
-            Some(services),
-            self.permissions(),
-            &self.declaration.id,
-        );
-        host.node = Some(context);
-        self.scoped_agent("execute",json!({"input":input,"run":run_identity(&context.run),"resume":context.resume.as_ref().map(|r|json!({"run_id":r.run_id,"response":r.response}))}),&mut host).await
     }
 }
 struct RunContinuation<'a> {
@@ -1087,60 +1054,6 @@ impl ToolMiddleware for RemoteImplementation {
     ) -> Result<ToolOutput, ToolError> {
         let value=self.invoke_scoped("intercept",json!({"call":context.call,"descriptor":context.descriptor,"invocation_id":context.invocation_id,"run":run_identity(context.run),"continuation":"host.next"}),&mut ToolContinuation{next:Some(next),host:crate::host::RunHost::new(context.run,None,self.permissions(), &self.declaration.id)}).await.map_err(tool_error)?;
         serde_json::from_value(value).map_err(|e| ToolError::Indeterminate(e.to_string()))
-    }
-}
-struct NodeContinuation<'a> {
-    next: Option<WorkflowNodeNext<'a>>,
-    host: crate::host::RunHost<'a>,
-    context: &'a WorkflowNodeContext,
-}
-#[async_trait]
-impl ScopedHost for NodeContinuation<'_> {
-    async fn call(&mut self, request: RpcRequest) -> Result<Value, RpcFault> {
-        if request.method == "host.next" {
-            let next = self
-                .next
-                .take()
-                .ok_or_else(|| RpcFault::new("continuation already consumed"))?;
-            let mut input: WorkflowNodeInput =
-                serde_json::from_value(request.params).map_err(|e| RpcFault::new(e.to_string()))?;
-            input.request.extensions = self.context.run.extensions.clone();
-            return serde_json::to_value(
-                next.run(input, self.context)
-                    .await
-                    .map_err(|e| RpcFault::new(e.to_string()))?,
-            )
-            .map_err(|e| RpcFault::new(e.to_string()));
-        }
-        self.host.dispatch(request).await
-    }
-}
-#[async_trait]
-impl WorkflowNodeMiddleware for RemoteImplementation {
-    async fn intercept(
-        &self,
-        input: WorkflowNodeInput,
-        context: &WorkflowNodeContext,
-        next: WorkflowNodeNext<'_>,
-    ) -> Result<WorkflowNodeResult, AgentError> {
-        let services = next.services;
-        let mut host = crate::host::RunHost::new(
-            &context.run,
-            Some(services),
-            self.permissions(),
-            &self.declaration.id,
-        );
-        host.node = Some(context);
-        self.scoped_agent(
-            "intercept",
-            json!({"input":input,"run":run_identity(&context.run),"continuation":"host.next"}),
-            &mut NodeContinuation {
-                next: Some(next),
-                host,
-                context,
-            },
-        )
-        .await
     }
 }
 #[async_trait]

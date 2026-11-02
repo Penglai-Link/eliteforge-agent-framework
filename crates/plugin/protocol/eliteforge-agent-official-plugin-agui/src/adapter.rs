@@ -66,10 +66,7 @@ impl Adapter {
         }
         self.sequence = envelope.sequence;
         self.timestamp = envelope.timestamp_unix_ms.min(i64::MAX as u64) as i64;
-        let owner = envelope
-            .node_execution
-            .as_ref()
-            .map_or_else(String::new, |node| node.invocation_id.to_string());
+        let owner = String::new();
         let mut out = Vec::new();
         if let AgentEvent::RunStarted { run_id, session_id } = &envelope.event {
             if self.started {
@@ -93,20 +90,6 @@ impl Adapter {
                 AgentEvent::Output(event) => self.output(*event, &owner, &mut out)?,
                 AgentEvent::Steered(text) => {
                     out.push(Event::custom("framework.steered", json!({"text":text})))
-                }
-                AgentEvent::WorkflowNodeChanged { node_id, status } => {
-                    let step = format!("node/{node_id}");
-                    if matches!(status, WorkflowNodeStatus::Running) {
-                        if self.steps.insert(step.clone(), step.clone()).is_none() {
-                            out.push(Event::step_started(step));
-                        }
-                    } else if let Some(name) = self.steps.remove(&step) {
-                        out.push(Event::step_finished(name));
-                    }
-                    out.push(Event::custom(
-                        "framework.node",
-                        json!({"nodeId":node_id,"status":status}),
-                    ));
                 }
                 AgentEvent::Collaboration(event) => self.collaboration(*event, &mut out)?,
                 AgentEvent::RunFinished { status } => self.finish(status, &mut out)?,
@@ -145,7 +128,7 @@ impl Adapter {
         {
             return Err("AGUI_OPEN_ITEM_LIMIT");
         }
-        self.stamp(&mut out, envelope.node_execution.as_ref());
+        self.stamp(&mut out);
         Ok(out)
     }
     fn collaboration(
@@ -579,6 +562,14 @@ impl Adapter {
                     for request in &result.interactions {
                         let reason = match request.kind {
                             InteractionKind::Approval { .. } => "tool_call",
+                            InteractionKind::Input
+                                if request
+                                    .presentation
+                                    .as_ref()
+                                    .is_some_and(|value| value["kind"] == "ask_caller") =>
+                            {
+                                "caller_input_required"
+                            }
                             InteractionKind::Input => "input_required",
                         };
                         let mut interrupt = ag_ui::Interrupt::new(request.id.to_string(), reason);
@@ -648,14 +639,14 @@ impl Adapter {
                 .into(),
         );
         self.ended = true;
-        self.stamp(&mut out, None);
+        self.stamp(&mut out);
         out
     }
-    fn stamp(&self, events: &mut [Event], node: Option<&WorkflowNodeExecution>) {
+    fn stamp(&self, events: &mut [Event]) {
         for event in events {
             event.base_mut().timestamp = Some(self.timestamp);
             event.base_mut().metadata = Some(json!({"framework": {
-                "runId":self.run_id,"sessionId":self.session_id,"executionId":self.execution_id,"sourceSequence":self.sequence,"node":node
+                "runId":self.run_id,"sessionId":self.session_id,"executionId":self.execution_id,"sourceSequence":self.sequence
             }}).as_object().unwrap().clone());
         }
     }

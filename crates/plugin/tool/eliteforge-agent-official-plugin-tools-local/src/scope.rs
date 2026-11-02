@@ -186,6 +186,9 @@ impl Tool for InvocationScopedTool {
 
 #[async_trait]
 impl ToolProvider for ScopedLocalTools {
+    fn catalog_metadata(&self) -> Option<Vec<eliteforge_agent_core::ToolCatalogEntry>> {
+        Some(crate::local_tool_catalog_metadata())
+    }
     async fn lease(&self, run: &RunContext) -> Result<ToolLease, AgentError> {
         run.check_cancelled()?;
         let snapshot = tokio::select! {
@@ -204,6 +207,11 @@ impl ToolProvider for ScopedLocalTools {
             .resolve(&snapshot, &run.session_id, &self.tasks, &self.pty)
             .map_err(|error| AgentError::ToolSetup(error.to_string()))?;
         for binding in &mut bindings {
+            binding.category = Some(eliteforge_agent_core::ToolCategory::localized(
+                "system.command",
+                "系统命令工具",
+                "System command tools",
+            ));
             binding.executor = Arc::new(InvocationScopedTool {
                 descriptor: binding.descriptor.clone(),
                 owner: owner.clone(),

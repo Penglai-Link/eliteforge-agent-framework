@@ -524,7 +524,6 @@ impl ModelInvoker {
                         call.stage.into(),
                         call.step,
                         attempt,
-                        context.node_execution().cloned(),
                         Vec::new(),
                         error,
                     ),
@@ -597,7 +596,6 @@ impl ModelInvoker {
             let mut history_step = HistoryStep {
                 id: stream.message_id.clone(),
                 run_id: context.run_id,
-                node_invocation_id: context.node_execution().map(|n| n.invocation_id),
                 sequence: call.step,
                 attempt,
                 name: call.stage.into(),

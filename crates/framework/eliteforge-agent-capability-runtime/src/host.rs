@@ -80,7 +80,6 @@ pub(crate) struct RunHost<'a> {
     pub services: Option<&'a AgentServices>,
     pub models: Option<&'a dyn ChatExecutor>,
     pub estimator: Option<&'a dyn TokenEstimator>,
-    pub node: Option<&'a WorkflowNodeContext>,
     pub permissions: &'a [String],
     caller: &'a str,
     conversation: Option<Box<dyn ConversationSession>>,
@@ -105,7 +104,6 @@ impl<'a> RunHost<'a> {
             services,
             models: services.and_then(|s| s.models.as_deref()),
             estimator: None,
-            node: None,
             permissions,
             caller,
             conversation: None,
@@ -357,8 +355,6 @@ impl<'a> RunHost<'a> {
                                     .await
                                     .map_err(fault)?;
                                 if record.run_id != self.run.run_id
-                                    || record.node_invocation_id
-                                        != self.run.node_execution().map(|n| n.invocation_id)
                                     || record.tool_call.as_ref() != Some(&call)
                                     || !matches!(
                                         record.request.kind,
@@ -378,10 +374,6 @@ impl<'a> RunHost<'a> {
                                     .publish(&InteractionRecord {
                                         session_id: self.run.session_id.clone(),
                                         run_id: self.run.run_id,
-                                        node_invocation_id: self
-                                            .run
-                                            .node_execution()
-                                            .map(|n| n.invocation_id),
                                         request: request.clone(),
                                         tool_call: Some(call.clone()),
                                         response: None,
@@ -430,7 +422,7 @@ impl<'a> RunHost<'a> {
                 let mut record: InteractionRecord = decode(params)?;
                 record.session_id = self.run.session_id.clone();
                 record.run_id = self.run.run_id;
-                record.node_invocation_id = self.run.node_execution().map(|n| n.invocation_id);
+
                 record.response = None;
                 record.answered_at_unix_ms = None;
                 manager.0.publish(&record).await.map_err(fault)?;
@@ -447,42 +439,10 @@ impl<'a> RunHost<'a> {
                     .get(&self.run.session_id, id)
                     .await
                     .map_err(fault)?;
-                if record.run_id != self.run.run_id
-                    || record.node_invocation_id
-                        != self.run.node_execution().map(|n| n.invocation_id)
-                {
+                if record.run_id != self.run.run_id {
                     return Err(RpcFault::new("interaction ownership mismatch"));
                 }
                 encode(record)
-            }
-            "host.node.snapshot" => encode(
-                self.node
-                    .ok_or_else(|| RpcFault::new("node journal not in this scope"))?
-                    .conversation_snapshot()
-                    .await
-                    .map_err(fault)?,
-            ),
-            "host.node.save" => {
-                self.node
-                    .ok_or_else(|| RpcFault::new("node journal not in this scope"))?
-                    .save(params)
-                    .await
-                    .map_err(fault)?;
-                Ok(Value::Null)
-            }
-            "host.node.save_with_conversation" => {
-                self.node
-                    .ok_or_else(|| RpcFault::new("node journal not in this scope"))?
-                    .save_with_conversation(
-                        params["checkpoint"].clone(),
-                        params["revision"]
-                            .as_u64()
-                            .ok_or_else(|| RpcFault::new("missing revision"))?,
-                        &decode::<Vec<Message>>(params["messages"].clone())?,
-                    )
-                    .await
-                    .map_err(fault)?;
-                Ok(Value::Null)
             }
             "host.state.load" => {
                 let state = self

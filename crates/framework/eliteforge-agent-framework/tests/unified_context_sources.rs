@@ -154,59 +154,6 @@ async fn six_logical_sources_share_one_read_contract_and_protected_roles() {
     assert_eq!(provenance[1].source_version.as_deref(), Some("source-v1"));
 }
 
-#[tokio::test]
-async fn agent_and_plugin_instructions_retain_distinct_origins() {
-    let capture = Capture::default();
-    let mut stage = WorkflowStage::new("work");
-    stage
-        .instructions
-        .push(Message::system("agent custom rule"));
-    let agent = TestBuilder::default()
-        .plugin(ChatModelPlugin::new(capture.clone()))
-        .plugin(AgentLoopPlugin::new(
-            WorkflowLoop::new(WorkflowDefinition {
-                id: "instruction-origins".into(),
-                version: 1,
-                stages: vec![stage],
-            })
-            .unwrap(),
-        ))
-        .plugin(ContextLayoutPlugin(ContextLayout(vec![
-            ContextBlockConfig::new(INSTRUCTIONS_BLOCK, BlockBudget::tokens(200)),
-            ContextBlockConfig::new(HISTORY_BLOCK, BlockBudget::tokens(200)),
-        ])))
-        .plugin(ContextContributorPlugin::new(
-            "plugin.instructions",
-            Source {
-                id: "plugin.instructions",
-                kind: ContextSourceKind::Instruction,
-                calls: Arc::new(AtomicUsize::new(0)),
-                messages: vec![Message::system("plugin rule")],
-            },
-        ))
-        .build()
-        .await
-        .unwrap();
-    agent
-        .run(RunRequest::new("work", "question"))
-        .await
-        .unwrap();
-    assert!(agent.framework().close().await.is_success());
-    let requests = capture.0.lock().unwrap();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].messages[0].content.text(), "agent custom rule");
-    assert_eq!(
-        requests[0].messages[0].instruction_origin,
-        Some(InstructionOrigin::Agent)
-    );
-    assert_eq!(requests[0].messages[1].content.text(), "plugin rule");
-    assert_eq!(
-        requests[0].messages[1].instruction_origin,
-        Some(InstructionOrigin::Plugin)
-    );
-    assert_eq!(requests[0].messages[2].instruction_origin, None);
-}
-
 struct Preparation;
 #[async_trait]
 impl ContextPreparationPolicy for Preparation {

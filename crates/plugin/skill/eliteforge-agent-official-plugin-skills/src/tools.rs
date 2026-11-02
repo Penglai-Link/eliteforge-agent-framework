@@ -38,18 +38,42 @@ pub(crate) fn bindings(
         ));
     }
     tools
+        .into_iter()
+        .map(|tool| {
+            tool.with_domain_code("skill").with_category(
+                eliteforge_agent_core::ToolCategory::localized(
+                    "execution",
+                    "执行工具",
+                    "Execution tools",
+                ),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn catalog_metadata() -> Vec<eliteforge_agent_core::ToolCatalogEntry> {
+    [load_descriptor(), read_resource_descriptor(), diagnostics_descriptor()]
+        .into_iter()
+        .map(|descriptor| eliteforge_agent_core::ToolCatalogEntry {
+            descriptor,
+            domain_code: Some("skill".into()),
+            category: Some(eliteforge_agent_core::ToolCategory::localized(
+                "execution", "执行工具", "Execution tools",
+            )),
+        })
+        .collect()
 }
 
 fn load_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "skills.load",
         "skill_load",
-        "Load one enabled skill's complete SKILL.md instructions and its resource file list. Load a skill before following its instructions; this never executes scripts.",
+        "Load one enabled skill's complete SKILL.md instructions and its resource file list. Load a skill before following its instructions.",
         json!({
             "type":"object", "additionalProperties":false, "required":["name"],
             "properties":{"name":{"type":"string", "minLength":1}}
         }),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn read_resource_descriptor() -> ToolDescriptor {
@@ -64,7 +88,7 @@ fn read_resource_descriptor() -> ToolDescriptor {
                 "path":{"type":"string", "minLength":1}
             }
         }),
-    ).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
+    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 
 fn diagnostics_descriptor() -> ToolDescriptor {
@@ -73,7 +97,7 @@ fn diagnostics_descriptor() -> ToolDescriptor {
         "skill_diagnostics",
         "Read non-fatal discovery problems for configured skill directories.",
         json!({"type":"object", "additionalProperties":false}),
-    )
+    ).with_display_resource(include_str!("tool-display.json"))
     .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Query)
 }
 

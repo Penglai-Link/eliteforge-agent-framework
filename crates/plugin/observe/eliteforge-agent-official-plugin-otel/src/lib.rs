@@ -12,7 +12,7 @@
 //! Register this plugin before other middleware to enclose their execution.
 //! Interceptors observe outcomes at their position in the chain; an outer
 //! interceptor can still change the final result. Lifecycle hooks are separate.
-//! Run/node/model/tool futures own span drop guards. Container cleanup releases
+//! Run/model/tool futures own span drop guards. Container cleanup releases
 //! remaining correlation metadata. A hard runtime abort cannot
 //! promise prompt export; state is bounded and abandoned spans are never marked
 //! successful. Export durability and metric cardinality limits belong to the SDK.
@@ -24,8 +24,6 @@ use eliteforge_agent_core::{
     ModelMiddlewareService, ModelNext, OmitErrorMessages, RunContext, RunId, RunMiddleware,
     RunMiddlewareService, RunNext, RunRequest, RunResult, RunStatus, ToolError,
     ToolInvocationContext, ToolMiddleware, ToolMiddlewareService, ToolNext, ToolOutput, Usage,
-    WorkflowNodeContext, WorkflowNodeInput, WorkflowNodeMiddleware, WorkflowNodeMiddlewareService,
-    WorkflowNodeNext, WorkflowNodeResult,
 };
 use eliteforge_agent_core::{Plugin, PluginContext, PluginError};
 use opentelemetry::{
@@ -58,7 +56,7 @@ pub struct TelemetryConfig {
     pub max_active_runs: usize,
     pub max_tools_per_run: usize,
     pub max_model_links_per_run: usize,
-    /// Export workflow, node, model, tool, and stage names on spans. Disabled for privacy by
+    /// Export model, tool, and stage names on spans. Disabled for privacy by
     /// default. These identifiers are host-controlled and must not contain secrets.
     pub record_identifiers: bool,
     pub max_identifier_bytes: usize,
@@ -189,15 +187,12 @@ impl Plugin for TelemetryPlugin {
         context.on_cleanup(move || cleanup.drain());
         let run_middleware: Arc<dyn RunMiddleware> = observation.clone();
         let model_middleware: Arc<dyn ModelMiddleware> = observation.clone();
-        let node_middleware: Arc<dyn WorkflowNodeMiddleware> = observation.clone();
         let tool_middleware: Arc<dyn ToolMiddleware> = observation.clone();
         let event_sink: Arc<dyn EventSink> = observation;
         context.contribute(RunMiddlewareService(run_middleware.clone()))?;
         context.contribute_extension(run_middleware)?;
         context.contribute(ModelMiddlewareService(model_middleware.clone()))?;
         context.contribute_extension(model_middleware)?;
-        context.contribute(WorkflowNodeMiddlewareService(node_middleware.clone()))?;
-        context.contribute_extension(node_middleware)?;
         context.contribute(ToolMiddlewareService(tool_middleware.clone()))?;
         context.contribute_extension(tool_middleware)?;
         context.contribute(EventService(event_sink.clone()))?;
@@ -424,7 +419,6 @@ impl Observation {
         let name = match operation {
             "model" => "agent.model",
             "tool" => "agent.tool",
-            "node" => "agent.workflow.node",
             _ => "agent.run",
         };
         let kind = if operation == "model" {
@@ -436,24 +430,6 @@ impl Observation {
             KeyValue::new("agent.run.id", run.run_id.to_string()),
             KeyValue::new("agent.execution.id", run.execution_id().to_string()),
         ]);
-        if let Some(node) = run.node_execution() {
-            attributes.extend([
-                KeyValue::new("agent.node.invocation.id", node.invocation_id.to_string()),
-                KeyValue::new("agent.node.attempt.id", node.attempt_id.to_string()),
-                KeyValue::new("agent.workflow.version", i64::from(node.workflow_version)),
-            ]);
-            self.identifier(&mut attributes, "agent.workflow.id", &node.workflow_id);
-            self.identifier(&mut attributes, "agent.node.id", &node.node_id);
-            if let Some(id) = node.previous_attempt_id {
-                attributes.push(KeyValue::new(
-                    "agent.node.previous_attempt.id",
-                    id.to_string(),
-                ));
-            }
-            if let Some(id) = node.previous_execution_id {
-                attributes.push(KeyValue::new("agent.previous_execution.id", id.to_string()));
-            }
-        }
         let builder = SpanBuilder::from_name(name)
             .with_kind(kind)
             .with_attributes(attributes)
@@ -490,9 +466,6 @@ impl Observation {
     }
 
     fn parent(&self, run: &RunContext) -> Option<Context> {
-        if let Some(parent) = node_parent(run) {
-            return Some(parent);
-        }
         let run_id = run.execution_id();
         self.runs
             .lock()
@@ -716,7 +689,7 @@ impl ToolMiddleware for Observation {
                         .into_iter()
                         .map(|context| Link::new(context, Vec::new(), 0))
                         .collect();
-                    let parent = node_parent(invocation.run).unwrap_or_else(|| run.context.clone());
+                    let parent = run.context.clone();
                     Ok((parent, links))
                 }
             }
@@ -767,124 +740,8 @@ impl ToolMiddleware for Observation {
     }
 }
 
-#[derive(Clone)]
-struct NodeTrace {
-    execution_id: RunId,
-    attempt_id: RunId,
-    context: Context,
-}
-
-// Release unconsumed model links at the end of a node attempt.
-struct NodeSpanGuard<'a> {
-    span: Option<SpanGuard>,
-    observation: &'a Observation,
-    execution_id: RunId,
-    attempt_id: RunId,
-}
-impl NodeSpanGuard<'_> {
-    fn drain_links(&self) {
-        let mut runs = self
-            .observation
-            .runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(run) = runs.get_mut(&self.execution_id) {
-            run.model_links
-                .retain(|(attempt, _), _| *attempt != Some(self.attempt_id));
-        }
-    }
-    fn finish(mut self, outcome: Outcome) {
-        self.drain_links();
-        self.span
-            .take()
-            .expect("active node span")
-            .finish(outcome, None);
-    }
-}
-impl Drop for NodeSpanGuard<'_> {
-    fn drop(&mut self) {
-        self.drain_links();
-        // Nested tool futures have already been dropped before this parent guard.
-    }
-}
-fn node_parent(run: &RunContext) -> Option<Context> {
-    let node = run.node_execution()?;
-    let trace = run.extensions.get::<NodeTrace>()?;
-    (trace.execution_id == run.execution_id() && trace.attempt_id == node.attempt_id)
-        .then(|| trace.context.clone())
-}
-fn link_key(run: &RunContext, call_id: &str) -> (Option<RunId>, String) {
-    (
-        run.node_execution().map(|node| node.attempt_id),
-        call_id.to_owned(),
-    )
-}
-
-#[async_trait]
-impl WorkflowNodeMiddleware for Observation {
-    async fn intercept(
-        &self,
-        input: WorkflowNodeInput,
-        context: &WorkflowNodeContext,
-        next: WorkflowNodeNext<'_>,
-    ) -> Result<WorkflowNodeResult, AgentError> {
-        let Some(parent) = self.parent(&context.run) else {
-            self.metrics.dropped("node", "missing_run");
-            return next.run(input, context).await;
-        };
-        let span = self.span("node", &context.run, &parent, Vec::new(), Vec::new());
-        let mut context = context.clone();
-        let identity = context
-            .run
-            .node_execution()
-            .expect("admitted node identity");
-        context.run.extensions.insert(NodeTrace {
-            execution_id: context.run.execution_id(),
-            attempt_id: identity.attempt_id,
-            context: span.context.clone(),
-        });
-        let span = NodeSpanGuard {
-            execution_id: context.run.execution_id(),
-            attempt_id: context
-                .run
-                .node_execution()
-                .expect("node identity")
-                .attempt_id,
-            span: Some(span),
-            observation: self,
-        };
-        let result = next
-            .run(input, &context)
-            .with_context(
-                span.span
-                    .as_ref()
-                    .expect("active node span")
-                    .context
-                    .clone(),
-            )
-            .await;
-        let outcome = match &result {
-            Ok(result) => Outcome::Success(match result.status {
-                RunStatus::Completed => "completed",
-                RunStatus::AwaitingInput => "awaiting_input",
-                RunStatus::StepLimit => "step_limit",
-                RunStatus::ToolCallLimit => "tool_call_limit",
-            }),
-            Err(error) => {
-                self.report(
-                    span.span.as_ref().expect("active node span"),
-                    error.report(self.redactor.as_ref()),
-                );
-                if matches!(error.primary(), AgentError::Cancelled) {
-                    Outcome::Cancelled
-                } else {
-                    Outcome::Error(error.kind())
-                }
-            }
-        };
-        span.finish(outcome);
-        result
-    }
+fn link_key(_run: &RunContext, call_id: &str) -> (Option<RunId>, String) {
+    (None, call_id.to_owned())
 }
 
 #[async_trait]
@@ -977,7 +834,7 @@ impl EventSink for Observation {
                     ));
                     self.identifier(&mut attributes, "agent.context.block.id", &block.id);
                 }
-                // The run/node error event also reports the original typed cause
+                // The run error event also reports the original typed cause
                 // through the configured redactor. This event contains metadata only.
                 parent.span().add_event("agent.context.failed", attributes);
             }

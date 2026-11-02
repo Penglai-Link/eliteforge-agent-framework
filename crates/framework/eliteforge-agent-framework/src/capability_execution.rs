@@ -57,12 +57,13 @@ impl ModelClient {
         inputs: &[Content],
     ) -> Result<ModelChoice, AgentError> {
         let multimodal =
-            operation == ModelOperation::Embedding && inputs.iter().any(Content::has_media);
+            matches!(operation, ModelOperation::Embedding | ModelOperation::Rerank) && inputs.iter().any(Content::has_media);
         let enabled = match operation {
             ModelOperation::Embedding if multimodal => {
                 self.auto_routers.multimodal_embedding.is_some()
             }
             ModelOperation::Embedding => self.auto_routers.embedding.is_some(),
+            ModelOperation::Rerank if multimodal => self.auto_routers.multimodal_rerank.is_some(),
             ModelOperation::Rerank => self.auto_routers.rerank.is_some(),
             _ => false,
         };
@@ -75,6 +76,9 @@ impl ModelClient {
             && !enabled
         {
             return Err(AgentError::MissingService("MultimodalEmbeddingAutoRouter"));
+        }
+        if operation==ModelOperation::Rerank && multimodal && self.auto_routers.rerank.is_some() && !enabled {
+            return Err(AgentError::MissingService("MultimodalRerankAutoRouter"));
         }
         if !enabled {
             return Ok(choice.clone());
@@ -94,6 +98,8 @@ impl ModelClient {
             .models()
             .filter_map(|model| {
                 let binding = catalog.get(model)?;
+                let accepts_media=binding.capabilities.input.iter().any(|m|matches!(m,Modality::Image|Modality::Audio|Modality::Video));
+                if multimodal != accepts_media { return None; }
                 let mut candidate = AutoRouteCandidate::new(model.clone());
                 candidate.input_modalities = binding.capabilities.input.clone();
                 candidate.protocol = binding.protocol.clone();
@@ -112,7 +118,9 @@ impl ModelClient {
             previous: None,
             transient_failures: 0,
         };
-        let model = if multimodal {
+        let model = if multimodal && operation==ModelOperation::Rerank {
+            self.auto_routers.select_multimodal_rerank(&context, &candidates)?
+        } else if multimodal {
             self.auto_routers
                 .select_multimodal_embedding(&context, &candidates)?
         } else {

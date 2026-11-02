@@ -1,0 +1,283 @@
+{
+  "defaultLocale": "en-US",
+  "tools": {
+    "filesystem.read_text": {
+      "en-US": {
+        "name": "File Read Text",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "读取文件",
+        "description": "读取授权目录中的文本文件或会话附件，可指定行范围。"
+      }
+    },
+    "filesystem.list": {
+      "en-US": {
+        "name": "File List",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "列出文件",
+        "description": "列出授权目录中的文件和子目录，可按层级浏览。"
+      }
+    },
+    "filesystem.stat": {
+      "en-US": {
+        "name": "File Stat",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "查看文件信息",
+        "description": "查看文件或目录的大小、类型和修改时间。"
+      }
+    },
+    "filesystem.write_text": {
+      "en-US": {
+        "name": "File Write Text",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "写入文件",
+        "description": "在授权目录中创建文件或写入文本，可校验文件版本。"
+      }
+    },
+    "filesystem.search.grep": {
+      "en-US": {
+        "name": "File Search Grep",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "搜索文件内容",
+        "description": "按关键词或正则表达式搜索文件内容，可按目录和文件类型筛选。"
+      }
+    },
+    "filesystem.search.glob": {
+      "en-US": {
+        "name": "File Search Glob",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "按规则查找文件",
+        "description": "按文件名或路径规则查找文件和目录。"
+      }
+    },
+    "filesystem.search.path": {
+      "en-US": {
+        "name": "File Search Path",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "查找文件路径",
+        "description": "根据名称或路径查找文件和目录。"
+      }
+    },
+    "system.command.exec": {
+      "en-US": {
+        "name": "System Command Exec",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "执行命令",
+        "description": "在当前执行目录运行命令；持续运行时返回任务编号，可继续读取输出或发送输入。"
+      }
+    },
+    "system.command.task.read": {
+      "en-US": {
+        "name": "System Command Task Read",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "读取命令输出",
+        "description": "读取当前会话中命令任务的状态和最新输出，可短暂等待。"
+      }
+    },
+    "system.command.task.stop": {
+      "en-US": {
+        "name": "System Command Task Stop",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "停止命令",
+        "description": "停止当前会话中正在运行的命令任务，并返回状态和最新输出。"
+      }
+    },
+    "filesystem.apply_unified_patch": {
+      "en-US": {
+        "name": "File Apply Unified Patch",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "应用文件补丁",
+        "description": "按差异补丁创建、修改、删除或重命名文件，可预览并校验文件版本。"
+      }
+    },
+    "system.command.task.write": {
+      "en-US": {
+        "name": "System Command Task Write",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "发送命令输入",
+        "description": "向当前会话的命令任务发送输入或结束输入，并返回最新输出和状态。"
+      }
+    },
+    "system.command.list": {
+      "en-US": {
+        "name": "System Command List",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "列出命令任务",
+        "description": "查看当前会话中的命令任务及其状态，可包含已完成的任务。"
+      }
+    },
+    "framework.terminal.start": {
+      "zh-CN": {
+        "name": "启动终端",
+        "description": "启动交互终端或持续运行的命令，返回可读取输出和发送输入的终端编号。"
+      },
+      "en-US": {
+        "name": "Start terminal",
+        "description": null
+      }
+    },
+    "framework.terminal.read": {
+      "zh-CN": {
+        "name": "读取终端输出",
+        "description": "读取当前授权终端的输出，可使用游标继续读取。"
+      },
+      "en-US": {
+        "name": "Read terminal output",
+        "description": null
+      }
+    },
+    "framework.terminal.write": {
+      "zh-CN": {
+        "name": "发送终端输入",
+        "description": "向当前授权终端发送输入。"
+      },
+      "en-US": {
+        "name": "Write terminal input",
+        "description": null
+      }
+    },
+    "framework.terminal.stop": {
+      "zh-CN": {
+        "name": "停止终端",
+        "description": "停止当前授权终端及其子进程。"
+      },
+      "en-US": {
+        "name": "Stop terminal",
+        "description": null
+      }
+    },
+    "framework.terminal.list": {
+      "zh-CN": {
+        "name": "列出终端",
+        "description": "列出当前身份可访问的终端。"
+      },
+      "en-US": {
+        "name": "List terminals",
+        "description": null
+      }
+    },
+    "filesystem.apply_patch": {
+      "en-US": {
+        "name": "File Patch",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "编辑文件",
+        "description": "替换、删除或插入文件中的指定文本，可校验匹配次数和文件版本。"
+      }
+    }
+  },
+  "parameters": {
+    "en-US": {
+      "/properties/path": "File path",
+      "/properties/fileRef": "Authorized file reference",
+      "/properties/startLine": "First line number",
+      "/properties/endLine": "Last line number",
+      "/properties/maxBytes": "Maximum output bytes",
+      "/properties/recursive": "Include subdirectories",
+      "/properties/maxDepth": "Maximum directory depth",
+      "/properties/pattern": "Search expression",
+      "/properties/patterns": "Search expressions",
+      "/properties/glob": "File path patterns",
+      "/properties/exclude": "Excluded path patterns",
+      "/properties/root": "Search directory",
+      "/properties/command": "Command to execute",
+      "/properties/args": "Literal command arguments",
+      "/properties/cwd": "Working directory",
+      "/properties/stdin": "Initial command input",
+      "/properties/interactive": "Keep the input stream open",
+      "/properties/tty": "Use an interactive terminal",
+      "/properties/rows": "Terminal rows",
+      "/properties/cols": "Terminal columns",
+      "/properties/env": "Environment variables",
+      "/properties/taskId": "Command task ID",
+      "/properties/data": "Input text",
+      "/properties/closeStdin": "Finish command input",
+      "/properties/waitMs": "Maximum wait in milliseconds",
+      "/properties/stdoutCursor": "Output cursor",
+      "/properties/stderrCursor": "Error output cursor",
+      "/properties/includeCompleted": "Include completed tasks",
+      "/properties/content": "File text",
+      "/properties/expectedVersion": "Expected file version",
+      "/properties/expectedVersions": "Expected version for each file",
+      "/properties/patch": "File changes in diff format",
+      "/properties/dryRun": "Preview without writing",
+      "/properties/target": "Text to match",
+      "/properties/action": "Editing action",
+      "/properties/replaceAll": "Replace every match",
+      "/properties/expectedCount": "Expected number of matches",
+      "/properties/name": "Resource name",
+      "/properties/text": "Text content",
+      "/properties/terminalId": "Terminal ID",
+      "/properties/cursor": "Output cursor"
+    },
+    "zh-CN": {
+      "/properties/path": "文件路径",
+      "/properties/fileRef": "已授权的文件或附件引用",
+      "/properties/startLine": "起始行号",
+      "/properties/endLine": "结束行号",
+      "/properties/maxBytes": "最大输出字节数",
+      "/properties/recursive": "包含子目录",
+      "/properties/maxDepth": "最大目录层级",
+      "/properties/pattern": "搜索表达式",
+      "/properties/patterns": "搜索表达式列表",
+      "/properties/glob": "文件路径匹配规则",
+      "/properties/exclude": "排除的路径规则",
+      "/properties/root": "搜索目录",
+      "/properties/command": "要执行的命令",
+      "/properties/args": "命令参数列表",
+      "/properties/cwd": "执行目录",
+      "/properties/stdin": "命令初始输入",
+      "/properties/interactive": "保持输入流可用",
+      "/properties/tty": "使用交互终端",
+      "/properties/rows": "终端行数",
+      "/properties/cols": "终端列数",
+      "/properties/env": "环境变量",
+      "/properties/taskId": "命令任务编号",
+      "/properties/data": "输入文本",
+      "/properties/closeStdin": "结束命令输入",
+      "/properties/waitMs": "最长等待毫秒数",
+      "/properties/stdoutCursor": "标准输出游标",
+      "/properties/stderrCursor": "错误输出游标",
+      "/properties/includeCompleted": "包含已完成任务",
+      "/properties/content": "文件文本",
+      "/properties/expectedVersion": "预期文件版本",
+      "/properties/expectedVersions": "各文件的预期版本",
+      "/properties/patch": "差异补丁内容",
+      "/properties/dryRun": "仅预览变更",
+      "/properties/target": "要匹配的文本",
+      "/properties/action": "编辑操作",
+      "/properties/replaceAll": "替换全部匹配项",
+      "/properties/expectedCount": "预期匹配次数",
+      "/properties/name": "资源名称",
+      "/properties/text": "文本内容",
+      "/properties/terminalId": "终端编号",
+      "/properties/cursor": "输出游标"
+    }
+  }
+}
