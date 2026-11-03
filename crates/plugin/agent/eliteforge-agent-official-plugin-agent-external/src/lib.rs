@@ -8,7 +8,7 @@ mod adapter;
 pub use adapter::*;
 mod output;
 mod dsh;
-pub use dsh::{DshCliOptions, DshModelProbe, DshModelRecord};
+pub use dsh::{DshCliOptions, DshModelProbe, DshModelRecord, DshWorkspaceOptions};
 pub use cli::ExternalCli;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

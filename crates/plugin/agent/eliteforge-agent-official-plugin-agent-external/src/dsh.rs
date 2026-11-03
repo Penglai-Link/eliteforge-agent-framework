@@ -6,6 +6,8 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::Command,
 };
+mod workspace;
+pub use workspace::DshWorkspaceOptions;
 
 #[derive(Debug, Clone, Default)]
 pub struct DshCliOptions {
@@ -13,6 +15,8 @@ pub struct DshCliOptions {
     /// Import only model-provider routes from this installed dsh profile.
     /// The active headless profile and home overrides retain route precedence.
     pub provider_profile: Option<String>,
+    /// Optional native workspace grouping; effective task directories stay isolated.
+    pub workspace: Option<DshWorkspaceOptions>,
 }
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,13 +119,7 @@ fn write_overlay(
         return std::fs::write(path, serde_json::to_vec(&overlays).map_err(failed)?)
             .map_err(failed);
     };
-    let home = std::env::var_os("DSH_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-                .map(|home| std::path::PathBuf::from(home).join(".dsh"))
-        })
-        .ok_or_else(|| failed("cannot resolve dsh home for provider profile"))?;
+    let home = dsh_home()?;
     let mut rows = Vec::new();
     if let Some(row) = provider_overlay_at(&home, profile)? {
         rows.push(row);
@@ -134,6 +132,15 @@ fn write_overlay(
             .map_err(failed)?,
     );
     std::fs::write(path, serde_norway::to_string(&rows).map_err(failed)?).map_err(failed)
+}
+fn dsh_home() -> Result<std::path::PathBuf, TransportError> {
+    std::env::var_os("DSH_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(|home| std::path::PathBuf::from(home).join(".dsh"))
+        })
+        .ok_or_else(|| failed("cannot resolve dsh home"))
 }
 fn prepare(command: &str, directory: Option<&str>, patch: &Path) -> Command {
     let mut cmd = Command::new(command);
@@ -222,9 +229,23 @@ pub(crate) async fn invoke(
         overlay.push(json!({"id":"agent-default-model","config":config}));
     }
     let dir = tempfile::tempdir().map_err(|e| TransportError::NotStarted(e.to_string()))?;
+    let mut workspace = workspace::WorkspaceRun::prepare(
+        command,
+        directory,
+        options,
+        request.session_id.as_deref(),
+        dir.path(),
+    )
+    .await?;
+    if let Some(workspace) = &workspace {
+        workspace.configure(&mut overlay, dir.path(), request.session_id.as_deref())?;
+    }
     let patch = dir.path().join("run.json");
     write_overlay(&patch, options, overlay)?;
     let mut cmd = prepare(command, Some(directory), &patch);
+    if let Some(workspace) = &workspace {
+        workspace.command(&mut cmd);
+    }
     cmd.arg("--json");
     if let Some(session) = &request.session_id {
         cmd.arg("--session-id").arg(session);
@@ -258,8 +279,26 @@ pub(crate) async fn invoke(
     let _readers = Readers(vec![writer.abort_handle(), errors.abort_handle()]);
     let mut lines = BufReader::new(stdout).lines();
     let mut parsed = Output::default();
-    while let Some(line) = lines.next_line().await.map_err(failed)? {
-        parsed.line(&line, &sink)?;
+    let setup_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let line = if workspace
+            .as_ref()
+            .is_some_and(|workspace| !workspace.is_ready())
+        {
+            tokio::time::timeout_at(setup_deadline, lines.next_line())
+                .await
+                .map_err(|_| failed("dsh workspace setup timed out after 20 seconds"))?
+        } else {
+            lines.next_line().await
+        };
+        let Some(line) = line.map_err(failed)? else {
+            break;
+        };
+        let event: Value = serde_json::from_str(&line).map_err(failed)?;
+        if let Some(workspace) = &mut workspace {
+            workspace.observe(&event, request.session_id.as_deref())?;
+        }
+        parsed.event(&event, &sink)?;
     }
     let status = child.wait().await.map_err(failed)?;
     writer.await.map_err(failed)?.map_err(failed)?;
@@ -275,6 +314,9 @@ pub(crate) async fn invoke(
     }
     if !parsed.completed {
         return Err(failed("dsh did not report a completed turn"));
+    }
+    if let Some(workspace) = &workspace {
+        workspace.finish(parsed.session.as_deref())?;
     }
     let output = parsed
         .text
@@ -307,8 +349,7 @@ struct Output {
     steps: usize,
 }
 impl Output {
-    fn line(&mut self, line: &str, sink: &ExternalAgentSink) -> Result<(), TransportError> {
-        let v: Value = serde_json::from_str(line).map_err(failed)?;
+    fn event(&mut self, v: &Value, sink: &ExternalAgentSink) -> Result<(), TransportError> {
         if !v.is_object() || v.get("type").and_then(Value::as_str).is_none() {
             return Err(failed("invalid dsh event envelope"));
         }
