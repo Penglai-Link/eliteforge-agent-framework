@@ -1056,10 +1056,23 @@ async fn platform_semantic_summary_cache_is_distinct_from_same_named_namespace()
 }
 
 #[test]
-fn percentage_allocations_require_exact_totals_and_preserve_every_token() {
+fn percentage_allocations_allow_partial_totals_without_filling_unallocated_capacity() {
     let shares = |a, b| std::collections::BTreeMap::from([("a".into(), a), ("b".into(), b)]);
-    assert!(eliteforge_agent_memory::ContextShareAllocation::new(shares(5000, 4999)).is_err());
     assert!(eliteforge_agent_memory::ContextShareAllocation::new(shares(5000, 5001)).is_err());
+    assert!(eliteforge_agent_memory::ContextShareAllocation::new(shares(0, 5000)).is_err());
+    for (a, b) in [(5000, 4999), (3333, 1667)] {
+        let partial = eliteforge_agent_memory::ContextShareAllocation::new(shares(a, b)).unwrap();
+        for budget in [1, 9, 128_001, 1_000_000, usize::MAX] {
+            let result = partial.allocate(budget);
+            let expected = (budget as u128 * u128::from(a + b) / 10_000) as usize;
+            assert_eq!(result.values().sum::<usize>(), expected);
+        }
+    }
+    let partial = eliteforge_agent_memory::ContextShareAllocation::new(shares(4000, 2000)).unwrap();
+    assert_eq!(
+        partial.allocate(9),
+        std::collections::BTreeMap::from([("a".into(), 3), ("b".into(), 2)])
+    );
     let allocation = eliteforge_agent_memory::ContextShareAllocation::new(shares(3333, 6667)).unwrap();
     for budget in [1, 128_001, 1_000_000] {
         let result = allocation.allocate(budget);

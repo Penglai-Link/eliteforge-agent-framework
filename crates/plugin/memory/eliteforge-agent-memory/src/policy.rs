@@ -272,7 +272,7 @@ pub fn bound_checkpoint_data(summary: &str, recent: &str, max_chars: usize) -> (
     )
 }
 
-/// A complete context distribution, expressed in basis points (100% = 10,000).
+/// Context shares totaling at most 100%, in basis points (100% = 10,000).
 /// Token quotas are derived only from the current model input budget.
 #[derive(Debug, Clone)]
 pub struct ContextShareAllocation(std::collections::BTreeMap<String, u32>);
@@ -284,15 +284,15 @@ impl ContextShareAllocation {
             || shares
                 .iter()
                 .any(|(id, share)| id.trim().is_empty() || !(1..=10_000).contains(share))
-            || shares.values().map(|share| u64::from(*share)).sum::<u64>() != 10_000
+            || shares.values().map(|share| u64::from(*share)).sum::<u64>() > 10_000
         {
             return Err(eliteforge_agent_core::AgentError::InvalidConfiguration(
-                "context shares must total exactly 100%".into(),
+                "context shares must be positive and total at most 100%".into(),
             ));
         }
         Ok(Self(shares))
     }
-    /// Largest-remainder allocation keeps the sum exact even for small windows.
+    /// Round the configured portion by largest remainder, leaving the rest unallocated.
     pub fn allocate(&self, tokens: usize) -> std::collections::BTreeMap<String, usize> {
         let mut allocated = std::collections::BTreeMap::new();
         let mut fractions = Vec::new();
@@ -305,7 +305,13 @@ impl ContextShareAllocation {
             fractions.push((std::cmp::Reverse(product % 10_000), id));
         }
         fractions.sort();
-        for (_, id) in fractions.into_iter().take(tokens - used) {
+        let total_share = self
+            .0
+            .values()
+            .map(|share| u128::from(*share))
+            .sum::<u128>();
+        let target = (tokens as u128 * total_share / 10_000) as usize;
+        for (_, id) in fractions.into_iter().take(target - used) {
             *allocated.get_mut(id).expect("allocated share") += 1;
         }
         allocated
