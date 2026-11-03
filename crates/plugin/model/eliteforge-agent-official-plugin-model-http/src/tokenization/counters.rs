@@ -1,6 +1,7 @@
 use base64::Engine;
 use eliteforge_agent_core::{TextTokenizer, TokenizationError};
 use std::{io::Read, sync::OnceLock};
+use tokenizers::{Model, OffsetReferential, OffsetType, PreTokenizer};
 use unicode_normalization::UnicodeNormalization;
 
 /// Custom hosts may load their own Hugging Face JSON and register it in core.
@@ -20,6 +21,40 @@ impl HuggingFaceTextTokenizer {
 }
 impl TextTokenizer for HuggingFaceTextTokenizer {
     fn count_tokens(&self, text: &str) -> Result<usize, TokenizationError> {
+        // ByteLevel post-processing only adjusts offsets. Count each complete
+        // pre-tokenized piece using the original model, then discard its tokens;
+        // retaining a full Encoding duplicates token strings and allocates IDs,
+        // offsets, word IDs and masks for the entire context just to read len().
+        // Keep arbitrary host post-processors on the full encoding path.
+        if matches!(
+            self.0.get_post_processor(),
+            None | Some(tokenizers::processors::PostProcessorWrapper::ByteLevel(_))
+        ) {
+            let mut pieces = self
+                .0
+                .get_added_vocabulary()
+                .extract_and_normalize(self.0.get_normalizer(), text);
+            if let Some(pre_tokenizer) = self.0.get_pre_tokenizer() {
+                pre_tokenizer
+                    .pre_tokenize(&mut pieces)
+                    .map_err(|e| error("huggingface", e))?;
+            }
+            return pieces
+                .get_splits(OffsetReferential::Original, OffsetType::None)
+                .into_iter()
+                .try_fold(0usize, |count, (piece, _, added_tokens)| {
+                    let length = match added_tokens {
+                        Some(tokens) => tokens.len(),
+                        None => self
+                            .0
+                            .get_model()
+                            .tokenize(piece)
+                            .map_err(|e| error("huggingface", e))?
+                            .len(),
+                    };
+                    Ok(count + length)
+                });
+        }
         self.0
             .encode(text, false)
             .map(|encoded| encoded.len())
@@ -195,5 +230,56 @@ fn error(id: &str, error: impl std::fmt::Display) -> TokenizationError {
     TokenizationError::Encoding {
         tokenizer_id: id.into(),
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_only_matches_full_encoding_without_splitting_normalized_or_special_tokens() {
+        for (id, bytes) in [
+            (
+                "deepseek",
+                include_bytes!("../../resources/tokenizers/deepseek-v4.1-flash.tokenizer.json.gz")
+                    .as_slice(),
+            ),
+            (
+                "glm",
+                include_bytes!("../../resources/tokenizers/glm-5.3-flash.tokenizer.json.gz")
+                    .as_slice(),
+            ),
+            (
+                "qwen3",
+                include_bytes!("../../resources/tokenizers/qwen3.tokenizer.json.gz").as_slice(),
+            ),
+            (
+                "qwen3.5",
+                include_bytes!("../../resources/tokenizers/qwen3.5.tokenizer.json.gz").as_slice(),
+            ),
+        ] {
+            let tokenizer =
+                HuggingFaceTextTokenizer::from_json(&unzip(id, bytes).unwrap()).unwrap();
+            for text in [
+                String::new(),
+                "  cafe\u{301} 👩‍💻\r\n\t你好　مرحبا\n\n".repeat(257),
+                "<|endoftext|> [EOS] <|im_end|> <｜end▁of▁sentence｜>".into(),
+                "你好，世界！ fn main() { println!(\"你好\"); }\n".repeat(1024),
+            ] {
+                assert_eq!(
+                    tokenizer.count_tokens(&text).unwrap(),
+                    tokenizer.0.encode(text.as_str(), false).unwrap().len(),
+                    "{id}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn custom_post_processor_keeps_its_original_encoding_semantics() {
+        let json = br#"{"version":"1.0","model":{"type":"WordLevel","vocab":{"[UNK]":0,"hello":1},"unk_token":"[UNK]"},"post_processor":{"type":"TemplateProcessing","single":[{"Sequence":{"id":"A","type_id":0}},{"Sequence":{"id":"A","type_id":0}}],"pair":[{"Sequence":{"id":"A","type_id":0}},{"Sequence":{"id":"B","type_id":1}}],"special_tokens":{}}}"#;
+        let tokenizer = HuggingFaceTextTokenizer::from_json(json).unwrap();
+        assert_eq!(tokenizer.count_tokens("hello").unwrap(), 2);
     }
 }
