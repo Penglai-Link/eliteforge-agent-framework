@@ -11,6 +11,19 @@ use std::sync::{
 };
 use tokio::sync::Notify;
 
+#[test]
+fn contributor_metadata_resolves_locale_and_missing_fields_without_host_text() {
+    let metadata = ContextBlockMetadata::new("Base name", "Base description")
+        .with_locale("zh-CN", "技能目录", "插件维护的描述")
+        .with_locale("en-US", "Skill catalog", "");
+    assert_eq!(metadata.resolve("ZH-cn").description, "插件维护的描述");
+    assert_eq!(metadata.resolve("zh-HK").display_name, "技能目录");
+    assert_eq!(metadata.resolve("en-AU").display_name, "Skill catalog");
+    assert_eq!(metadata.resolve("en-US").description, "Base description");
+    assert_eq!(metadata.resolve("ja-JP").display_name, "Base name");
+    assert_eq!(metadata.resolve("ja-JP").description, "Base description");
+}
+
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<ChatRequest>>>);
 #[async_trait]
