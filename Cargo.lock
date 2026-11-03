@@ -1165,6 +1165,7 @@ dependencies = [
 name = "eliteforge-agent-framework"
 version = "0.1.0"
 dependencies = [
+ "eliteforge-agent-capability-auto-routing",
  "async-trait",
  "eliteforge-agent-capability-runtime",
  "eliteforge-agent-capability-test-fixture",

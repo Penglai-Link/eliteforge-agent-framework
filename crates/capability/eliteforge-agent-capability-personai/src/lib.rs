@@ -277,7 +277,8 @@ mod tests {
                         .submit_video(VideoGenerationRequest {
                             choice: ModelChoice {
                                 model: None,
-                                stage: stage.into()
+                                stage: stage.into(),
+                                ..Default::default()
                             },
                             prompt: "clip".into(),
                             seconds: 2,

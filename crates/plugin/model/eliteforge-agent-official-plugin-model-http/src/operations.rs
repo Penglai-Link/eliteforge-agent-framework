@@ -124,7 +124,8 @@ impl fw::RerankModel for HttpRerankModel {
             body["max_tokens"] = json!(self.config.max_tokens.unwrap_or(4096));
             body
         } else {
-            rerank_native_body(&self.config, request)
+            rerank_native_body(&self.config.model_name, request)
+                .unwrap_or_else(|_| serde_json::json!({"unsupported_content": true}))
         };
         fw::Content::from(body.to_string()).estimated_tokens() as u64
     }
@@ -150,8 +151,19 @@ impl fw::RerankModel for HttpRerankModel {
     ) -> Result<fw::RerankModelOutput, fw::ModelError> {
         // This adapter's wire contract is text-only. A provider-specific
         // RerankModel must encode media; never silently drop image/audio blocks.
-        if std::iter::once(&request.query).chain(request.documents.iter()).any(|content| content.0.iter().any(|block| !matches!(block, fw::ContentBlock::Text { .. }))) {
-            return Err(fw::ModelError::Fatal("HTTP rerank requires a media-capable adapter".into()));
+        if self.chat_fallback
+            && std::iter::once(&request.query)
+                .chain(request.documents.iter())
+                .any(|content| {
+                    content
+                        .0
+                        .iter()
+                        .any(|block| !matches!(block, fw::ContentBlock::Text { .. }))
+                })
+        {
+            return Err(fw::ModelError::Fatal(
+                "HTTP rerank requires a media-capable adapter".into(),
+            ));
         }
         let usage;
         let documents = request
@@ -201,7 +213,7 @@ impl fw::RerankModel for HttpRerankModel {
                 })
                 .collect()
         } else {
-            let body = rerank_native_body(&self.config, &request);
+            let body = rerank_native_body(&self.config.model_name, &request)?;
             let response = transport
                 .json(self.config.api_path.as_deref().unwrap_or("/rerank"), &body)
                 .await?;
@@ -282,12 +294,39 @@ fn rerank_chat_body(
     json!({"messages":[{"role":role,"content":instruction},{"role":"user","content":format!("Query:\n{}\n\nCandidates:\n{numbered}",request.query.text())}],"temperature":0})
 }
 
-fn rerank_native_body(config: &AgentModelConfig, request: &fw::RerankRequest) -> Value {
-    let mut body = json!({"model":config.model_name,"query":request.query.text(),"documents":request.documents.iter().map(fw::Content::text).collect::<Vec<_>>()});
+/// Jina-compatible native rerank accepts text strings or a single image object.
+/// Hosts must explicitly declare media capability; other content is rejected.
+fn rerank_native_body(
+    model_name: &str,
+    request: &fw::RerankRequest,
+) -> Result<Value, fw::ModelError> {
+    fn document(content: &fw::Content) -> Result<Value, fw::ModelError> {
+        if content
+            .0
+            .iter()
+            .all(|block| matches!(block, fw::ContentBlock::Text { .. }))
+        {
+            return Ok(json!(content.text()));
+        }
+        if let [fw::ContentBlock::Media { media }] = content.0.as_slice()
+            && media.mime_type.starts_with("image/")
+        {
+            let image = match &media.source {
+                fw::MediaSource::Url(url) => url.clone(),
+                fw::MediaSource::Base64(data) if data.starts_with("data:") => data.clone(),
+                fw::MediaSource::Base64(data) => {
+                    format!("data:{};base64,{data}", media.mime_type)
+                }
+            };
+            return Ok(json!({"image": image}));
+        }
+        Err(fw::ModelError::Fatal("native rerank supports text or a single image per item; mixed, audio, video and opaque content require a provider adapter".into()))
+    }
+    let mut body = json!({"model":model_name,"query":document(&request.query)?,"documents":request.documents.iter().map(document).collect::<Result<Vec<_>, _>>()?});
     if let Some(top_n) = request.top_n {
         body["top_n"] = json!(top_n);
     }
-    body
+    Ok(body)
 }
 
 pub(crate) fn embedding_body(config: &AgentModelConfig, request: &fw::EmbeddingRequest) -> Value {
@@ -304,4 +343,38 @@ pub(crate) fn embedding_body(config: &AgentModelConfig, request: &fw::EmbeddingR
         body["dimensions"] = json!(dimensions);
     }
     body
+}
+
+#[cfg(test)]
+mod native_rerank_content_tests {
+    use super::*;
+    #[test]
+    fn native_rerank_keeps_image_queries_and_document_indices_without_flattening() {
+        let image = fw::Content(vec![fw::ContentBlock::Media {
+            media: fw::MediaContent {
+                mime_type: "image/png".into(),
+                source: fw::MediaSource::Url("https://example.test/image.png".into()),
+                name: None,
+                estimated_tokens: Some(10),
+            },
+        }]);
+        let request = fw::RerankRequest {
+            choice: Default::default(),
+            query: image.clone(),
+            documents: vec!["description".into(), image],
+            top_n: Some(2),
+        };
+        let body = rerank_native_body("image-reranker", &request).unwrap();
+        assert_eq!(body["query"]["image"], "https://example.test/image.png");
+        assert_eq!(body["documents"][0], "description");
+        assert_eq!(
+            body["documents"][1]["image"],
+            "https://example.test/image.png"
+        );
+        let mut unsupported = request;
+        unsupported.documents[1].0.push(fw::ContentBlock::Text {
+            text: "do not lose this caption".into(),
+        });
+        assert!(rerank_native_body("image-reranker", &unsupported).is_err());
+    }
 }

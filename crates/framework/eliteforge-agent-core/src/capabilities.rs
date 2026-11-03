@@ -123,15 +123,21 @@ impl OperationCapabilities {
 
 /// Selection is scoped to one operation. Explicit choices never silently fall back.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct ModelChoice {
     pub model: Option<ModelRef>,
     pub stage: String,
+    /// Logical model/version identity shared by explicitly compatible providers.
+    pub model_code: Option<String>,
+    pub provider_id: Option<String>,
+    /// Additional requirements; actual input modalities are always included.
+    pub required_modalities: Vec<Modality>,
 }
 impl ModelChoice {
     pub fn model(model: ModelRef) -> Self {
         Self {
             model: Some(model),
-            stage: String::new(),
+            ..Default::default()
         }
     }
 }
@@ -142,6 +148,9 @@ pub struct EmbeddingRequest {
     pub inputs: Vec<Content>,
     pub dimensions: Option<usize>,
     pub purpose: EmbeddingPurpose,
+    /// Persisted index identity. Provider rotation must preserve this space.
+    #[serde(default)]
+    pub space: Option<EmbeddingSpace>,
 }
 impl EmbeddingRequest {
     pub fn texts(inputs: impl IntoIterator<Item = impl Into<String>>) -> Self {
@@ -153,6 +162,7 @@ impl EmbeddingRequest {
                 .collect(),
             dimensions: None,
             purpose: EmbeddingPurpose::Document,
+            space: None,
         }
     }
 }
@@ -207,6 +217,9 @@ impl EmbeddingResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EmbeddingSpace {
     pub model: ModelRef,
+    /// None pins the original binding. Some permits compatible provider replicas.
+    #[serde(default)]
+    pub logical_model_code: Option<String>,
     pub revision: String,
     pub dimensions: usize,
     pub preprocessing: String,
@@ -220,16 +233,27 @@ impl EmbeddingSpace {
                 .choice
                 .model
                 .as_ref()
-                .is_some_and(|m| m != &self.model)
+                .is_some_and(|m| self.logical_model_code.is_none() && m != &self.model)
             || request.dimensions.is_some_and(|d| d != self.dimensions)
+            || request
+                .choice
+                .model_code
+                .as_ref()
+                .zip(self.logical_model_code.as_ref())
+                .is_some_and(|(requested, expected)| requested != expected)
         {
             return Err(ModelError::Fatal(
                 "embedding request conflicts with index space".into(),
             ));
         }
-        request.choice.model = Some(self.model.clone());
+        if let Some(code) = &self.logical_model_code {
+            request.choice.model_code = Some(code.clone());
+        } else {
+            request.choice.model = Some(self.model.clone());
+        }
         request.dimensions = Some(self.dimensions);
         request.purpose = EmbeddingPurpose::Query;
+        request.space = Some(self.clone());
         Ok(())
     }
 }
@@ -693,8 +717,15 @@ pub trait ModelOperations: Send + Sync {
 }
 
 /// An individual model/operation binding. Protocol names remain extensible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelRouteIdentity {
+    pub model_code: String,
+    pub provider_id: String,
+}
+
 pub struct ModelRegistration<T: ?Sized> {
     pub model: ModelRef,
+    pub identity: ModelRouteIdentity,
     pub protocol: String,
     pub capabilities: OperationCapabilities,
     pub implementation: Arc<T>,
@@ -703,6 +734,7 @@ impl<T: ?Sized> Clone for ModelRegistration<T> {
     fn clone(&self) -> Self {
         Self {
             model: self.model.clone(),
+            identity: self.identity.clone(),
             protocol: self.protocol.clone(),
             capabilities: self.capabilities.clone(),
             implementation: self.implementation.clone(),
@@ -710,6 +742,17 @@ impl<T: ?Sized> Clone for ModelRegistration<T> {
     }
 }
 impl<T: ?Sized> ModelRegistration<T> {
+    pub fn identity(
+        mut self,
+        model_code: impl Into<String>,
+        provider_id: impl Into<String>,
+    ) -> Self {
+        self.identity = ModelRouteIdentity {
+            model_code: model_code.into(),
+            provider_id: provider_id.into(),
+        };
+        self
+    }
     pub fn protocol(mut self, protocol: impl Into<String>) -> Self {
         self.protocol = protocol.into();
         self
@@ -723,7 +766,8 @@ macro_rules! registration {
     ($contract:ident, [$($input:ident),*], [$($output:ident),*]) => {
         impl ModelRegistration<dyn $contract> {
             pub fn new(model: ModelRef, implementation: Arc<dyn $contract>) -> Self {
-                Self { model, implementation, protocol: "custom".into(), capabilities: OperationCapabilities {
+                let identity = ModelRouteIdentity { model_code: model.model.clone(), provider_id: model.connection.clone() };
+                Self { model, identity, implementation, protocol: "custom".into(), capabilities: OperationCapabilities {
                     input: vec![$(Modality::$input),*], output: vec![$(Modality::$output),*], ..Default::default()
                 } }
             }
@@ -867,6 +911,8 @@ impl<T: ?Sized> CapabilityCatalog<T> {
             if binding.model.connection.trim().is_empty()
                 || binding.model.model.trim().is_empty()
                 || binding.protocol.trim().is_empty()
+                || binding.identity.model_code.trim().is_empty()
+                || binding.identity.provider_id.trim().is_empty()
                 || catalog
                     .bindings
                     .insert(binding.model.clone(), binding)

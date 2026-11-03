@@ -3,6 +3,8 @@ use eliteforge_agent_core::*;
 use std::sync::Arc;
 mod failover;
 pub use failover::RunScopedFailoverAutoRouter;
+mod round_robin;
+pub use round_robin::RoundRobinAutoRouter;
 
 /// Use host candidate order, advancing only on transient failures.
 pub struct OrderedAutoRouter;
@@ -164,7 +166,7 @@ mod tests {
         );
     }
     #[test]
-    fn text_and_multimodal_rerank_have_separate_policies_and_operation_guards() {
+    fn unified_rerank_policy_keeps_operation_guards_and_accepts_legacy_entry_points() {
         let available = vec![AutoRouteCandidate::new(ModelRef::new("host", "multi"))];
         let routers = AutoRouters {
             rerank: Some(Arc::new(OrderedAutoRouter)),
@@ -178,10 +180,12 @@ mod tests {
             previous: None,
             transient_failures: 0,
         };
-        assert!(matches!(
-            routers.select_multimodal_rerank(&context, &available),
-            Err(AgentError::MissingService("MultimodalRerankAutoRouter"))
-        ));
+        assert_eq!(
+            routers
+                .select_multimodal_rerank(&context, &available)
+                .unwrap(),
+            available[0].model
+        );
         let routers = AutoRouters {
             multimodal_rerank: Some(Arc::new(StableAutoRouter)),
             ..Default::default()
@@ -192,7 +196,10 @@ mod tests {
                 .unwrap(),
             available[0].model
         );
-        assert!(routers.select(&context, &available).is_err());
+        assert_eq!(
+            routers.select(&context, &available).unwrap(),
+            available[0].model
+        );
         let wrong = AutoRouteContext {
             operation: ModelOperation::Embedding,
             ..context

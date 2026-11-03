@@ -2,6 +2,7 @@
 pub use eliteforge_agent_core::*;
 #[cfg(feature = "genai")]
 pub use eliteforge_agent_official_plugin_model_genai::GenaiPlugin;
+mod auxiliary_routing;
 mod capability_execution;
 mod external_loop;
 pub use capability_execution::ModelClient;

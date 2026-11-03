@@ -322,6 +322,7 @@ async fn stage_defaults_and_index_space_remain_authoritative() {
         .stage_for(ModelOperation::Embedding, "index", a.clone())
         .default_for(ModelOperation::Rerank, a.clone());
     let space = EmbeddingSpace {
+        logical_model_code: None,
         model: a.clone(),
         revision: "v1".into(),
         dimensions: 4,
@@ -353,7 +354,7 @@ async fn stage_defaults_and_index_space_remain_authoritative() {
 }
 
 #[tokio::test]
-async fn embedding_route_is_plain_text_only_and_retries_pin_the_selected_model() {
+async fn embedding_route_checks_actual_modalities_and_retries_pin_logical_identity() {
     let source = Arc::new(Source(AtomicUsize::new(0)));
     let adapter = Arc::new(Embed {
         calls: AtomicUsize::new(0),
@@ -363,8 +364,13 @@ async fn embedding_route_is_plain_text_only_and_retries_pin_the_selected_model()
         .unwrap()
         .with_auto_routers(routers(source.clone()));
     let mut request = EmbeddingRequest::texts(["text"]);
-    request.inputs = vec![Content(vec![ContentBlock::Json {
-        value: serde_json::json!({"text":"not plain text"}),
+    request.inputs = vec![Content(vec![ContentBlock::Media {
+        media: MediaContent {
+            mime_type: "image/png".into(),
+            source: MediaSource::Base64("AA==".into()),
+            name: None,
+            estimated_tokens: Some(10),
+        },
     }])];
     assert!(client.embed(request).await.is_err());
     assert_eq!(adapter.calls.load(Ordering::SeqCst), 0);
@@ -379,7 +385,7 @@ async fn embedding_route_is_plain_text_only_and_retries_pin_the_selected_model()
         .unwrap();
     assert_eq!(result.model.model, "b");
     assert_eq!(adapter.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(source.0.load(Ordering::SeqCst), 1);
+    assert_eq!(source.0.load(Ordering::SeqCst), 2);
     assert_eq!(result.input_tokens, None);
 }
 
@@ -505,6 +511,7 @@ async fn multimodal_embedding_has_its_own_router_and_pins_query_space() {
     let mut registrations = update(adapter.clone());
     registrations.embedding[1].capabilities.input = vec![Modality::Text, Modality::Image];
     let space = EmbeddingSpace {
+        logical_model_code: None,
         model: ModelRef::new("host", "b"),
         revision: "image-v1".into(),
         dimensions: 3,
@@ -631,7 +638,7 @@ fn all_four_abstract_routes_pass_the_host_pool_through_without_supplier_rules() 
 }
 
 #[tokio::test]
-async fn multimodal_rerank_dispatches_its_own_policy_and_never_falls_into_text_router() {
+async fn unified_rerank_accepts_text_on_multimodal_models_and_checks_media() {
     let mut registrations = update(Arc::new(Embed::default()));
     registrations.rerank[1].capabilities.input = vec![Modality::Text, Modality::Image];
     let client = ModelClient::new(registrations)
@@ -643,7 +650,7 @@ async fn multimodal_rerank_dispatches_its_own_policy_and_never_falls_into_text_r
         });
     assert_eq!(
         client.rerank(rank_request()).await.unwrap().model.model,
-        "a"
+        "b"
     );
     let mut request = rank_request();
     request.documents[0].0.push(ContentBlock::Media {
@@ -662,8 +669,86 @@ async fn multimodal_rerank_dispatches_its_own_policy_and_never_falls_into_text_r
         rerank: Some(Arc::new(Last)),
         ..Default::default()
     });
-    assert!(matches!(
-        text_only.rerank(request).await,
-        Err(AgentError::MissingService("MultimodalRerankAutoRouter"))
-    ));
+    assert_eq!(
+        text_only.rerank(request.clone()).await.unwrap().model.model,
+        "b"
+    );
+    request.query = request.documents[0].clone();
+    request.documents = vec!["text".into()];
+    assert_eq!(text_only.rerank(request).await.unwrap().model.model, "b");
+}
+
+#[tokio::test]
+async fn logical_model_rotation_constraints_failover_and_index_space_are_enforced() {
+    let a = Arc::new(Embed {
+        calls: AtomicUsize::new(0),
+        fail_first: true,
+    });
+    let b = Arc::new(Embed::default());
+    let c = Arc::new(Embed::default());
+    let mut registrations = ModelRuntimeUpdate::new("host", 1, vec![]);
+    for (binding, provider, adapter, revision) in [
+        ("a", "provider-a", a.clone(), "v1"),
+        ("b", "provider-b", b.clone(), "v1"),
+        ("c", "provider-c", c.clone(), "incompatible"),
+    ] {
+        registrations.embedding.push(
+            EmbeddingModelService::new(ModelRef::new("host", binding), adapter)
+                .identity("shared-v1", provider)
+                .capabilities(OperationCapabilities {
+                    input: vec![Modality::Text, Modality::Image],
+                    ..Default::default()
+                }),
+        );
+        registrations.spaces.push(EmbeddingSpace {
+            model: ModelRef::new("host", binding),
+            logical_model_code: Some("shared-v1".into()),
+            revision: revision.into(),
+            dimensions: 3,
+            preprocessing: "plain/v1".into(),
+        });
+    }
+    let space = registrations.spaces[0].clone();
+    let client = ModelClient::new(registrations)
+        .unwrap()
+        .with_auto_routers(AutoRouters {
+            embedding: Some(Arc::new(
+                eliteforge_agent_capability_auto_routing::RoundRobinAutoRouter::default(),
+            )),
+            ..Default::default()
+        });
+    let mut request = EmbeddingRequest::texts(["query"]);
+    request.space = Some(space.clone());
+    request.choice.model_code = Some("shared-v1".into());
+    let limits = RunLimits {
+        max_model_retries: 1,
+        ..Default::default()
+    };
+    let response = client.embed_observed(request.clone(), &limits).await;
+    assert_eq!(response.into_result().unwrap().model.model, "b");
+    assert_eq!(a.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(b.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(c.calls.load(Ordering::SeqCst), 0);
+    // The very same pool accepts text queries on multimodal models and rotates
+    // compatible replicas while retaining the index revision and preprocessing.
+    for _ in 0..3 {
+        let result = client
+            .embed_query(&space, EmbeddingRequest::texts(["q"]))
+            .await
+            .unwrap();
+        assert_ne!(result.model.model, "c");
+    }
+    request.choice.provider_id = Some("provider-b".into());
+    assert_eq!(
+        client.embed(request.clone()).await.unwrap().model.model,
+        "b"
+    );
+    request.choice.provider_id = Some("unknown".into());
+    assert!(client.embed(request.clone()).await.is_err());
+    request.choice.provider_id = None;
+    request.choice.required_modalities = vec![Modality::Audio];
+    assert!(client.embed(request.clone()).await.is_err());
+    request.choice.required_modalities.clear();
+    request.choice.model_code = Some("unknown-version".into());
+    assert!(client.embed(request).await.is_err());
 }

@@ -404,6 +404,7 @@ async fn retired_default_and_stage_routes_do_not_block_directory_updates() {
         ModelChoice {
             model: None,
             stage: "render".into(),
+            ..Default::default()
         },
     ];
     let job = agent
@@ -827,6 +828,7 @@ fn provider_refresh_cannot_change_another_connections_embedding_space() {
     let previous = runtime.snapshot();
     let mut update = ModelRuntimeUpdate::new("alice", 1, vec![connection("personai", "b")]);
     update.spaces.push(EmbeddingSpace {
+        logical_model_code: None,
         model: ModelRef::new("local", "embedding"),
         revision: "weights-v1".into(),
         dimensions: 3,

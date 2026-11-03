@@ -49,88 +49,6 @@ impl ModelClient {
         self.auto_routers = routers;
         self
     }
-    pub(crate) fn route_choice<T: ?Sized>(
-        &self,
-        operation: ModelOperation,
-        catalog: &CapabilityCatalog<T>,
-        choice: &ModelChoice,
-        inputs: &[Content],
-    ) -> Result<ModelChoice, AgentError> {
-        let multimodal =
-            matches!(operation, ModelOperation::Embedding | ModelOperation::Rerank) && inputs.iter().any(Content::has_media);
-        let enabled = match operation {
-            ModelOperation::Embedding if multimodal => {
-                self.auto_routers.multimodal_embedding.is_some()
-            }
-            ModelOperation::Embedding => self.auto_routers.embedding.is_some(),
-            ModelOperation::Rerank if multimodal => self.auto_routers.multimodal_rerank.is_some(),
-            ModelOperation::Rerank => self.auto_routers.rerank.is_some(),
-            _ => false,
-        };
-        if catalog.configured_model(choice).is_some() {
-            return Ok(choice.clone());
-        }
-        if operation == ModelOperation::Embedding
-            && self.auto_routers.embedding.is_some()
-            && multimodal
-            && !enabled
-        {
-            return Err(AgentError::MissingService("MultimodalEmbeddingAutoRouter"));
-        }
-        if operation==ModelOperation::Rerank && multimodal && self.auto_routers.rerank.is_some() && !enabled {
-            return Err(AgentError::MissingService("MultimodalRerankAutoRouter"));
-        }
-        if !enabled {
-            return Ok(choice.clone());
-        }
-        if operation == ModelOperation::Embedding
-            && !multimodal
-            && inputs.iter().any(|content| {
-                content
-                    .0
-                    .iter()
-                    .any(|block| !matches!(block, ContentBlock::Text { .. }))
-            })
-        {
-            return Err(invalid("向量自动路由 requires plain text inputs"));
-        }
-        let candidates = catalog
-            .models()
-            .filter_map(|model| {
-                let binding = catalog.get(model)?;
-                let accepts_media=binding.capabilities.input.iter().any(|m|matches!(m,Modality::Image|Modality::Audio|Modality::Video));
-                if multimodal != accepts_media { return None; }
-                let mut candidate = AutoRouteCandidate::new(model.clone());
-                candidate.input_modalities = binding.capabilities.input.clone();
-                candidate.protocol = binding.protocol.clone();
-                Some(candidate)
-            })
-            .collect::<Vec<_>>();
-        let context = AutoRouteContext {
-            operation,
-            stage: &choice.stage,
-            affinity: self
-                .options
-                .run
-                .as_ref()
-                .map_or("", |run| run.session_id.as_str()),
-            call_key: &choice.stage,
-            previous: None,
-            transient_failures: 0,
-        };
-        let model = if multimodal && operation==ModelOperation::Rerank {
-            self.auto_routers.select_multimodal_rerank(&context, &candidates)?
-        } else if multimodal {
-            self.auto_routers
-                .select_multimodal_embedding(&context, &candidates)?
-        } else {
-            self.auto_routers.select(&context, &candidates)?
-        };
-        Ok(ModelChoice {
-            model: Some(model),
-            stage: choice.stage.clone(),
-        })
-    }
     /// A fixed binding view with the same cancellation and drain owner.
     pub fn with_runtime(&self, runtime: Arc<ModelRuntime>) -> Self {
         Self {
@@ -321,6 +239,24 @@ impl ModelClient {
             }
         }
     }
+    pub(crate) async fn scope_auxiliary<T>(
+        &self,
+        future: impl Future<Output = Result<T, AgentError>>,
+    ) -> Result<T, AgentError> {
+        if self.admitted {
+            return future.await;
+        }
+        let _active = self.catalogs.active.read().await;
+        if self.catalogs.stopped.is_cancelled() {
+            return Err(AgentError::Closed);
+        }
+        tokio::select! {
+            biased;
+            _ = self.catalogs.stopped.cancelled() => Err(AgentError::Closed),
+            _ = self.options.cancellation.cancelled() => Err(AgentError::Cancelled),
+            result = future => result,
+        }
+    }
     fn video_binding(&self, job: &VideoJob) -> Result<VideoGenerationModelService, AgentError> {
         let binding = self.runtime.video_job_binding(job).ok_or_else(|| {
             ModelError::Unavailable("video job binding is unavailable in this process".into())
@@ -334,49 +270,16 @@ impl ModelClient {
     }
 }
 
-#[async_trait]
-impl ModelOperations for ModelClient {
-    fn stop(&self) {
-        self.catalogs.stopped.cancel();
-    }
-    async fn drain(&self) {
-        drop(self.catalogs.active.write().await);
-    }
-    fn with_options(&self, options: ModelInvocationOptions) -> Arc<dyn ModelOperations> {
-        Arc::new(Self {
-            runtime: self.runtime.clone(),
-            catalogs: self.catalogs.clone(),
-            options,
-            admitted: self.admitted,
-            auto_routers: self.auto_routers.clone(),
-        })
-    }
-    fn models(&self, operation: ModelOperation) -> Vec<ModelRef> {
-        let snapshot = self.runtime.snapshot();
-        match operation {
-            ModelOperation::Embedding => snapshot.embedding.models().cloned().collect(),
-            ModelOperation::Rerank => snapshot.rerank.models().cloned().collect(),
-            ModelOperation::ImageGeneration => snapshot.image.models().cloned().collect(),
-            ModelOperation::VideoGeneration => snapshot.video.models().cloned().collect(),
-            ModelOperation::SpeechRecognition => snapshot.recognition.models().cloned().collect(),
-            ModelOperation::SpeechSynthesis => snapshot.synthesis.models().cloned().collect(),
-            ModelOperation::Realtime => snapshot.realtime.models().cloned().collect(),
-            ModelOperation::ContentDetection => snapshot.detection.models().cloned().collect(),
-            ModelOperation::Chat => snapshot.chat.models(),
-        }
-    }
-    async fn embed(&self, mut request: EmbeddingRequest) -> Result<EmbeddingResponse, AgentError> {
+impl ModelClient {
+    pub(crate) async fn embed_once(
+        &self,
+        mut request: EmbeddingRequest,
+    ) -> Result<EmbeddingResponse, AgentError> {
         let snapshot = self.runtime.snapshot();
         self.check_inputs(&request.inputs)?;
         if request.dimensions == Some(0) {
             return Err(invalid("embedding dimensions must be positive"));
         }
-        request.choice = self.route_choice(
-            ModelOperation::Embedding,
-            &snapshot.embedding,
-            &request.choice,
-            &request.inputs,
-        )?;
         let binding = snapshot
             .embedding
             .select(&request.choice, &request.inputs)?;
@@ -442,20 +345,10 @@ impl ModelOperations for ModelClient {
         }
         result
     }
-    async fn embed_query(
+    pub(crate) async fn rerank_once(
         &self,
-        space: &EmbeddingSpace,
-        mut request: EmbeddingRequest,
-    ) -> Result<EmbeddingResponse, AgentError> {
-        if self.runtime.snapshot().spaces.get(&space.model) != Some(space) {
-            return Err(invalid(
-                "query embedding space does not match registered model, revision, dimensions and preprocessing",
-            ));
-        }
-        space.bind_query(&mut request)?;
-        self.embed(request).await
-    }
-    async fn rerank(&self, mut request: RerankRequest) -> Result<RerankResponse, AgentError> {
+        mut request: RerankRequest,
+    ) -> Result<RerankResponse, AgentError> {
         let snapshot = self.runtime.snapshot();
         let mut inputs = request.documents.clone();
         inputs.push(request.query.clone());
@@ -465,12 +358,6 @@ impl ModelOperations for ModelClient {
             return Err(invalid("invalid rerank top_n or document count"));
         }
         let max = request.top_n.unwrap_or(count);
-        request.choice = self.route_choice(
-            ModelOperation::Rerank,
-            &snapshot.rerank,
-            &request.choice,
-            &inputs,
-        )?;
         let binding = snapshot.rerank.select(&request.choice, &inputs)?;
         request.choice.model = Some(binding.model.clone());
         let estimate = binding.implementation.input_token_estimate(&request);
@@ -533,6 +420,69 @@ impl ModelOperations for ModelClient {
             return Err(invalid("invalid rerank response"));
         }
         Ok(response)
+    }
+}
+
+#[async_trait]
+impl ModelOperations for ModelClient {
+    fn stop(&self) {
+        self.catalogs.stopped.cancel();
+    }
+    async fn drain(&self) {
+        drop(self.catalogs.active.write().await);
+    }
+    fn with_options(&self, options: ModelInvocationOptions) -> Arc<dyn ModelOperations> {
+        Arc::new(Self {
+            runtime: self.runtime.clone(),
+            catalogs: self.catalogs.clone(),
+            options,
+            admitted: self.admitted,
+            auto_routers: self.auto_routers.clone(),
+        })
+    }
+    fn models(&self, operation: ModelOperation) -> Vec<ModelRef> {
+        let snapshot = self.runtime.snapshot();
+        match operation {
+            ModelOperation::Embedding => snapshot.embedding.models().cloned().collect(),
+            ModelOperation::Rerank => snapshot.rerank.models().cloned().collect(),
+            ModelOperation::ImageGeneration => snapshot.image.models().cloned().collect(),
+            ModelOperation::VideoGeneration => snapshot.video.models().cloned().collect(),
+            ModelOperation::SpeechRecognition => snapshot.recognition.models().cloned().collect(),
+            ModelOperation::SpeechSynthesis => snapshot.synthesis.models().cloned().collect(),
+            ModelOperation::Realtime => snapshot.realtime.models().cloned().collect(),
+            ModelOperation::ContentDetection => snapshot.detection.models().cloned().collect(),
+            ModelOperation::Chat => snapshot.chat.models(),
+        }
+    }
+    async fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse, AgentError> {
+        match self
+            .scope_auxiliary(self.execute_auxiliary(
+                crate::auxiliary_routing::AuxiliaryRequest::Embedding(request),
+            ))
+            .await?
+        {
+            crate::auxiliary_routing::AuxiliaryResponse::Embedding(response) => Ok(response),
+            _ => unreachable!("embedding response"),
+        }
+    }
+    async fn embed_query(
+        &self,
+        space: &EmbeddingSpace,
+        mut request: EmbeddingRequest,
+    ) -> Result<EmbeddingResponse, AgentError> {
+        space.bind_query(&mut request)?;
+        self.embed(request).await
+    }
+    async fn rerank(&self, request: RerankRequest) -> Result<RerankResponse, AgentError> {
+        match self
+            .scope_auxiliary(
+                self.execute_auxiliary(crate::auxiliary_routing::AuxiliaryRequest::Rerank(request)),
+            )
+            .await?
+        {
+            crate::auxiliary_routing::AuxiliaryResponse::Rerank(response) => Ok(response),
+            _ => unreachable!("rerank response"),
+        }
     }
     async fn generate_image(
         &self,

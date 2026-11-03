@@ -94,6 +94,12 @@ impl ModelRuntimeSnapshot {
             if space.dimensions == 0
                 || space.revision.trim().is_empty()
                 || space.preprocessing.trim().is_empty()
+                || space.logical_model_code.as_ref().is_some_and(|code| {
+                    code.trim().is_empty()
+                        || embedding
+                            .get(&space.model)
+                            .is_some_and(|binding| &binding.identity.model_code != code)
+                })
                 || space.model.connection.trim().is_empty()
                 || space.model.model.trim().is_empty()
                 || (!allow_unavailable && embedding.get(&space.model).is_none())

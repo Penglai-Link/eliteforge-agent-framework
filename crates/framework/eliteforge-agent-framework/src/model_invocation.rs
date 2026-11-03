@@ -21,6 +21,8 @@ impl ModelClient {
             .filter_map(|model| {
                 let descriptor = snapshot.chat.get(&model)?;
                 Some(AutoRouteCandidate {
+                    model_code: model.model.clone(),
+                    provider_id: model.connection.clone(),
                     protocol: snapshot.chat.protocol(&model).unwrap_or_default().into(),
                     context_window_tokens: descriptor.context_window_tokens,
                     input_modalities: descriptor.input_modalities.clone(),
@@ -277,7 +279,7 @@ impl ModelClient {
 
     pub async fn embed_observed(
         &self,
-        mut request: EmbeddingRequest,
+        request: EmbeddingRequest,
         limits: &RunLimits,
     ) -> ObservedModelResult<EmbeddingResponse> {
         let report = Arc::new(model_observation::ModelReportState::default());
@@ -289,118 +291,28 @@ impl ModelClient {
                     .max_model_calls_per_step
                     .unwrap_or(context.limits().max_model_retries.saturating_add(2)),
             )?);
-            let snapshot = self.runtime.snapshot();
-            request.choice = self.route_choice(
-                ModelOperation::Embedding,
-                &snapshot.embedding,
-                &request.choice,
-                &request.inputs,
-            )?;
-            let binding = snapshot
-                .embedding
-                .select(&request.choice, &request.inputs)?
-                .clone();
-            request.choice.model = Some(binding.model.clone());
-            let mut estimate_request = request.clone();
-            if let Some(space) = snapshot.spaces.get(&binding.model) {
-                estimate_request.dimensions = Some(space.dimensions);
-            }
-            let retry_input = binding
-                .implementation
-                .input_token_estimate(&estimate_request);
-            Ok((context, binding, retry_input, snapshot))
+            let mut options = ModelInvocationOptions::for_run(&context, context.limits());
+            options.max_input_bytes = self.options.max_input_bytes;
+            options.max_batch_size = self.options.max_batch_size;
+            let mut client = self.with_options(options);
+            client.admitted = true;
+            Ok((context, client))
         });
         let result = match prepared {
             Err(error) => Err(error),
-            Ok((context, binding, retry_input, snapshot)) => {
-                let mut options = ModelInvocationOptions::for_run(&context, context.limits());
-                options.max_input_bytes = self.options.max_input_bytes;
-                options.max_batch_size = self.options.max_batch_size;
-                let mut client = self
-                    .with_runtime(ModelRuntime::frozen(snapshot))
-                    .with_options(options);
-                client.admitted = true;
-                let execution = async {
-                    let max = context
-                        .limits()
-                        .max_model_calls_per_step
-                        .unwrap_or(context.limits().max_model_retries.saturating_add(2));
-                    let mut attempts = 0;
-                    let mut refreshed = false;
-                    loop {
-                        if attempts >= max {
-                            return Err(AgentError::Run("model call budget exhausted".into()));
-                        }
-                        context.check_cancelled()?;
-                        attempts += 1;
-                        match ModelOperations::embed(&client, request.clone()).await {
-                            Ok(response) => {
-                                report.operation_usage(response.input_tokens.map(|input_tokens| {
-                                    Usage {
-                                        input_tokens,
-                                        output_tokens: 0,
-                                    }
-                                }));
-                                return Ok(response);
-                            }
-                            Err(AgentError::Model(ModelError::Provider(ref detail)))
-                                if detail.category == ProviderErrorCategory::Authentication
-                                    && !refreshed
-                                    && attempts < max
-                                    && context
-                                        .usage
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .can_reserve(retry_input, context.token_ceiling)
-                                    && context
-                                        .extensions
-                                        .get::<ContinuationBudget>()
-                                        .is_none_or(|budget| {
-                                            budget.remaining_model_calls() > 0
-                                        }) =>
-                            {
-                                refreshed = true;
-                                let error = ModelError::Provider(detail.clone());
-                                let recovered = tokio::time::timeout(
-                                    context.limits().model_timeout,
-                                    binding.implementation.recover_authentication(&error),
-                                )
-                                .await
-                                .unwrap_or_else(|_| {
-                                    Err(ModelError::Fatal("credential refresh timed out".into()))
-                                });
-                                match recovered {
-                                    Ok(true) => {}
-                                    Ok(false) => {
-                                        binding.implementation.on_failure(&error);
-                                        return Err(error.into());
-                                    }
-                                    Err(failure) => {
-                                        binding.implementation.on_failure(&failure);
-                                        return Err(failure.into());
-                                    }
-                                }
-                            }
-                            Err(AgentError::Model(ref error))
-                                if error.is_transient()
-                                    && attempts <= context.limits().max_model_retries
-                                    && attempts < max => {}
-                            Err(error) => {
-                                if let AgentError::Model(model_error) = error.primary() {
-                                    binding.implementation.on_failure(model_error);
-                                }
-                                return Err(error);
-                            }
-                        }
-                        context
-                            .emit(AgentEvent::ModelRetry {
-                                step: 0,
-                                attempt: attempts,
-                            })
-                            .await;
+            Ok((context, client)) => {
+                self.controlled(&context, async {
+                    let result = ModelOperations::embed(&client, request).await;
+
+                    if let Ok(response) = &result {
+                        report.operation_usage(response.input_tokens.map(|input_tokens| Usage {
+                            input_tokens,
+                            output_tokens: 0,
+                        }));
                     }
-                };
-                self.controlled(&context, execution).await
+                    result
+                })
+                .await
             }
         };
         ObservedModelResult {
@@ -411,7 +323,7 @@ impl ModelClient {
 
     pub async fn rerank_observed(
         &self,
-        mut request: RerankRequest,
+        request: RerankRequest,
         limits: &RunLimits,
     ) -> ObservedModelResult<RerankResponse> {
         let report = Arc::new(model_observation::ModelReportState::default());
@@ -423,107 +335,18 @@ impl ModelClient {
                     .max_model_calls_per_step
                     .unwrap_or(context.limits().max_model_retries.saturating_add(2)),
             )?);
-            let mut inputs = request.documents.clone();
-            inputs.push(request.query.clone());
-            let snapshot = self.runtime.snapshot();
-            request.choice = self.route_choice(
-                ModelOperation::Rerank,
-                &snapshot.rerank,
-                &request.choice,
-                &inputs,
-            )?;
-            let binding = snapshot.rerank.select(&request.choice, &inputs)?.clone();
-            request.choice.model = Some(binding.model.clone());
-            let mut estimate_request = request.clone();
-            estimate_request.choice.model = Some(binding.model.clone());
-            let retry_input = binding
-                .implementation
-                .input_token_estimate(&estimate_request);
-            Ok((context, binding, retry_input, snapshot))
+            let mut options = ModelInvocationOptions::for_run(&context, context.limits());
+            options.max_input_bytes = self.options.max_input_bytes;
+            options.max_batch_size = self.options.max_batch_size;
+            let mut client = self.with_options(options);
+            client.admitted = true;
+            Ok((context, client))
         });
         let result = match prepared {
             Err(error) => Err(error),
-            Ok((context, binding, retry_input, snapshot)) => {
-                let mut options = ModelInvocationOptions::for_run(&context, context.limits());
-                options.max_input_bytes = self.options.max_input_bytes;
-                options.max_batch_size = self.options.max_batch_size;
-                let mut client = self
-                    .with_runtime(ModelRuntime::frozen(snapshot))
-                    .with_options(options);
-                client.admitted = true;
-                let execution = async {
-                    let max = context
-                        .limits()
-                        .max_model_calls_per_step
-                        .unwrap_or(context.limits().max_model_retries.saturating_add(2));
-                    let mut attempts = 0;
-                    let mut refreshed = false;
-                    loop {
-                        if attempts >= max {
-                            return Err(AgentError::Run("model call budget exhausted".into()));
-                        }
-                        context.check_cancelled()?;
-                        attempts += 1;
-                        match ModelOperations::rerank(&client, request.clone()).await {
-                            Ok(response) => return Ok(response),
-                            Err(AgentError::Model(ModelError::Provider(ref detail)))
-                                if detail.category == ProviderErrorCategory::Authentication
-                                    && !refreshed
-                                    && attempts < max
-                                    && context
-                                        .usage
-                                        .lock()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .can_reserve(retry_input, context.token_ceiling)
-                                    && context
-                                        .extensions
-                                        .get::<ContinuationBudget>()
-                                        .is_none_or(|budget| {
-                                            budget.remaining_model_calls() > 0
-                                        }) =>
-                            {
-                                refreshed = true;
-                                let error = ModelError::Provider(detail.clone());
-                                let recovered = tokio::time::timeout(
-                                    context.limits().model_timeout,
-                                    binding.implementation.recover_authentication(&error),
-                                )
-                                .await
-                                .unwrap_or_else(|_| {
-                                    Err(ModelError::Fatal("credential refresh timed out".into()))
-                                });
-                                match recovered {
-                                    Ok(true) => {}
-                                    Ok(false) => {
-                                        binding.implementation.on_failure(&error);
-                                        return Err(error.into());
-                                    }
-                                    Err(failure) => {
-                                        binding.implementation.on_failure(&failure);
-                                        return Err(failure.into());
-                                    }
-                                }
-                            }
-                            Err(AgentError::Model(ref error))
-                                if error.is_transient()
-                                    && attempts <= context.limits().max_model_retries
-                                    && attempts < max => {}
-                            Err(error) => {
-                                if let AgentError::Model(model_error) = error.primary() {
-                                    binding.implementation.on_failure(model_error);
-                                }
-                                return Err(error);
-                            }
-                        }
-                        context
-                            .emit(AgentEvent::ModelRetry {
-                                step: 0,
-                                attempt: attempts,
-                            })
-                            .await;
-                    }
-                };
-                self.controlled(&context, execution).await
+            Ok((context, client)) => {
+                self.controlled(&context, ModelOperations::rerank(&client, request))
+                    .await
             }
         };
         ObservedModelResult {

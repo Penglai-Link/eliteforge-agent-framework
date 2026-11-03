@@ -196,12 +196,7 @@ impl TextEmbeddingAutoRouter for PersonAiAutoRouter {
         context: &AutoRouteContext<'_>,
         candidates: &[AutoRouteCandidate],
     ) -> Result<ModelRef, AgentError> {
-        let pool = candidates
-            .iter()
-            .filter(|candidate| candidate.input_modalities == [Modality::Text])
-            .cloned()
-            .collect::<Vec<_>>();
-        self.choose(context, &pool)
+        self.choose(context, candidates)
     }
 }
 impl MultimodalEmbeddingAutoRouter for PersonAiAutoRouter {
@@ -210,19 +205,7 @@ impl MultimodalEmbeddingAutoRouter for PersonAiAutoRouter {
         context: &AutoRouteContext<'_>,
         candidates: &[AutoRouteCandidate],
     ) -> Result<ModelRef, AgentError> {
-        let pool = candidates
-            .iter()
-            .filter(|candidate| {
-                candidate.input_modalities.iter().any(|modality| {
-                    matches!(
-                        modality,
-                        Modality::Image | Modality::Audio | Modality::Video
-                    )
-                })
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        self.choose(context, &pool)
+        self.choose(context, candidates)
     }
 }
 implement!(RerankAutoRouter);

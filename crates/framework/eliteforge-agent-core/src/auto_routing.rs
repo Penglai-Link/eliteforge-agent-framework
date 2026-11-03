@@ -13,6 +13,8 @@ pub const MULTIMODAL_RERANK_AUTO_ROUTE_NAME: &str = "多模态重排自动路由
 #[derive(Debug, Clone)]
 pub struct AutoRouteCandidate {
     pub model: ModelRef,
+    pub model_code: String,
+    pub provider_id: String,
     pub input_modalities: Vec<Modality>,
     pub protocol: String,
     pub context_window_tokens: Option<usize>,
@@ -24,6 +26,8 @@ pub struct AutoRouteCandidate {
 impl AutoRouteCandidate {
     pub fn new(model: ModelRef) -> Self {
         Self {
+            model_code: model.model.clone(),
+            provider_id: model.connection.clone(),
             model,
             input_modalities: vec![Modality::Text],
             protocol: String::new(),
@@ -79,8 +83,9 @@ router_contract!(
 );
 router_contract!(
     TextEmbeddingAutoRouter,
-    "向量自动路由。Accepts plain text inputs only."
+    "Unified embedding route. Input modalities are enforced by the invoker."
 );
+pub use self::TextEmbeddingAutoRouter as EmbeddingAutoRouter;
 router_contract!(RerankAutoRouter, "Text reranking route.");
 router_contract!(
     MultimodalRerankAutoRouter,
@@ -185,26 +190,16 @@ impl AutoRouters {
                 .as_ref()
                 .ok_or(AgentError::MissingService("ChatAutoRouter"))?
                 .select(context, &candidates)?,
-            ModelOperation::Embedding if matches!(kind, RouteKind::MultimodalEmbedding) => self
-                .multimodal_embedding
-                .as_ref()
-                .ok_or(AgentError::MissingService("MultimodalEmbeddingAutoRouter"))?
-                .select(context, &candidates)?,
-            ModelOperation::Embedding => self
-                .embedding
-                .as_ref()
-                .ok_or(AgentError::MissingService("TextEmbeddingAutoRouter"))?
-                .select(context, &candidates)?,
-            ModelOperation::Rerank if matches!(kind, RouteKind::MultimodalRerank) => self
-                .multimodal_rerank
-                .as_ref()
-                .ok_or(AgentError::MissingService("MultimodalRerankAutoRouter"))?
-                .select(context, &candidates)?,
-            ModelOperation::Rerank => self
-                .rerank
-                .as_ref()
-                .ok_or(AgentError::MissingService("RerankAutoRouter"))?
-                .select(context, &candidates)?,
+            ModelOperation::Embedding => match (&self.embedding, &self.multimodal_embedding) {
+                (Some(router), _) => router.select(context, &candidates)?,
+                (None, Some(router)) => router.select(context, &candidates)?,
+                _ => return Err(AgentError::MissingService("EmbeddingAutoRouter")),
+            },
+            ModelOperation::Rerank => match (&self.rerank, &self.multimodal_rerank) {
+                (Some(router), _) => router.select(context, &candidates)?,
+                (None, Some(router)) => router.select(context, &candidates)?,
+                _ => return Err(AgentError::MissingService("RerankAutoRouter")),
+            },
             _ => {
                 return Err(AgentError::InvalidConfiguration(
                     "operation has no automatic router".into(),
@@ -256,6 +251,8 @@ impl ModelSelectionStrategy for ChatAutoRoutingStrategy {
             .filter_map(|model| {
                 let descriptor = catalog.get(&model)?;
                 Some(AutoRouteCandidate {
+                    model_code: model.model.clone(),
+                    provider_id: model.connection.clone(),
                     input_modalities: descriptor.input_modalities.clone(),
                     protocol: catalog.protocol(&model).unwrap_or_default().into(),
                     model,

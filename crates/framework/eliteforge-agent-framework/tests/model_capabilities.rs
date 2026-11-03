@@ -70,6 +70,7 @@ fn registration(model: &str, adapter: Arc<Embedder>) -> Register<EmbeddingModelS
 async fn multiple_embeddings_select_by_request_then_stage_then_default_and_pin_space() {
     let adapter = Arc::new(Embedder::default());
     let space = EmbeddingSpace {
+        logical_model_code: None,
         model: ModelRef::new("local", "a"),
         revision: "2026-09-09".into(),
         dimensions: 3,
@@ -129,14 +130,17 @@ async fn multiple_embeddings_select_by_request_then_stage_then_default_and_pin_s
     );
     for wrong in [
         EmbeddingSpace {
+            logical_model_code: None,
             revision: "other".into(),
             ..space.clone()
         },
         EmbeddingSpace {
+            logical_model_code: None,
             preprocessing: "other".into(),
             ..space.clone()
         },
         EmbeddingSpace {
+            logical_model_code: None,
             dimensions: 2,
             ..space.clone()
         },
@@ -203,6 +207,7 @@ async fn retired_embedding_with_host_space_is_unavailable_and_can_reappear() {
     let adapter = Arc::new(Embedder::default());
     let model = ModelRef::new("local", "a");
     let space = EmbeddingSpace {
+        logical_model_code: None,
         model: model.clone(),
         revision: "v1".into(),
         dimensions: 3,
