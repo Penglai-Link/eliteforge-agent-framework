@@ -15,3 +15,24 @@ Input budget estimates include encoded image bytes and native continuation metad
 Raw transport methods are integration primitives for adapters executing under a Framework invocation. Products execute independent chat, embedding and rerank directly through the existing `ModelClient` / `ModelOperations`, without constructing an Agent or native run, as described in [direct model calls](../../../../docs/受控模型作业.md).
 
 模型 HTTP client 通过 SDK `ModelHttpClient::from_builder` 保留宿主 proxy/connect/pool/timeout 配置并强制禁止自动 redirect；307/308 是终态错误，配置应使用实际模型 endpoint，不能隐式再次 POST。PersonAI 官方 gateway request 加密与 header 仍保留。
+
+## Local tokenizers
+
+`tokenization::builtin_tokenizer_registry()` supplies offline Qwen, DeepSeek, GLM, Kimi, GPT, and Claude/Opus rules. The generic `TextTokenizer`, `TokenizerRegistry`, `TokenizerMatcher`, and `TokenizerAccuracy` contracts live in Core. Exact names override case-insensitive family containment rules; only the final vendor model-name path segment is matched. Unknown names use the conservative Unicode fallback. Family selection is not a promise that every version uses the same vocabulary. Opus uses Anthropic's legacy tokenizer only as an explicitly marked approximation; current Claude counts require the provider's model-aware counting API or returned usage.
+
+Hosts can extend a clone without changing active model selections or the global defaults:
+
+```rust,ignore
+let mut registry = builtin_tokenizer_registry().clone();
+registry.register("host.model-tokenizer", Arc::new(HuggingFaceTextTokenizer::from_json(&json)?))?;
+registry.bind(
+    TokenizerMatcher::Exact("vendor-model".into()),
+    "host.model-tokenizer",
+    TokenizerAccuracy::ModelTokenizer,
+    0,
+)?;
+let selected = registry.select("provider/vendor-model");
+let tokens = selected.count_tokens("hello")?;
+```
+
+Registration and selection perform no I/O or vocabulary parsing. Embedded counters initialize lazily and remain shared across registry clones. Imported Hugging Face dictionaries have truncation and padding disabled. Encoding failures are returned, not hidden by switching to another vocabulary. A `TextTokenizer` counts text; the host's `TokenEstimator` adds its actual message projection, media and protocol framing. Provider usage remains authoritative. [Pinned dictionaries and licenses](resources/tokenizers/README.md).
