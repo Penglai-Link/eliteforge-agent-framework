@@ -138,6 +138,8 @@ pub enum TelemetryError {
 }
 #[async_trait]
 pub trait TelemetryStore: Send + Sync {
+    /// Permanently remove all persisted telemetry, including derived indexes and rollups.
+    async fn clear(&self) -> Result<(), TelemetryError>;
     async fn register_trace(&self, trace: TelemetryTrace) -> Result<(), TelemetryError>;
     async fn write_spans(&self, spans: Vec<TelemetrySpan>) -> Result<(), TelemetryError>;
     async fn write_metrics(&self, points: Vec<TelemetryMetricPoint>) -> Result<(), TelemetryError>;

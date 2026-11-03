@@ -269,3 +269,24 @@ async fn late_business_registration_preserves_browser_root_and_completion_time()
     assert_eq!(trace.attributes["workspace"], "a");
     assert_eq!(trace.attributes["service.name"], "frontend");
 }
+
+#[tokio::test]
+async fn clear_removes_metrics_traces_and_rollups_and_allows_new_collection() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = SqliteDatabase::open(temp.path().join("reset.db")).await.unwrap();
+    let store = SqliteTelemetryStore::with_database(db.clone(), policy()).await.unwrap();
+    store.register_trace(TelemetryTrace { trace_id: "old".into(), started_at: now(), ended_at: Some(now()), ..Default::default() }).await.unwrap();
+    store.write_spans(vec![TelemetrySpan { trace_id: "old".into(), span_id: "span".into(), name: "request".into(), started_at: now(), ended_at: now(), status_code: 2, attributes: BTreeMap::from([("error.count".into(), "1".into())]), ..Default::default() }]).await.unwrap();
+    store.write_metrics(vec![TelemetryMetricPoint { point_id: "old-point".into(), name: "memory".into(), timestamp: now(), resource: BTreeMap::from([("service.name".into(), "test".into())]), ..Default::default() }]).await.unwrap();
+    store.clear().await.unwrap();
+    db.call(|c| -> rusqlite::Result<()> {
+        for table in ["ef_telemetry_metric_points", "ef_telemetry_metric_attributes", "ef_telemetry_spans", "ef_telemetry_span_attributes", "ef_telemetry_trace_attributes", "ef_telemetry_traces", "ef_telemetry_span_rollups", "ef_telemetry_trace_rollups"] {
+            let count: i64 = c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))?;
+            assert_eq!(count, 0, "{table}");
+        }
+        Ok(())
+    }).await.unwrap();
+    store.clear().await.unwrap();
+    store.write_metrics(vec![TelemetryMetricPoint { point_id: "new".into(), timestamp: now(), ..Default::default() }]).await.unwrap();
+    assert_eq!(store.metric_points(None.into(), 0, 10).await.unwrap().total, 1);
+}

@@ -111,6 +111,22 @@ impl SqliteTelemetryStore {
 }
 #[async_trait]
 impl TelemetryStore for SqliteTelemetryStore {
+    async fn clear(&self) -> Result<(), TelemetryError> {
+        self.database.call(|c| {
+            let tx = c.transaction()?;
+            // Delete children in bulk before parents to avoid per-record cascades.
+            tx.execute_batch("DELETE FROM ef_telemetry_metric_attributes;
+                DELETE FROM ef_telemetry_metric_points;
+                DELETE FROM ef_telemetry_span_attributes;
+                DELETE FROM ef_telemetry_span_rollups;
+                DELETE FROM ef_telemetry_trace_rollups;
+                DELETE FROM ef_telemetry_spans;
+                DELETE FROM ef_telemetry_trace_attributes;
+                DELETE FROM ef_telemetry_traces;")?;
+            tx.commit()
+        }).await.map_err(error)
+    }
+
     async fn register_trace(&self, t: TelemetryTrace) -> Result<(), TelemetryError> {
         self.database
             .call(move |c| -> rusqlite::Result<()> {
