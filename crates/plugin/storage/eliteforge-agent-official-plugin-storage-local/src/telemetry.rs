@@ -106,6 +106,18 @@ impl SqliteTelemetryStore {
             "DELETE FROM ef_telemetry_metric_points WHERE timestamp<?1",
             [now().saturating_sub(retention.metric_max_age.as_millis() as i64)],
         )?;
+        // Bounded work on normal writes; incremental vacuum preserves live
+        // rowids and is a no-op for legacy databases without pointer maps.
+        Self::reclaim_free_pages(c, 1024)?;
+        Ok(())
+    }
+
+    fn reclaim_free_pages(c: &Connection, limit: usize) -> rusqlite::Result<()> {
+        // This pragma yields a row for each reclaimed page. execute_batch stops
+        // on the first SQLITE_ROW; drain the statement to perform all its work.
+        let mut statement = c.prepare(&format!("PRAGMA incremental_vacuum({limit})"))?;
+        let mut rows = statement.query([])?;
+        while rows.next()?.is_some() {}
         Ok(())
     }
 }
@@ -123,7 +135,14 @@ impl TelemetryStore for SqliteTelemetryStore {
                 DELETE FROM ef_telemetry_spans;
                 DELETE FROM ef_telemetry_trace_attributes;
                 DELETE FROM ef_telemetry_traces;")?;
-            tx.commit()
+            // An explicit reset should also release its now-unused pages,
+            // including when telemetry shares a database with host tables.
+            // Unlike a full VACUUM, this keeps unrelated live rowids stable.
+            Self::reclaim_free_pages(&tx, 0)?;
+            tx.commit()?;
+            // Readers can keep the WAL pinned. A busy checkpoint leaves it for
+            // normal checkpointing and does not invalidate the committed reset.
+            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         }).await.map_err(error)
     }
 

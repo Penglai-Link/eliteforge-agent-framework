@@ -127,6 +127,14 @@ its spans in one transaction. Active traces are excluded. Metrics expire by age
 only. Writes and startup apply retention; the Collector schedules idle cleanup.
 On reopen, unfinished traces are marked abandoned and become eligible for retention.
 
+New databases enable SQLite incremental auto-vacuum before creating tables.
+Each retention pass reclaims at most 1,024 free pages; `clear` reclaims all free
+pages and attempts a truncating WAL checkpoint. These operations preserve live
+rowids in shared host tables. Active readers may delay WAL truncation.
+Existing databases keep their auto-vacuum mode: enabling incremental reclamation
+for an older file requires an explicitly scheduled SQLite format conversion.
+Deleting telemetry records alone does not shrink a legacy file.
+
 Span retries upsert by trace/span identity. Metric retries deduplicate by point
 identity. Root spans update trace metadata; later child spans do not replace its
 status or attributes. The generic query port supports attribute filters, paging,

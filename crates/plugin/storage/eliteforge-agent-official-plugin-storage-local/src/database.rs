@@ -38,6 +38,12 @@ impl SqliteDatabase {
         connection
             .call(|c| -> rusqlite::Result<()> {
                 c.busy_timeout(std::time::Duration::from_secs(5))?;
+                // Pointer maps must be enabled before the first schema is
+                // created. Existing databases keep their format: converting
+                // those requires an explicit, separately scheduled VACUUM.
+                if c.query_row("PRAGMA page_count", [], |row| row.get::<_, u64>(0))? == 0 {
+                    c.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
+                }
                 // WAL keeps transactions durable across process crashes at
                 // synchronous=NORMAL; only an OS-level power loss can lose the
                 // latest commits. FULL would fsync every commit for no
