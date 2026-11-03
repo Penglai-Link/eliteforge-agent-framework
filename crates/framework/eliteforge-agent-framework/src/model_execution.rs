@@ -376,7 +376,13 @@ impl AgentLoop for ModelExecutionLoop {
                             if step.status==HistoryStatus::Running {step.status=HistoryStatus::Interrupted;step.finished_at_ms=Some(unix_time_ms());}
                         }
                     }
+                    let journal = Arc::new(ReactBudgetJournal {
+                        store: store.clone(),
+                        lease: lease.clone(),
+                        checkpoint: tokio::sync::Mutex::new(checkpoint.clone()),
+                    });
                     let mut runtime = ModelExecutionRuntime {
+                        journal,
                         store: store.as_ref(),
                         lease: &lease,
                         checkpoint,
@@ -590,6 +596,9 @@ fn apply_resume(
 }
 
 struct ModelExecutionRuntime<'a> {
+    // One authority for this lease, shared by every model/tool stage and any
+    // retained child-accounting context. Phase-local snapshots can go stale.
+    journal: Arc<ReactBudgetJournal>,
     store: &'a dyn StateStore,
     lease: &'a ExecutionLease,
     checkpoint: Checkpoint,
@@ -858,6 +867,12 @@ impl ModelExecutionRuntime<'_> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        // Serialize ReAct transitions with budget/history commits from current
+        // and earlier stages. Only this lease's shared head supplies the revision;
+        // an external executor still must pass the store's CAS and fencing checks.
+        let journal = self.journal.clone();
+        let mut current = journal.checkpoint.lock().await;
+        self.checkpoint.revision = current.revision;
         self.state.budget_usage = self
             .context
             .usage
@@ -888,6 +903,8 @@ impl ModelExecutionRuntime<'_> {
                 self.checkpoint.clone(),
             )
             .await?;
+        *current = self.checkpoint.clone();
+        drop(current);
         if self.checkpoint.status.is_terminal() {
             if let Some(manager) = &self.services.interactions {
                 // Also close independently configured/remote interaction stores.
@@ -1092,11 +1109,7 @@ impl ModelExecutionRuntime<'_> {
                             ),
                         )
                     };
-                    let journal = Arc::new(ReactBudgetJournal {
-                        store: self.services.state.clone().expect("validated state store"),
-                        lease: self.lease.clone(),
-                        checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
-                    });
+                    let journal = self.journal.clone();
                     let mut model_context = self.context.clone();
                     model_context.budget_journal = Some(journal.clone());
                     model_context
@@ -1453,11 +1466,7 @@ impl ModelExecutionRuntime<'_> {
                     call_id: execution.call.id.clone(),
                 }))
                 .await?;
-                let journal = Arc::new(ReactBudgetJournal {
-                    store: self.services.state.clone().expect("validated state store"),
-                    lease: self.lease.clone(),
-                    checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
-                });
+                let journal = self.journal.clone();
                 let mut context = crate::tool_batches::invocation_context(self.context, &execution);
                 context.budget_journal = Some(journal.clone());
                 let result = self
@@ -1576,11 +1585,7 @@ impl ModelExecutionRuntime<'_> {
         {
             return Ok(false);
         }
-        let journal = Arc::new(ReactBudgetJournal {
-            store: self.services.state.clone().expect("validated state store"),
-            lease: self.lease.clone(),
-            checkpoint: tokio::sync::Mutex::new(self.checkpoint.clone()),
-        });
+        let journal = self.journal.clone();
         let mut pending = indices.into_iter();
         let mut running = FuturesUnordered::new();
         let mut failure = None;
@@ -1596,16 +1601,13 @@ impl ModelExecutionRuntime<'_> {
                 let execution = self.execution(index).clone();
                 // Persist only the calls occupying a dispatch slot. Queued calls
                 // remain Planned/Approved and become NotExecuted on cancellation.
-                let mut checkpoint = journal.checkpoint.lock().await;
-                self.checkpoint = checkpoint.clone();
+                self.checkpoint = journal.checkpoint.lock().await.clone();
                 self.execution_mut(index).state = ToolExecutionState::Started;
                 self.save(Some(AgentEvent::ToolStarted {
                     tool_id: execution.tool_id.clone(),
                     call_id: execution.call.id.clone(),
                 }))
                 .await?;
-                *checkpoint = self.checkpoint.clone();
-                drop(checkpoint);
                 let binding = self.tools.by_name[&execution.call.call_name].clone();
                 let mut context = crate::tool_batches::invocation_context(self.context, &execution);
                 context.budget_journal = Some(journal.clone());
@@ -1629,10 +1631,8 @@ impl ModelExecutionRuntime<'_> {
             };
             // Share the revision with concurrent budget reservations. Never let
             // an older journal checkpoint overwrite a completed sibling.
-            let mut checkpoint = journal.checkpoint.lock().await;
-            self.checkpoint = checkpoint.clone();
+            self.checkpoint = journal.checkpoint.lock().await.clone();
             let saved = self.finish_tool_result(index, result).await;
-            *checkpoint = self.checkpoint.clone();
             if let Err(error) = saved {
                 if error.contains_state_error() {
                     return Err(error);

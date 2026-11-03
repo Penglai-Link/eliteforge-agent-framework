@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use eliteforge_agent_framework::*;
-use eliteforge_agent_official_plugin_storage_local::SqliteStateStore;
+use eliteforge_agent_official_plugin_storage_local::{SqliteStateStore, SqliteConversationStore};
 use eliteforge_agent_test_support::*;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
@@ -278,11 +278,16 @@ impl EventSink for Capture {
     }
 }
 async fn recovery_agent(
+    path: &std::path::Path,
     store: Arc<SqliteStateStore>,
     capture: Arc<Mutex<Vec<RunHostMetadata>>>,
 ) -> Agent {
+    // Reopening a host must reopen the same conversation as its checkpoint,
+    // not create a new temporary conversation generation via TestBuilder.
+    let conversations = SqliteConversationStore::open(path, Default::default()).await.unwrap();
     TestBuilder::default()
         .plugin(store.plugin())
+        .plugin(ConversationStorePlugin::new(conversations))
         .plugin(ChatModelPlugin::new(AskOnce))
         .plugin(AgentLoopPlugin::new(ReactAgentLoop))
         .plugin(EventPlugin::new("capture", Capture(capture)))
@@ -308,7 +313,7 @@ async fn fresh_host_restores_original_metadata_before_observers_and_tools_on_res
             .unwrap(),
     );
     let capture = Arc::new(Mutex::new(Vec::new()));
-    let agent = recovery_agent(store.clone(), capture.clone()).await;
+    let agent = recovery_agent(&path, store.clone(), capture.clone()).await;
     let mut request = RunRequest::new("work", "start");
     request.host_context = Some(json!({"owner":"dude","task":"task-1"}));
     request.message_provenance = Some(provenance("dude", "main"));
@@ -325,7 +330,7 @@ async fn fresh_host_restores_original_metadata_before_observers_and_tools_on_res
             .await
             .unwrap(),
     );
-    let agent = recovery_agent(store.clone(), capture.clone()).await;
+    let agent = recovery_agent(&path, store.clone(), capture.clone()).await;
     let mut resume = RunRequest::new("work", "");
     resume.host_context = Some(json!({"owner":"wrong"}));
     resume.resume = Some(ResumeRequest {
@@ -358,7 +363,7 @@ async fn fresh_host_keeps_original_owner_and_attributes_human_intervention_on_re
             .unwrap(),
     );
     let capture = Arc::new(Mutex::new(Vec::new()));
-    let agent = recovery_agent(store.clone(), capture.clone()).await;
+    let agent = recovery_agent(&path, store.clone(), capture.clone()).await;
     let mut request = RunRequest::new("work", "start");
     request.host_context = Some(json!({"owner":"dude","task":"task-1"}));
     request.message_provenance = Some(provenance("dude", "main"));
@@ -375,7 +380,7 @@ async fn fresh_host_keeps_original_owner_and_attributes_human_intervention_on_re
             .await
             .unwrap(),
     );
-    let agent = recovery_agent(store.clone(), capture.clone()).await;
+    let agent = recovery_agent(&path, store.clone(), capture.clone()).await;
     // Hosts commonly commit with agent.answer before attaching the trusted
     // identity to the returned request. Recovery must fill attribution once.
     let mut resume = agent
