@@ -299,6 +299,12 @@ fn run_identity(run: &RunContext) -> Value {
 }
 #[async_trait]
 impl ContextContributor for RemoteImplementation {
+    fn layout_metadata(&self) -> ContextBlockMetadata {
+        // Context RPCs return a complete block for this request, never a delta.
+        ContextBlockMetadata::new(ContextContributor::block_id(self), "The complete context snapshot returned by the remote provider for this request.")
+            .with_locale("zh-CN", ContextContributor::block_id(self), "远程提供方为本次请求返回的完整上下文快照。")
+            .with_update_mode(ContextBlockUpdateMode::Replace)
+    }
     fn kind(&self) -> ContextSourceKind {
         if self.declaration.extension == "framework.context-provider" {
             ContextSourceKind::Instruction

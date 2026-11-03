@@ -1,10 +1,27 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+/// Source evolution between requests. Each request is still assembled afresh;
+/// this declaration does not mutate conversation storage or change assembly policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextBlockUpdateMode {
+    /// Instruction content stays fixed within one run.
+    Fixed,
+    /// New entries extend the source; budget reduction may still shorten it.
+    Append,
+    /// A new snapshot supersedes this block's previous snapshot.
+    Replace,
+    /// The contributor has not declared how its source evolves.
+    #[default]
+    Unspecified,
+}
 
 /// Display metadata for a context contributor in host layout controls.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContextBlockMetadata {
     pub display_name: String,
     pub description: String,
+    pub update_mode: ContextBlockUpdateMode,
     /// Contributor-owned translations, keyed by BCP 47 locale (for example zh-CN).
     pub locales: BTreeMap<String, ContextBlockText>,
     /// Relative default ordering for newly discovered blocks. Existing user order wins.
@@ -19,6 +36,11 @@ pub struct ContextBlockText {
 }
 
 impl ContextBlockMetadata {
+    pub fn with_update_mode(mut self, update_mode: ContextBlockUpdateMode) -> Self {
+        self.update_mode = update_mode;
+        self
+    }
+
     pub fn new(display_name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
             display_name: display_name.into(),

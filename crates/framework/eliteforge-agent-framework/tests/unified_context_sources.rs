@@ -13,7 +13,11 @@ use tokio::sync::Notify;
 
 #[test]
 fn contributor_metadata_resolves_locale_and_missing_fields_without_host_text() {
+    assert_eq!(FixedInstructions::new("fixed", "rules").layout_metadata().update_mode, ContextBlockUpdateMode::Fixed);
+    assert_eq!(FixedContextContributor(ContextBlock::data("fixed-data", "value")).layout_metadata().update_mode, ContextBlockUpdateMode::Fixed);
+    assert_eq!(ContextBlockMetadata::default().update_mode, ContextBlockUpdateMode::Unspecified);
     let metadata = ContextBlockMetadata::new("Base name", "Base description")
+        .with_update_mode(ContextBlockUpdateMode::Replace)
         .with_locale("zh-CN", "技能目录", "插件维护的描述")
         .with_locale("en-US", "Skill catalog", "");
     assert_eq!(metadata.resolve("ZH-cn").description, "插件维护的描述");
@@ -22,6 +26,8 @@ fn contributor_metadata_resolves_locale_and_missing_fields_without_host_text() {
     assert_eq!(metadata.resolve("en-US").description, "Base description");
     assert_eq!(metadata.resolve("ja-JP").display_name, "Base name");
     assert_eq!(metadata.resolve("ja-JP").description, "Base description");
+    assert_eq!(metadata.update_mode, ContextBlockUpdateMode::Replace);
+    assert_eq!(serde_json::to_value(ContextBlockUpdateMode::Append).unwrap(), "Append");
 }
 
 #[derive(Clone, Default)]

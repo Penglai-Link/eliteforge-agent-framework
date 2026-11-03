@@ -954,6 +954,7 @@ impl ContextContributor for SkillsGuidance {
     fn layout_metadata(&self) -> eliteforge_agent_core::ContextBlockMetadata {
         eliteforge_agent_core::ContextBlockMetadata::new("Skill instructions", "Rules for discovering, loading and using authorized skills and their resources.")
             .with_locale("zh-CN", "技能使用指令", "发现、加载和使用已授权技能及其资源的规则。")
+            .with_update_mode(eliteforge_agent_core::ContextBlockUpdateMode::Fixed)
     }
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let guidance = ManagedDeveloperPrompts::resolve(
@@ -986,6 +987,7 @@ impl ContextContributor for SkillsEndpoint {
     fn layout_metadata(&self) -> eliteforge_agent_core::ContextBlockMetadata {
         eliteforge_agent_core::ContextBlockMetadata::new("Skill catalog", "Names and summaries of authorized skills, plus the instructions of explicitly selected skills. Other skill resources are loaded on demand.")
             .with_locale("zh-CN", "技能目录", "已授权技能的名称和摘要，以及本轮明确选中技能的指令正文；其他技能资源按需加载。")
+            .with_update_mode(eliteforge_agent_core::ContextBlockUpdateMode::Replace)
     }
     fn default_block_config(&self) -> Option<eliteforge_agent_core::ContextBlockConfig> {
         Some(eliteforge_agent_core::ContextBlockConfig::new(

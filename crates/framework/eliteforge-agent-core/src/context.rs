@@ -1,7 +1,7 @@
 //! Ordered context blocks with independent quotas. Source history is immutable.
 #[path = "context_metadata.rs"]
 mod metadata;
-pub use metadata::{ContextBlockMetadata, ContextBlockText};
+pub use metadata::{ContextBlockMetadata, ContextBlockText, ContextBlockUpdateMode};
 
 use crate::*;
 use async_trait::async_trait;
@@ -125,6 +125,11 @@ pub trait ContextContributor: Send + Sync {
 pub struct FixedContextContributor(pub ContextBlock);
 #[async_trait]
 impl ContextContributor for FixedContextContributor {
+    fn layout_metadata(&self) -> ContextBlockMetadata {
+        ContextBlockMetadata::new(self.block_id(), "A fixed context block supplied by the host.")
+            .with_locale("zh-CN", self.block_id(), "由宿主提供、一次运行内保持不变的上下文。")
+            .with_update_mode(ContextBlockUpdateMode::Fixed)
+    }
     fn kind(&self) -> ContextSourceKind {
         if self.0.trust != ContextTrust::Data {
             ContextSourceKind::Instruction
@@ -156,6 +161,9 @@ impl FixedInstructions {
 }
 #[async_trait]
 impl ContextContributor for FixedInstructions {
+    fn layout_metadata(&self) -> ContextBlockMetadata {
+        self.0.layout_metadata()
+    }
     fn kind(&self) -> ContextSourceKind {
         ContextSourceKind::Instruction
     }
@@ -552,6 +560,11 @@ pub trait ContextAssembler: Send + Sync {
 struct BuiltinHistory;
 #[async_trait]
 impl ContextContributor for BuiltinHistory {
+    fn layout_metadata(&self) -> ContextBlockMetadata {
+        ContextBlockMetadata::new("Conversation history", "New conversation messages extend the history; budget projection may compress older turns.")
+            .with_locale("zh-CN", "对话历史", "新消息追加到对话历史，预算投影可能压缩较早的对话。")
+            .with_update_mode(ContextBlockUpdateMode::Append)
+    }
     fn kind(&self) -> ContextSourceKind {
         ContextSourceKind::History
     }
@@ -639,6 +652,16 @@ impl BuiltinInstructions<'_> {
 }
 #[async_trait]
 impl ContextContributor for BuiltinInstructions<'_> {
+    fn layout_metadata(&self) -> ContextBlockMetadata {
+        let mode = if self.sources.iter().all(|source| source.layout_metadata().update_mode == ContextBlockUpdateMode::Fixed) {
+            ContextBlockUpdateMode::Fixed
+        } else {
+            ContextBlockUpdateMode::Replace
+        };
+        ContextBlockMetadata::new("System instructions", "The seed instructions and enabled instruction contributors for this request.")
+            .with_locale("zh-CN", "系统指令", "本次请求的基础指令和已启用指令来源。")
+            .with_update_mode(mode)
+    }
     fn kind(&self) -> ContextSourceKind {
         ContextSourceKind::Instruction
     }

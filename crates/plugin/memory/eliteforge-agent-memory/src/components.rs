@@ -53,6 +53,11 @@ impl MemoryContributor {
 }
 #[async_trait]
 impl ContextContributor for MemoryContributor {
+    fn layout_metadata(&self) -> ContextBlockMetadata {
+        ContextBlockMetadata::new("Retrieved memories", "Current authorized long-term memories retrieved for this request.")
+            .with_locale("zh-CN", "检索记忆", "根据本次请求检索得到的、当前已授权长期记忆。")
+            .with_update_mode(ContextBlockUpdateMode::Replace)
+    }
     fn block_id(&self) -> &str {
         &self.id
     }

@@ -57,6 +57,11 @@ impl MemoryContextContributor {
 }
 #[async_trait]
 impl ContextContributor for MemoryContextContributor {
+    fn layout_metadata(&self) -> ContextBlockMetadata {
+        ContextBlockMetadata::new(self.block_id(), "The latest prepared snapshot of this scoped memory source.")
+            .with_locale("zh-CN", self.block_id(), "当前记忆范围内已准备好的最新快照。")
+            .with_update_mode(ContextBlockUpdateMode::Replace)
+    }
     fn block_id(&self) -> &str {
         &self.id
     }
