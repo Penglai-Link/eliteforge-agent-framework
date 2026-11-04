@@ -92,10 +92,12 @@ pub fn project_interaction(record: &InteractionRecord) -> InteractionSurface {
         if let Some(expiry) = request.expires_at_unix_ms {
             component["expiresAtMs"] = json!(expiry);
         }
-        if let Some(call) = &record.tool_call {
-            component["details"] = json!({"tool":call.call_name,"arguments":call.arguments});
-            if !approval {
-                component.as_object_mut().unwrap().remove("details");
+        if approval {
+            // Preserve the native approval's exact child invocation and batch metadata.
+            if let Some(details) = original.filter(|p| p["tool"].is_string() && p.get("parameters").is_some()) {
+                component["details"] = details.clone();
+            } else if let Some(call) = &record.tool_call {
+                component["details"] = json!({"tool":call.call_name,"parameters":call.arguments});
             }
         }
         vec![
