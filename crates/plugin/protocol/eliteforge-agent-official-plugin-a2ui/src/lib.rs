@@ -660,6 +660,37 @@ fn validate_tree(components: &BTreeMap<String, Value>) -> Result<(), AgentError>
             if let Some(a) = v["children"].as_array() {
                 refs.extend(a.iter().filter_map(Value::as_str).map(str::to_owned));
             }
+            // A Field already renders its controls. Listing those same controls
+            // beside it creates duplicate inputs sharing one data binding.
+            let mut siblings = Vec::new();
+            if let Some(child) = v["child"].as_str() {
+                siblings.push(child);
+            }
+            if let Some(children) = v["children"].as_array() {
+                siblings.extend(children.iter().filter_map(Value::as_str));
+            }
+            for field_id in &siblings {
+                let Some(field) = c.get(*field_id) else {
+                    continue;
+                };
+                if field["component"].as_str() != Some("Field") {
+                    continue;
+                }
+                let controls = field["child"].as_str().into_iter().chain(
+                    field["children"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str),
+                );
+                for control_id in controls {
+                    if siblings.contains(&control_id) {
+                        return Err(invalid(format!(
+                            "Component {id} lists Field {field_id} and its control {control_id} as siblings. Keep the Field reference and remove {control_id} from the parent's children; the Field renders it already."
+                        )));
+                    }
+                }
+            }
             if let Some(id) = v["children"]["componentId"].as_str() {
                 refs.push(id.into());
             }
