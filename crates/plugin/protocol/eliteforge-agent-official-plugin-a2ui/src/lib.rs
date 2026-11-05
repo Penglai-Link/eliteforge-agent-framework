@@ -651,6 +651,18 @@ fn validate_tree(components: &BTreeMap<String, Value>) -> Result<(), AgentError>
             return Err(invalid("Component cycle"));
         }
         if let Some(v) = c.get(id) {
+            if let Some(options) = v["options"].as_array() {
+                let mut values = BTreeSet::new();
+                for option in options {
+                    if let Some(value) = option["value"].as_str() {
+                        if !values.insert(value) {
+                            return Err(invalid(format!(
+                                "Component {id} repeats option value {value:?}. Each option value must be unique; remove duplicate options or use distinct values for distinct choices."
+                            )));
+                        }
+                    }
+                }
+            }
             let mut refs = Vec::new();
             for k in ["child", "trigger", "content"] {
                 if let Some(id) = v[k].as_str() {
