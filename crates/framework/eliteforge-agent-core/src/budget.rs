@@ -31,14 +31,14 @@ pub struct UsageLedger {
 impl UsageLedger {
     /// Shared across every callback scope and nested extension in this execution.
     pub fn admit_host_model_call(&mut self, limit: usize) -> bool {
-        if self.host_model_calls >= limit {
+        if crate::RunLimits::count_exhausted(self.host_model_calls, limit) {
             return false;
         }
         self.host_model_calls += 1;
         true
     }
     pub fn admit_host_tool_call(&mut self, limit: usize) -> bool {
-        if self.host_tool_calls >= limit {
+        if crate::RunLimits::count_exhausted(self.host_tool_calls, limit) {
             return false;
         }
         self.host_tool_calls += 1;

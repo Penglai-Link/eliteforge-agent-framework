@@ -46,7 +46,7 @@ impl SessionStore for SqliteStateStore {
                 ("ef_interactions","session_id"), ("ef_closed_interaction_runs","session_id"), ("ef_history_steps","session_id"),
                 ("ef_history_messages","session_id"), ("ef_history_tools","session_id"),
                 ("ef_history_interactions","session_id"), ("ef_history_runs","session_id"),
-                ("ef_history_versions","session_id"), ("ef_events","session_id"),
+                ("ef_history_versions","session_id"), ("ef_history_deleted_turns","session_id"), ("ef_history_transcript_spans","session_id"), ("ef_events","session_id"),
                 ("ef_session_artifact_refs","session_id"), ("ef_session_context","session_id"),
                 ("ef_runs","session_id"), ("ef_goals","session_id"), ("ef_sessions","id"),
             ];

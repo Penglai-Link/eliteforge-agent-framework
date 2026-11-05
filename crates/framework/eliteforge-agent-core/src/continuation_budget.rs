@@ -56,12 +56,18 @@ impl ModelDispatchCounter {
             None
         } else {
             limits.max_model_calls_per_step.and_then(|per_step| {
-                limits.max_steps.checked_mul(per_step).and_then(|overall| {
-                    steps
-                        .checked_add(usize::from(pending_model))
-                        .and_then(|steps| steps.checked_mul(per_step))
-                        .map(|bound| bound.min(overall))
-                })
+                (per_step != RunLimits::UNLIMITED_COUNT)
+                    .then_some(per_step)
+                    .and_then(|per_step| {
+                        steps
+                            .checked_add(usize::from(pending_model))
+                            .and_then(|steps| steps.checked_mul(per_step))
+                            .map(|bound| {
+                                limits
+                                    .model_call_ceiling()
+                                    .map_or(bound, |overall| bound.min(overall))
+                            })
+                    })
             })
         };
         *self.0.restored.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -220,7 +226,8 @@ impl ContinuationBudget {
         limits.max_tool_calls = limits.max_tool_calls.min(self.max_tools);
     }
     pub fn exhausted(&self) -> bool {
-        self.calls() >= self.max_calls || self.steps() >= self.max_steps
+        RunLimits::count_exhausted(self.calls(), self.max_calls)
+            || RunLimits::count_exhausted(self.steps(), self.max_steps)
     }
 }
 

@@ -142,6 +142,9 @@ impl AgentLoop for ModelExecutionLoop {
             .with_execution_scope(request.scope())
             .with_host_metadata(request);
             if let Some(snapshot) = initial_snapshot {
+                checkpoint.conversation_span = Some(ConversationSpan {
+                    key: snapshot.key, generation: snapshot.generation, start: snapshot.messages.len(),
+                });
                 checkpoint.transcript = snapshot.messages;
             } else if let Some(previous) = &previous {
                 checkpoint.transcript = previous.transcript.clone();
@@ -1073,11 +1076,13 @@ impl ModelExecutionRuntime<'_> {
             match &self.state.cursor {
                 ReactCursor::Model => {
                     if self.state.pending_model_response.is_none()
-                        && (self.state.steps >= self.state.request.limits.max_steps
-                            || !admit_native_step(
-                                self.context,
-                                self.state.request.limits.max_steps,
-                            ))
+                        && (RunLimits::count_exhausted(
+                            self.state.steps,
+                            self.state.request.limits.max_steps,
+                        ) || !admit_native_step(
+                            self.context,
+                            self.state.request.limits.max_steps,
+                        ))
                     {
                         return self
                             .stop(RunStatus::StepLimit, ExecutionStatus::Completed)
@@ -1209,12 +1214,17 @@ impl ModelExecutionRuntime<'_> {
                         self.state.pending_assistant_messages = assistant_messages;
                         let expanded =
                             crate::tool_batches::expand_calls(&assistant.tool_calls, &self.tools)?;
-                        let remaining = self
-                            .state
-                            .request
-                            .limits
-                            .max_tool_calls
-                            .saturating_sub(self.state.tool_calls);
+                        let remaining = if self.state.request.limits.max_tool_calls
+                            == RunLimits::UNLIMITED_COUNT
+                        {
+                            expanded.len()
+                        } else {
+                            self.state
+                                .request
+                                .limits
+                                .max_tool_calls
+                                .saturating_sub(self.state.tool_calls)
+                        };
                         let overflow = expanded.len() > remaining;
                         if overflow
                             && (remaining == 0

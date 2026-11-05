@@ -156,6 +156,7 @@ struct PublishInput {
 pub struct A2uiService {
     interactions: Arc<OnceLock<Arc<dyn InteractionStore>>>,
     store: Arc<OnceLock<Arc<dyn SessionLifecycleStore>>>,
+    history: Arc<OnceLock<Arc<dyn HistoryStore>>>,
     validators: Arc<BTreeMap<String, jsonschema::Validator>>,
 }
 fn invalid(message: impl Into<String>) -> AgentError {
@@ -219,6 +220,7 @@ impl A2uiService {
         Ok(Self {
             interactions: Arc::new(OnceLock::new()),
             store: Arc::new(OnceLock::new()),
+            history: Arc::new(OnceLock::new()),
             validators: Arc::new(validators),
         })
     }
@@ -229,10 +231,15 @@ impl A2uiService {
     }
     async fn load(&self, session: &str) -> Result<(Option<u64>, SessionState), AgentError> {
         match self.store()?.read_context(session, KEY).await? {
-            Some((revision, value)) => Ok((
-                Some(revision),
-                serde_json::from_value(value).map_err(|_| invalid("Invalid A2UI session state"))?,
-            )),
+            Some((revision, value)) => {
+                let mut state: SessionState = serde_json::from_value(value).map_err(|_| invalid("Invalid A2UI session state"))?;
+                if let Some(history) = self.history.get() {
+                    let deleted = history.deleted_runs(session).await?.into_iter().map(|id| id.to_string()).collect::<BTreeSet<_>>();
+                    state.surfaces.retain(|_, surface| !deleted.contains(&surface.run_id));
+                    state.actions.retain(|_, action| !deleted.contains(&action.run_id));
+                }
+                Ok((Some(revision), state))
+            },
             None => Ok((None, SessionState::default())),
         }
     }
@@ -759,6 +766,9 @@ impl Plugin for A2uiPlugin {
             .services()
             .get::<SessionLifecycleStoreService>()
             .ok_or_else(|| PluginError::message("A2UI requires storage"))?;
+        if let Some(history) = ctx.services().get::<HistoryStoreService>() {
+            let _ = self.service.history.set(history.0.clone());
+        }
         if let Some(interactions) = ctx.services().get::<InteractionStoreService>() {
             let _ = self.service.interactions.set(interactions.0.clone());
         }

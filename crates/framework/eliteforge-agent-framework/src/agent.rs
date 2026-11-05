@@ -1187,9 +1187,7 @@ impl AgentGeneration {
                 .initial_observation
                 .as_ref()
                 .is_some_and(|initial| initial.incomplete);
-        let overall = limits
-            .max_model_calls_per_step
-            .and_then(|per_step| limits.max_steps.checked_mul(per_step));
+        let overall = limits.model_call_ceiling();
         let model_calls = control.continuation_budget.as_ref().map_or_else(
             || {
                 if control.resumed {

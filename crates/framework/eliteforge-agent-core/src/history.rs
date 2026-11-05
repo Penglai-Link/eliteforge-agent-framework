@@ -420,6 +420,8 @@ impl Default for HistoryQuery {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionHistory {
+    /// False for opaque/external runtimes whose context cannot be edited.
+    pub can_delete_turns: bool,
     pub session_id: String,
     pub version: String,
     pub next_cursor: Option<HistoryCursor>,
@@ -430,6 +432,20 @@ pub struct SessionHistory {
 }
 #[async_trait]
 pub trait HistoryStore: Send + Sync {
+    /// Atomically hide a complete turn and remove it from future model context.
+    /// Implementations must fence active writers and invalidate derived state.
+    async fn delete_turn(&self, _session_id: &str, _root_run_id: RunId, _expected_version: &str) -> Result<String, StateError> {
+        Err(StateError::Invalid("history deletion is unavailable".into()))
+    }
+
+    /// Deleted execution identities for projections owned by other plugins.
+    async fn deleted_runs(&self, _session_id: &str) -> Result<Vec<RunId>, StateError> { Ok(Vec::new()) }
+
+    /// Changes only when history is edited, for derived projection invalidation.
+    async fn context_revision(&self, _session_id: &str) -> Result<String, StateError> {
+        Ok("0".into())
+    }
+
     /// Check references before admission; writers repeat this under their transaction.
     async fn validate_annotation_sources(
         &self,
@@ -454,6 +470,14 @@ pub struct HistoryStoreService(pub Arc<dyn HistoryStore>);
 #[derive(Clone)]
 pub struct HistoryService(pub Arc<dyn HistoryStore>);
 impl HistoryService {
+    pub async fn deleted_runs(&self, session_id: &str) -> Result<Vec<RunId>, StateError> { self.0.deleted_runs(session_id).await }
+    pub async fn delete_turn(&self, session_id: &str, root_run_id: RunId, expected_version: &str) -> Result<String, StateError> {
+        self.0.delete_turn(session_id, root_run_id, expected_version).await
+    }
+    pub async fn context_revision(&self, session_id: &str) -> Result<String, StateError> {
+        self.0.context_revision(session_id).await
+    }
+
     pub async fn validate_annotation_sources(
         &self,
         session_id: &str,

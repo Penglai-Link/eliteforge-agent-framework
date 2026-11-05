@@ -192,3 +192,10 @@ flowchart LR
   Answer --> Run
   Answer --> History[独立持久化的回答身份]
 ```
+
+### 不限制执行次数
+
+`RunLimits::UNLIMITED_COUNT` 表示不限制 `max_steps` 或 `max_tool_calls`。
+它与有限上限取最小值时保留有限限制，适用于父子运行和续跑预算。
+`max_tool_calls = 0` 仍表示不允许工具调用；宿主产品的“不限制”配置需显式映射为该常量。
+取消、超时、并发、上下文和工具权限继续独立生效。

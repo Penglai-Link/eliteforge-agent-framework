@@ -67,6 +67,9 @@ impl ContinuationRequest {
         }
         if self.initial_execution.incomplete
             && self.initial_execution.historical_calls_bound.is_none()
+            && self.initial_execution.limits.max_steps != RunLimits::UNLIMITED_COUNT
+            && self.initial_execution.limits.max_model_calls_per_step
+                != Some(RunLimits::UNLIMITED_COUNT)
         {
             return Err(AgentError::InvalidConfiguration("historical execution admission cannot be proven; explicit reconciliation is required".into()));
         }
@@ -92,13 +95,19 @@ impl ContinuationRequest {
                 "continuation requires an explicit model call ceiling".into(),
             )
         })?;
-        let max_calls = request
-            .limits
-            .max_steps
-            .checked_mul(per_step)
-            .ok_or_else(|| {
-                AgentError::InvalidConfiguration("continuation call ceiling overflow".into())
-            })?;
+        let max_calls = if request.limits.max_steps == RunLimits::UNLIMITED_COUNT
+            || per_step == RunLimits::UNLIMITED_COUNT
+        {
+            RunLimits::UNLIMITED_COUNT
+        } else {
+            request
+                .limits
+                .max_steps
+                .checked_mul(per_step)
+                .ok_or_else(|| {
+                    AgentError::InvalidConfiguration("continuation call ceiling overflow".into())
+                })?
+        };
         request.extensions.insert(ContinuationBudget::new(
             max_calls,
             request.limits.max_steps,

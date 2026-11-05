@@ -731,10 +731,12 @@ pub enum ToolBatchBudgetPolicy {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunLimits {
+    /// Maximum model steps; UNLIMITED_COUNT disables this ceiling.
     pub max_steps: usize,
     /// Additional model calls after a response consisting only of commentary.
     #[serde(default = "default_phase_continuations")]
     pub max_phase_continuations: usize,
+    /// Maximum tool invocations; UNLIMITED_COUNT disables this ceiling. Zero permits no tools.
     pub max_tool_calls: usize,
     #[serde(default)]
     pub tool_batch_budget_policy: ToolBatchBudgetPolicy,
@@ -803,6 +805,23 @@ fn default_child_depth() -> usize {
 }
 
 impl RunLimits {
+    /// Explicitly unbounded execution count. Finite child limits still take precedence.
+    pub const UNLIMITED_COUNT: usize = usize::MAX;
+
+    /// Whether a finite step/tool ceiling has been reached.
+    pub fn count_exhausted(used: usize, limit: usize) -> bool {
+        limit != Self::UNLIMITED_COUNT && used >= limit
+    }
+
+    /// Model-call ceiling derived only from finite execution limits.
+    pub fn model_call_ceiling(&self) -> Option<usize> {
+        self.max_model_calls_per_step
+            .filter(|per_step| {
+                self.max_steps != Self::UNLIMITED_COUNT && *per_step != Self::UNLIMITED_COUNT
+            })
+            .and_then(|per_step| self.max_steps.checked_mul(per_step))
+    }
+
     /// No cumulative token ceiling. Context and output limits still apply.
     pub const UNLIMITED_TOKENS: u64 = u64::MAX;
 

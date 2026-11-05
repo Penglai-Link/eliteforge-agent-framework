@@ -576,6 +576,8 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
                 require_session(&tx,&owner,true)?;
                 if owner!=run.session_id { tx.execute("UPDATE ef_sessions SET owner_session_id=?2 WHERE id=?1",params![run.session_id,owner]).map_err(sql)?; }
             }
+            let deleted: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM ef_history_deleted_turns WHERE session_id IN (?1,?2) AND root_run_id=?3)", params![run.session_id, owner, run.root_run_id.to_string()], |r| r.get(0)).map_err(sql)?;
+            if deleted { return Err(StateError::NotFound); }
             if let Some(id)=&run.goal_id && goal(&tx,id)?.session_id!=owner { return Err(StateError::Conflict); }
             if resume {
                 let old: String=tx.query_row("SELECT record FROM ef_runs WHERE id=?1",[run.id.to_string()],|r|r.get(0)).map_err(sql)?;

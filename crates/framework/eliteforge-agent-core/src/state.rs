@@ -193,10 +193,20 @@ pub struct Checkpoint {
     pub status: ExecutionStatus,
     pub state: Value,
     pub transcript: Vec<Message>,
+    /// Ownership of this run's suffix in the persistent conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_span: Option<ConversationSpan>,
     pub events: Vec<EventEnvelope>,
     /// Public records for this run only; private transcript is never a history API.
     #[serde(default)]
     pub history: crate::HistoryRecords,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationSpan {
+    pub key: crate::ConversationKey,
+    pub generation: String,
+    pub start: usize,
 }
 
 fn default_execution_scope() -> String {
@@ -232,12 +242,18 @@ impl Checkpoint {
             status: ExecutionStatus::Running,
             state,
             transcript: Vec::new(),
+            conversation_span: None,
             events: Vec::new(),
             history: Default::default(),
         }
     }
     pub fn validate(&self) -> Result<(), StateError> {
         self.history.validate(self.run_id)?;
+        if let Some(span) = &self.conversation_span {
+            if span.key.session_id != self.session_id || span.generation.is_empty() || span.start > self.transcript.len() {
+                return Err(StateError::Invalid("invalid conversation span".into()));
+            }
+        }
         if self.schema_version != 1 || self.loop_version == 0 {
             return Err(StateError::UnsupportedVersion);
         }
@@ -275,6 +291,7 @@ impl Checkpoint {
         if self.run_id != next.run_id
             || self.session_id != next.session_id
             || self.execution_scope != next.execution_scope
+            || self.conversation_span != next.conversation_span
             || self.host_metadata != next.host_metadata
             || self.loop_id != next.loop_id
             || self.loop_version != next.loop_version

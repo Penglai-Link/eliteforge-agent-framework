@@ -4,6 +4,9 @@ use eliteforge_agent_core::*;
 use rusqlite::{OptionalExtension, params};
 use serde::{Serialize, de::DeserializeOwned};
 
+#[path = "history_deletion.rs"]
+mod deletion;
+
 fn encode(value: &impl Serialize) -> Result<String, StateError> {
     serde_json::to_string(value).map_err(|e| StateError::Invalid(e.to_string()))
 }
@@ -11,7 +14,10 @@ fn decode<T: DeserializeOwned>(value: String) -> Result<T, StateError> {
     serde_json::from_str(&value).map_err(|_| StateError::Invalid("corrupt history record".into()))
 }
 pub(crate) fn initialize(c: &rusqlite::Connection) -> Result<(), StateError> {
-    c.execute_batch("CREATE TABLE IF NOT EXISTS ef_history_versions(session_id TEXT PRIMARY KEY, version TEXT NOT NULL);
+    c.execute_batch("CREATE TABLE IF NOT EXISTS ef_history_deleted_turns(session_id TEXT NOT NULL, root_run_id TEXT NOT NULL, revision TEXT NOT NULL, PRIMARY KEY(session_id,root_run_id));
+        CREATE TABLE IF NOT EXISTS ef_history_transcript_spans(run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, branch TEXT NOT NULL, generation TEXT NOT NULL, start INTEGER NOT NULL, end INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS ef_history_span_session ON ef_history_transcript_spans(session_id,branch,start);
+        CREATE TABLE IF NOT EXISTS ef_history_versions(session_id TEXT PRIMARY KEY, version TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS ef_history_runs(ordinal INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, session_id TEXT NOT NULL, owner_session_id TEXT NOT NULL, root_run_id TEXT NOT NULL, active INTEGER NOT NULL, record TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS ef_history_turns ON ef_history_runs(owner_session_id, ordinal DESC) WHERE id=root_run_id;
         CREATE INDEX IF NOT EXISTS ef_history_roots ON ef_history_runs(owner_session_id, root_run_id, ordinal);
@@ -154,7 +160,7 @@ fn annotation_source_ids(
         return Ok(());
     }
     let invalid: bool = c.query_row(
-        "SELECT EXISTS(SELECT 1 FROM json_each(?1) a WHERE NOT EXISTS(SELECT 1 FROM ef_history_messages m WHERE m.id=a.value AND m.session_id=?2))",
+        "SELECT EXISTS(SELECT 1 FROM json_each(?1) a WHERE NOT EXISTS(SELECT 1 FROM ef_history_messages m WHERE m.id=a.value AND m.session_id=?2 AND NOT EXISTS(SELECT 1 FROM ef_history_runs r JOIN ef_history_deleted_turns d ON d.session_id=r.session_id AND d.root_run_id=r.root_run_id WHERE r.id=m.run_id)))",
         params![encode(&ids)?, session], |row| row.get(0),
     ).map_err(sql)?;
     if invalid {
@@ -171,6 +177,7 @@ pub(crate) fn checkpoint(
     next: &Checkpoint,
     previous: Option<&Checkpoint>,
 ) -> Result<(), StateError> {
+    deletion::record_span(c, next)?;
     let mut annotation_ids = Vec::new();
     for message in &next.history.messages {
         if previous.is_some_and(|old| {
@@ -314,6 +321,25 @@ fn page_records<T: DeserializeOwned>(
 }
 #[async_trait]
 impl HistoryStore for SqliteStateStore {
+    async fn deleted_runs(&self, session: &str) -> Result<Vec<RunId>, StateError> {
+        let session = session.to_owned();
+        self.execute_read(move |c| {
+            let mut q = c.prepare("SELECT r.id FROM ef_history_runs r JOIN ef_history_deleted_turns d ON d.session_id=r.session_id AND d.root_run_id=r.root_run_id WHERE r.session_id=?1").map_err(sql)?;
+            q.query_map([session], |r| r.get::<_, String>(0)).map_err(sql)?
+                .map(|r| RunId::parse_str(&r.map_err(sql)?).map_err(|e| StateError::Invalid(e.to_string()))).collect()
+        }).await
+    }
+
+    async fn delete_turn(&self, session: &str, root: RunId, expected: &str) -> Result<String, StateError> {
+        let session = session.to_owned();
+        let expected = expected.to_owned();
+        self.execute(move |c| deletion::delete(c, &session, root, &expected)).await
+    }
+    async fn context_revision(&self, session: &str) -> Result<String, StateError> {
+        let session = session.to_owned();
+        self.execute_read(move |c| deletion::revision(c, &session)).await
+    }
+
     async fn validate_annotation_sources(
         &self,
         session: &str,
@@ -393,7 +419,7 @@ impl HistoryStore for SqliteStateStore {
             let before = query.cursor.as_ref().map(|c| c.before).unwrap_or(i64::MAX as u64);
             let mut roots: Vec<(u64, String)> = {
                 let mut q = tx.prepare(
-                    "SELECT r.ordinal,r.root_run_id FROM ef_history_runs r WHERE r.session_id=?1 AND r.ordinal<?2 AND NOT EXISTS(SELECT 1 FROM ef_history_runs p WHERE p.session_id=r.session_id AND p.root_run_id=r.root_run_id AND p.ordinal<r.ordinal) ORDER BY r.ordinal DESC LIMIT ?3"
+                    "SELECT r.ordinal,r.root_run_id FROM ef_history_runs r WHERE r.session_id=?1 AND r.ordinal<?2 AND NOT EXISTS(SELECT 1 FROM ef_history_deleted_turns d WHERE d.session_id=r.session_id AND d.root_run_id=r.root_run_id) AND NOT EXISTS(SELECT 1 FROM ef_history_runs p WHERE p.session_id=r.session_id AND p.root_run_id=r.root_run_id AND p.ordinal<r.ordinal) ORDER BY r.ordinal DESC LIMIT ?3"
                 ).map_err(sql)?;
                 q.query_map(params![session_id, before, query.limit + 1], |r| Ok((r.get(0)?, r.get(1)?)))
                     .map_err(sql)?.collect::<Result<_, _>>().map_err(sql)?
@@ -411,11 +437,12 @@ impl HistoryStore for SqliteStateStore {
             let roots = encode(&roots.into_iter().map(|(_, root)| root).collect::<Vec<_>>())?;
             let runs = {
                 let mut q = tx.prepare(
-                    "SELECT r.record FROM json_each(?2) page JOIN ef_history_runs r ON r.root_run_id=page.value AND r.session_id=?1 ORDER BY CAST(page.key AS INTEGER),r.ordinal"
+                    "SELECT r.record FROM json_each(?2) page JOIN ef_history_runs r ON r.root_run_id=page.value AND r.session_id=?1 AND NOT EXISTS(SELECT 1 FROM ef_history_deleted_turns d WHERE d.session_id=r.session_id AND d.root_run_id=r.root_run_id) ORDER BY CAST(page.key AS INTEGER),r.ordinal"
                 ).map_err(sql)?;
                 q.query_map(params![session_id, roots], |row| row.get(0)).map_err(sql)?
                     .map(|row| decode(row.map_err(sql)?)).collect::<Result<Vec<HistoryRun>, _>>()?
             };
+            let can_delete_turns = deletion::supported(&tx, &session_id)?;
             let history = HistoryRecords {
                 steps: page_records(&tx, "ef_history_steps", &session_id, &roots)?,
                 messages: page_records(&tx, "ef_history_messages", &session_id, &roots)?,
@@ -438,7 +465,7 @@ impl HistoryStore for SqliteStateStore {
             };
             tx.commit().map_err(sql)?;
             Ok(SessionHistory {
-                session_id, version, next_cursor, runs, records: history, pending_interactions, active_runs,
+                can_delete_turns, session_id, version, next_cursor, runs, records: history, pending_interactions, active_runs,
             })
         }).await
     }

@@ -370,7 +370,7 @@ impl ThreadCreateTool {
                     "task":{"type":"string","minLength":1,"maxLength":16384},
                     "agentCode":{"type":"string","minLength":1,"maxLength":256,"description":"Target Agent code from the available Agent directory. Omit to use the current Agent. The host resolves configuration and checks authorization."},
                     "title":{"type":"string","minLength":1,"maxLength":200},
-                    "max_steps":{"type":"integer","minimum":1,"maximum":ceilings.max_steps},
+                    "max_steps":{"type":"integer","minimum":1,"description":"Optional step cap, no greater than the parent limit. Omit to inherit the parent policy, including unlimited."},
                     "workingDirectory":{"type":"string","minLength":1,"maxLength":4096,"description":"Working directory for this task. State it explicitly when delegating coding or command work. Relative paths resolve against your current localDirectory; omit to inherit it. The host validates access and binds the real process cwd; naming a path only in task text does not select it."},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
@@ -422,7 +422,7 @@ impl ThreadSendTool {
                 "type":"object","additionalProperties":false,"required":["session_id","message"],"properties":{
                     "session_id":{"type":"string","minLength":1,"maxLength":256},
                     "message":{"type":"string","minLength":1,"maxLength":16384},
-                    "max_steps":{"type":"integer","minimum":1,"maximum":ceilings.max_steps},
+                    "max_steps":{"type":"integer","minimum":1,"description":"Optional step cap, no greater than the parent limit. Omit to inherit the parent policy, including unlimited."},
                     "max_total_tokens":{"type":"integer","minimum":1,"maximum":ceilings.max_total_tokens}
                 }
             }),
