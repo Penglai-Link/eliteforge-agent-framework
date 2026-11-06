@@ -955,6 +955,7 @@ impl ContextContributor for SkillsGuidance {
         eliteforge_agent_core::ContextBlockMetadata::new("Skill instructions", "Rules for discovering, loading and using authorized skills and their resources.")
             .with_locale("zh-CN", "技能使用指令", "发现、加载和使用已授权技能及其资源的规则。")
             .with_update_mode(eliteforge_agent_core::ContextBlockUpdateMode::Fixed)
+            .with_compression(eliteforge_agent_core::ContextCompressionMetadata::keep())
     }
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let guidance = ManagedDeveloperPrompts::resolve(

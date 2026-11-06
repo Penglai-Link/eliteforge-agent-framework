@@ -78,6 +78,7 @@ impl ContextContributor for Guidance {
         eliteforge_agent_core::ContextBlockMetadata::new("A2UI instructions", "Rules for publishing interactive interfaces and collecting structured input with the negotiated A2UI components.")
             .with_locale("zh-CN", "A2UI 指令", "使用已协商的 A2UI 组件发布交互界面、收集结构化输入的规则。")
             .with_update_mode(eliteforge_agent_core::ContextBlockUpdateMode::Fixed)
+            .with_compression(eliteforge_agent_core::ContextCompressionMetadata::keep())
     }
     async fn contribute(&self, input: &ContextInput<'_>) -> Result<ContextBlock, AgentError> {
         let messages = if negotiated(&input.run.extensions) {

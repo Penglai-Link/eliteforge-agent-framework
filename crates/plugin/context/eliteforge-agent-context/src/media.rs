@@ -49,6 +49,9 @@ impl Default for BoundMultimodalData {
 }
 #[async_trait]
 impl ContextReducer for BoundMultimodalData {
+    fn metadata(&self) -> eliteforge_agent_core::ContextCompressionMetadata {
+        eliteforge_agent_core::ContextCompressionMetadata::bound()
+    }
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
         input.run.check_cancelled()?;
         let budget = ContextBudget {

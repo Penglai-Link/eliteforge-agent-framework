@@ -215,10 +215,10 @@ fn is_bare_shell_invocation(command: &str, args: Option<&[String]>) -> bool {
 }
 pub fn terminal_tool_catalog() -> Vec<ToolDescriptor> {
     [
-        ("start", "Start an interactive shell or a long-running command in a host-authorized directory. Omit args for a shell command string, supply args for literal argv. An empty shell requires interactive:true. Returns a terminal ID for later reads, input and stop.", json!({
+        ("start", "Start an interactive shell or a long-running command in a host-authorized directory. Choose exactly one mode: interactive:true with no command or args starts the host-configured shell; command with interactive omitted or false runs a command. In command mode, omit args for a shell string or supply args for literal argv. Returns a terminal ID for later reads, input and stop.", json!({
             "type":"object", "properties":{
                 "command":{"type":"string","minLength":1}, "args":{"type":"array","items":{"type":"string"}},
-                "interactive":{"type":"boolean"}, "cwd":{"type":"string"}, "env":{"type":"object","additionalProperties":{"type":"string"}}
+                "interactive":{"type":"boolean","description":"Start the host-configured shell. When true, omit both command and args."}, "cwd":{"type":"string"}, "env":{"type":"object","additionalProperties":{"type":"string"}}
             }, "oneOf":[
                 {"required":["command"],"not":{"required":["interactive"],"properties":{"interactive":{"const":true}}}},
                 {"required":["interactive"],"properties":{"interactive":{"const":true}},"not":{"anyOf":[{"required":["command"]},{"required":["args"]}]}}

@@ -64,7 +64,7 @@ pub fn execute_descriptor() -> crate::ToolDescriptor {
     crate::ToolDescriptor::new(
         TOOL_EXECUTE_ID,
         TOOL_EXECUTE_CALL_NAME,
-        "Execute a tool discovered through tool_search. Most tools require arguments.items: combine all known independent operations of that tool into one array, even for one item. Only tools explicitly declaring a single-operation schema accept plain arguments. Results preserve input order; inspect every item error.",
+        "Execute a tool discovered through tool_search. Pass {\"tool\":\"call_name\",\"arguments\":{...}} directly; tool and arguments are siblings, not inside another arguments object. Most tools require arguments.items: combine all known independent operations of that tool into one array, even for one item. Only tools explicitly declaring a single-operation schema accept plain arguments. Results preserve input order; inspect every item error.",
         serde_json::json!({
             "type": "object",
             "additionalProperties": false,
@@ -115,7 +115,9 @@ impl GatewayEnvelope {
         };
         let tool = match map.get("tool") {
             Some(Value::String(name)) if !name.trim().is_empty() => name.trim().to_owned(),
-            _ => return Err("tool_execute requires a nonempty string \"tool\" field".into()),
+            _ => return Err(
+                "tool_execute requires a nonempty string \"tool\" field at the top level. Pass {\"tool\":\"call_name\",\"arguments\":{...}} directly; do not wrap this envelope in another arguments object. No tool was executed; correct the envelope and retry.".into()
+            ),
         };
         let raw = ["arguments", "input", "args"]
             .iter()

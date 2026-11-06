@@ -154,6 +154,9 @@ impl BoundMemoryData {
 }
 #[async_trait]
 impl ContextReducer for BoundMemoryData {
+    fn metadata(&self) -> eliteforge_agent_core::ContextCompressionMetadata {
+        eliteforge_agent_core::ContextCompressionMetadata::bound()
+    }
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
         input.run.check_cancelled()?;
         let target = input
@@ -248,6 +251,9 @@ impl MemorySemanticDataReducer {
 }
 #[async_trait]
 impl ContextReducer for MemorySemanticDataReducer {
+    fn metadata(&self) -> eliteforge_agent_core::ContextCompressionMetadata {
+        eliteforge_agent_core::ContextCompressionMetadata::semantic()
+    }
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
         input.run.check_cancelled()?;
         if input.block.messages.is_empty() {

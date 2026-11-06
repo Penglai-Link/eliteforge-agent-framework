@@ -503,6 +503,9 @@ impl MemoryCompactor {
 }
 #[async_trait::async_trait]
 impl ContextReducer for MemoryCompactor {
+    fn metadata(&self) -> eliteforge_agent_core::ContextCompressionMetadata {
+        eliteforge_agent_core::ContextCompressionMetadata::history()
+    }
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
         self.compressor.reduce(input).await
     }

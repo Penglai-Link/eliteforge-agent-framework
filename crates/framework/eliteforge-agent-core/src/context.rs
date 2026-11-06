@@ -1,7 +1,7 @@
 //! Ordered context blocks with independent quotas. Source history is immutable.
 #[path = "context_metadata.rs"]
 mod metadata;
-pub use metadata::{ContextBlockMetadata, ContextBlockText, ContextBlockUpdateMode};
+pub use metadata::{ContextBlockMetadata, ContextBlockText, ContextBlockUpdateMode, ContextCompressionMetadata};
 
 use crate::*;
 use async_trait::async_trait;
@@ -113,6 +113,17 @@ pub trait ContextContributor: Send + Sync {
     fn layout_metadata(&self) -> ContextBlockMetadata {
         ContextBlockMetadata::new(self.block_id(), "")
     }
+    /// Combine explicit source semantics with its actual default reducer metadata.
+    /// Explicit semantics take precedence for coordinated or custom sources.
+    fn resolved_layout_metadata(&self) -> ContextBlockMetadata {
+        let mut metadata = self.layout_metadata();
+        if metadata.compression.id.is_empty() {
+            if let Some(config) = self.default_block_config() {
+                metadata.compression = config.reducer.metadata();
+            }
+        }
+        metadata
+    }
     /// Standalone layout declaration. Explicit host layouts must still name this block.
     fn default_block_config(&self) -> Option<ContextBlockConfig> {
         None
@@ -129,6 +140,11 @@ impl ContextContributor for FixedContextContributor {
         ContextBlockMetadata::new(self.block_id(), "A fixed context block supplied by the host.")
             .with_locale("zh-CN", self.block_id(), "由宿主提供、一次运行内保持不变的上下文。")
             .with_update_mode(ContextBlockUpdateMode::Fixed)
+            .with_compression(if self.kind() == ContextSourceKind::Instruction {
+                ContextCompressionMetadata::keep()
+            } else {
+                ContextCompressionMetadata::default()
+            })
     }
     fn kind(&self) -> ContextSourceKind {
         if self.0.trust != ContextTrust::Data {
@@ -366,6 +382,10 @@ impl HistoryProjection {
 #[crate::extension_point(select, adapter = crate::ContextReducerPlugin)]
 #[async_trait]
 pub trait ContextReducer: Send + Sync {
+    /// Describes this implementation without requiring host type or ID inspection.
+    fn metadata(&self) -> ContextCompressionMetadata {
+        ContextCompressionMetadata::default()
+    }
     /// Coupled history/summary admission. Cache-only reads must not call models.
     async fn project_history(
         &self,
@@ -395,6 +415,9 @@ pub trait ContextReducer: Send + Sync {
 pub struct KeepContext;
 #[async_trait]
 impl ContextReducer for KeepContext {
+    fn metadata(&self) -> ContextCompressionMetadata {
+        ContextCompressionMetadata::keep()
+    }
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
         ensure_context_fits(
             &input.block.messages,
@@ -409,6 +432,10 @@ impl ContextReducer for KeepContext {
 pub struct RecentConversation;
 #[async_trait]
 impl ContextReducer for RecentConversation {
+    fn metadata(&self) -> ContextCompressionMetadata {
+        ContextCompressionMetadata::new("recent-turns", "Recent turns", "Retain recent complete conversation turns within the budget without calling a model.")
+            .with_locale("zh-CN", "保留近期轮次", "按预算保留近期完整对话轮次，不调用模型。")
+    }
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
         let mut result = input.block.messages.clone();
         trim_context_with(&mut result, input.budget, input.model, input.estimator).await?;
@@ -425,6 +452,10 @@ impl ContextReducer for RecentConversation {
 pub struct SelectContextEntries;
 #[async_trait]
 impl ContextReducer for SelectContextEntries {
+    fn metadata(&self) -> ContextCompressionMetadata {
+        ContextCompressionMetadata::new("select-entries", "Select entries", "Select complete entries that fit the budget without calling a model.")
+            .with_locale("zh-CN", "筛选完整条目", "筛选预算内可容纳的完整条目，不调用模型。")
+    }
     async fn reduce(&self, input: &ContextReductionInput<'_>) -> Result<Vec<Message>, AgentError> {
         if input
             .block

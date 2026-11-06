@@ -1,0 +1,11 @@
+[package]
+name = "eliteforge-agent-official-plugin-connector-gitlab"
+description = "GitLab connector for portable agent capabilities"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+eliteforge-agent-connector = { version = "0.1.0", path = "../../../framework/eliteforge-agent-connector" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+serde_json.workspace = true

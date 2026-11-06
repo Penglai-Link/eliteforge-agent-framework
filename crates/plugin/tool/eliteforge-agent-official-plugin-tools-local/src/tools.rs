@@ -161,7 +161,7 @@ fn write_text_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "filesystem.write_text",
         "fs_write_text",
-        "Create, overwrite, or append UTF-8 text below the configured filesystem root.",
+        "Create, overwrite, or append UTF-8 text below the configured filesystem root. Single-file operation: pass path and content directly, without an items array. Use separate calls for separate files.",
         json!({
             "type":"object", "additionalProperties":false, "required":["path", "content"],
             "properties": {

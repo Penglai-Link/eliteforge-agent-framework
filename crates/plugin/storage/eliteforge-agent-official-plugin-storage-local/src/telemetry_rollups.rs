@@ -19,7 +19,7 @@ type Counters = [i64; 7];
 
 fn own(name: &str, status: i32, attrs: &std::collections::BTreeMap<String, String>) -> Counters {
     let error = attrs
-        .get("tron.operation.active")
+        .get("agent.operation.active")
         .is_none_or(|v| v != "true")
         && match attrs.get("agent.operation.outcome").map(String::as_str) {
             Some(
@@ -29,7 +29,8 @@ fn own(name: &str, status: i32, attrs: &std::collections::BTreeMap<String, Strin
             Some("error") => true,
             _ => status == 2,
         };
-    let model = name == "agent.model";
+    let include = attrs.get("agent.telemetry.exclude_self").is_none_or(|value| value != "true");
+    let model = include && name == "agent.model";
     let token = |key: &str| {
         if model {
             attrs
@@ -42,10 +43,10 @@ fn own(name: &str, status: i32, attrs: &std::collections::BTreeMap<String, Strin
         }
     };
     [
-        i64::from(name != "tron.session.run"),
-        i64::from(name != "tron.session.run" && error),
+        i64::from(include),
+        i64::from(include && error),
         i64::from(model),
-        i64::from(name == "agent.tool"),
+        i64::from(include && name == "agent.tool"),
         token("gen_ai.usage.input_tokens"),
         token("gen_ai.usage.cached_input_tokens"),
         token("gen_ai.usage.output_tokens"),

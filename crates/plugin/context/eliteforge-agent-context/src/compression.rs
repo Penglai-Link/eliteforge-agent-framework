@@ -542,6 +542,9 @@ impl ModelCompressor {
 }
 #[async_trait]
 impl ContextReducer for ModelCompressor {
+    fn metadata(&self) -> eliteforge_agent_core::ContextCompressionMetadata {
+        eliteforge_agent_core::ContextCompressionMetadata::history()
+    }
     async fn project_history(
         &self,
         input: &ContextReductionInput<'_>,

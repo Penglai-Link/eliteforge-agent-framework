@@ -1,0 +1,14 @@
+[package]
+name = "eliteforge-agent-connector"
+description = "Portable external platform connector contracts"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64 = "0.22"
+eliteforge-agent-core = { version = "0.1.0", path = "../eliteforge-agent-core" }
+eliteforge-agent-plugin-core = { version = "0.1.0", path = "../eliteforge-agent-plugin-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

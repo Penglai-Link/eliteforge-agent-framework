@@ -1216,6 +1216,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "eliteforge-agent-connector"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "eliteforge-agent-core",
+ "eliteforge-agent-plugin-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "eliteforge-agent-context"
 version = "0.1.0"
 dependencies = [
@@ -1404,6 +1417,37 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-connector-gitee"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "eliteforge-agent-connector",
+ "reqwest 0.13.4",
+ "serde_json",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-connector-github"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-connector",
+ "reqwest 0.13.4",
+ "serde_json",
+]
+
+[[package]]
+name = "eliteforge-agent-official-plugin-connector-gitlab"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-connector",
+ "reqwest 0.13.4",
+ "serde_json",
 ]
 
 [[package]]
@@ -3977,6 +4021,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
