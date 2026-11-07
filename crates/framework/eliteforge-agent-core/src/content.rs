@@ -177,3 +177,24 @@ pub fn compile_schema(schema: &Value) -> Result<jsonschema::Validator, crate::Ag
         crate::AgentError::InvalidConfiguration("invalid or unresolved JSON Schema".into())
     })
 }
+
+/// The browser and durable interaction validator use the same response contract:
+/// draft 2020-12 by default, explicit draft 7/2019-09 supported, format assertions
+/// enabled, no coercion/default injection, and no remote/file reference loading.
+pub fn compile_response_schema(schema: &Value) -> Result<jsonschema::Validator, crate::AgentError> {
+    if let Some(dialect) = schema.get("$schema") {
+        if !matches!(dialect.as_str(), Some(
+            "https://json-schema.org/draft/2020-12/schema"
+            | "https://json-schema.org/draft/2019-09/schema"
+            | "http://json-schema.org/draft-07/schema#"
+            | "http://json-schema.org/draft-07/schema"
+            | "https://json-schema.org/draft-07/schema#"
+            | "https://json-schema.org/draft-07/schema"
+        )) {
+            return Err(crate::AgentError::InvalidConfiguration("unsupported response schema dialect".into()));
+        }
+    }
+    jsonschema::options().should_validate_formats(true).build(schema).map_err(|error| {
+        crate::AgentError::InvalidConfiguration(format!("invalid or unresolved response JSON Schema: {error}"))
+    })
+}

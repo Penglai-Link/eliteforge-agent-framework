@@ -76,7 +76,7 @@ impl InteractionStore for SqliteStateStore {
             {
                 return Err(StateError::Invalid("invalid pending interaction".into()));
             }
-            compile_schema(&record.request.response_schema)
+            compile_response_schema(&record.request.response_schema)
                 .map_err(|_| StateError::Invalid("invalid interaction schema".into()))?;
             if let InteractionKind::Approval { invocation_id } = record.request.kind
                 && record

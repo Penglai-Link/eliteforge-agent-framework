@@ -3,6 +3,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 /// Host permission to replace an unavailable chat model within one invocation.
+/// Automatic choices may also fail over on quota exhaustion before output;
+/// the exhausted model is never retried within that invocation.
 /// Empty candidates (the default) means report the original failure, never switch.
 #[derive(Clone, Debug, Default)]
 pub struct ModelRecoveryPolicy {

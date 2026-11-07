@@ -32,3 +32,6 @@ mod messages;
 mod probe;
 pub use probe::*;
 pub mod tokenization;
+
+mod speech;
+pub use speech::HttpSpeechRecognitionModel;

@@ -1,15 +1,17 @@
 //! Full-duplex adapter for PersonAI's encrypted audio transcription WebSocket.
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use crab_serverapi::{base::AuthorizedClientApi, crypto::ClientEnvelopeEncryptor};
+use crab_serverapi::audio::AudioTranscriptionsClient;
 use eliteforge_agent_core::{
     Content, MediaSource, Modality, ModelError, RealtimeEvent, RealtimeInput, RealtimeModel,
     RealtimeRequest, RealtimeSession,
 };
+#[cfg(test)]
 use futures::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc};
+#[cfg(test)]
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 
@@ -53,83 +55,53 @@ impl RealtimeModel for PersonAiRealtimeAdapter {
         account
             .validate_gateway_access()
             .map_err(|error| ModelError::Fatal(error.to_string()))?;
-        let mut params = HashMap::new();
-        params.insert("token".into(), account.token.clone().unwrap_or_default());
-        params.insert(
-            "client_id".into(),
-            account.client_id.clone().unwrap_or_default(),
-        );
-        params.insert(
-            "product_code".into(),
-            account.product_code.clone().unwrap_or_default(),
-        );
-        params.insert(
-            "product_version".into(),
-            account.product_version.clone().unwrap_or_default(),
-        );
-        let api = AuthorizedClientApi::new(&self.server_base_url)
-            .map_err(|error| ModelError::Fatal(error.to_string()))?;
-        let url = api
-            .build_websocket_url("/ws/audio/transcriptions", &params)
-            .map_err(|error| ModelError::Fatal(error.to_string()))?;
-        let (mut websocket, _) = tokio_tungstenite::connect_async(url)
+        let client = AudioTranscriptionsClient::new(&self.server_base_url)
+            .map_err(|e| ModelError::Fatal(e.to_string()))?;
+        let mut websocket = client
+            .connect(&account)
             .await
-            .map_err(|error| ModelError::Transient(error.to_string()))?;
-        let public_key = account.public_key.clone().unwrap_or_default();
-        let start = encrypted(
-            &public_key,
-            &json!({
-                "type": "start", "language": "auto", "target_language": null,
-                "prompt": null, "vad": true, "delay": null,
-            }),
-        )?;
+            .map_err(|e| ModelError::Transient(e.to_string()))?;
         websocket
-            .send(Message::Text(start))
+            .start_with_sample_rate("", None, None, true, None, 24000)
             .await
-            .map_err(|error| ModelError::Transient(error.to_string()))?;
+            .map_err(|e| ModelError::Transient(e.to_string()))?;
+        let (mut writer, mut reader) = websocket.split();
         let (command_tx, mut command_rx) = mpsc::channel::<Value>(32);
         let (event_tx, event_rx) = mpsc::channel::<RealtimeEvent>(64);
         let close = cancellation.child_token();
         let worker_cancel = close.clone();
         tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = worker_cancel.cancelled() => break,
-                    command = command_rx.recv() => match command {
-                        Some(command) => match encrypted(&public_key, &command) {
-                            Ok(payload) => {
-                                if let Err(error) = websocket.send(Message::Text(payload)).await {
-                                    let _ = event_tx.send(RealtimeEvent::Error(error.to_string())).await;
-                                    break;
-                                }
-                            }
-                            Err(error) => {
-                                let _ = event_tx.send(RealtimeEvent::Error(error.to_string())).await;
-                                break;
-                            }
+            // 外层取消可中断任何发送或事件背压，不能只在空闲的 select 中检查。
+            let exchange = async {
+                loop {
+                    tokio::select! {
+                        command = command_rx.recv() => match command {
+                            Some(command) => writer.send_encrypted(&command).await?,
+                            None => break,
                         },
-                        None => break,
-                    },
-                    incoming = websocket.next() => match incoming {
-                        Some(Ok(Message::Text(text))) => {
-                            if let Ok(value) = serde_json::from_str::<Value>(&text)
-                                && let Some(event) = map_event(&value)
-                                && event_tx.send(event).await.is_err()
-                            {
+                        incoming = reader.receive() => {
+                            let value = incoming?;
+                            if value["type"] == "stopped" || value["type"] == "session.finished" {
                                 break;
                             }
+                            if let Some(event) = map_event(&value) {
+                                let failed = matches!(event, RealtimeEvent::Error(_));
+                                if event_tx.send(event).await.is_err() || failed { break; }
+                            }
                         }
-                        Some(Ok(Message::Close(_))) | None => break,
-                        Some(Err(error)) => {
-                            let _ = event_tx.send(RealtimeEvent::Error(error.to_string())).await;
-                            break;
-                        }
-                        _ => {},
-                    },
+                    }
+                }
+                Ok::<_, crab_serverapi::error::ServerApiError>(())
+            };
+            tokio::select! {
+                biased;
+                _ = worker_cancel.cancelled() => {},
+                result = exchange => if let Err(error) = result {
+                    let _ = event_tx.try_send(RealtimeEvent::Error(error.to_string()));
                 }
             }
-            let _ = websocket.close(None).await;
-            let _ = event_tx.send(RealtimeEvent::Completed).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), writer.close()).await;
+            let _ = event_tx.try_send(RealtimeEvent::Completed);
         });
         Ok(Arc::new(PersonAiRealtimeSession {
             commands: command_tx,
@@ -147,10 +119,11 @@ impl RealtimeSession for PersonAiRealtimeSession {
             RealtimeInput::Interrupt => json!({"type": "stop"}),
             RealtimeInput::Content(content) => audio_command(content)?,
         };
-        self.commands
-            .send(payload)
-            .await
-            .map_err(|_| ModelError::Transient("PersonAI realtime session closed".into()))
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => Err(ModelError::Transient("PersonAI realtime session closed".into())),
+            result = self.commands.send(payload) => result.map_err(|_| ModelError::Transient("PersonAI realtime session closed".into())),
+        }
     }
 
     async fn next(&self) -> Result<Option<RealtimeEvent>, ModelError> {
@@ -180,12 +153,6 @@ fn audio_command(content: Content) -> Result<Value, ModelError> {
         ));
     };
     Ok(json!({"type": "audio", "audio": encoded}))
-}
-
-fn encrypted(public_key: &str, command: &Value) -> Result<String, ModelError> {
-    let envelope = ClientEnvelopeEncryptor::encrypt(public_key, &command.to_string())
-        .map_err(|error| ModelError::Fatal(error.to_string()))?;
-    serde_json::to_string(&envelope).map_err(|error| ModelError::Fatal(error.to_string()))
 }
 
 fn map_event(message: &Value) -> Option<RealtimeEvent> {

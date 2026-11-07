@@ -1554,7 +1554,7 @@ impl ModelExecutionRuntime<'_> {
                     "tool returned invalid interaction identity/kind".into(),
                 ));
             }
-            compile_schema(&interaction.response_schema)?;
+            compile_response_schema(&interaction.response_schema)?;
             self.state.interactions.push(interaction.as_ref().clone());
             // An answer may change the plan. In-flight siblings must still be
             // collected; only calls not dispatched yet can be skipped.

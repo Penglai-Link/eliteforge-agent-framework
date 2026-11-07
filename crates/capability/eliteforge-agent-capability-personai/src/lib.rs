@@ -10,6 +10,8 @@ mod embedding_candidates;
 mod models;
 mod realtime;
 mod services;
+mod speech;
+pub use speech::PersonAiSpeechRecognitionModel;
 mod sync;
 mod tools;
 pub use auto_routing::*;

@@ -18,8 +18,8 @@ tokenizers = { version = "0.22", default-features = false, features = ["fancy-re
 tiktoken-rs = "0.12.1"
 base64 = "0.22"
 unicode-normalization = "0.1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-crab-serverapi = { git = "https://gitee.com/person-ai/person-ai-index-rust-sdk.git", rev = "3baeeaaa69f04d883ada509c391dbd474d205429" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+crab-serverapi = { git = "https://gitee.com/person-ai/person-ai-index-rust-sdk.git", rev = "85a70d4573813596739ec0a9a6c1ce33946f1e98" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "io-util"] }

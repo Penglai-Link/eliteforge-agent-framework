@@ -67,7 +67,7 @@ pub struct InteractionRequest {
 
 impl InteractionRequest {
     pub fn input(prompt: impl Into<Content>, response_schema: Value) -> Result<Self, AgentError> {
-        compile_schema(&response_schema)?;
+        compile_response_schema(&response_schema)?;
         Ok(Self {
             id: RunId::new_v4(),
             kind: InteractionKind::Input,
@@ -101,9 +101,14 @@ impl InteractionRequest {
                 "stale, expired or mismatched interaction response".into(),
             ));
         }
-        if !compile_schema(&self.response_schema)?.is_valid(&response.value) {
+        let validator = compile_response_schema(&self.response_schema)?;
+        let errors: Vec<_> = validator.iter_errors(&response.value)
+            .take(16)
+            .map(|error| format!("{}: {}", error.instance_path(), error.schema_path()))
+            .collect();
+        if !errors.is_empty() {
             return Err(AgentError::InvalidConfiguration(
-                "interaction response does not match schema".into(),
+                format!("interaction response does not match schema: {}", errors.join("; ")),
             ));
         }
         if matches!(self.kind, InteractionKind::Approval { .. }) && !response.value.is_boolean() {

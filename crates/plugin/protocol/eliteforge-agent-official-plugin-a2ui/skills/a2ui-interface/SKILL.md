@@ -21,6 +21,8 @@ Pass messages as a JSON array and responseSchema as a JSON object, never JSON-en
 
 Bind fields to data-model paths. For SubmitOnce, bind the submit action's context.response to the response model and provide a matching responseSchema. Use host language for visible labels. Update only changed components and model paths so unrelated user input survives. A later action supplies structured context; treat it as input, then use existing business tools and permissions for actual operations.
 
+Treat responseSchema as the authoritative form contract. List mandatory properties in required; nonempty text also needs minLength: 1, required selections need minItems: 1, and required consent needs const: true. Put numerical limits and precision in minimum/maximum/multipleOf (or type: integer), keeping component hints consistent. Slider defaults to integer step 1; declare step for fractional controls. Clients derive required stars and validate the response with the same schema as the server. Prefer JSON Schema 2020-12; format assertions are enabled. Use internal references only.
+
 Use `Field` around custom inputs, and choose data/feedback/navigation primitives from the negotiated catalog. `Statistic`, `Trend`, `Sparkline`, `Meter`, `Chart` and `DescriptionList` support structured summaries when useful. A2UI properties follow its schemas, not React/shadcn JSX props.
 
 If validation fails, correct the structured tool error within the existing run budget. Do not claim a surface was published until the tool succeeds. Do not retry a rejected business operation through a UI action. Expired, answered and archived interactions remain read-only.

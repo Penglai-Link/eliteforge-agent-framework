@@ -200,3 +200,9 @@ make lint    # 格式、Clippy、编译和 Rustdoc 检查
 make test    # workspace 测试和文档测试
 make build   # 构建 release 产物
 ```
+
+### Person-AI 语音本地联调
+
+Person-AI SDK 使用固定 Git 提交，包含 `transcribe_wav` 与全双工会话接口；构建无需配置本机 SDK 目录。
+
+语音识别由 `SpeechRecognitionModel` 统一执行。Person-AI 适配调用 SDK 的 `AudioTranscriptionsClient::transcribe_wav`；实时会话复用 SDK 的独立收发端。HTTP 模型插件提供 OpenAI 文件转写和 Gemini 音频转写适配。每次识别独占连接，取消或超时释放本次连接；连接不能跨账号或会话复用。

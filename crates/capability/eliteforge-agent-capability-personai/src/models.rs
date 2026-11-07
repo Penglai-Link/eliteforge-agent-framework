@@ -2,6 +2,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
+#[cfg(test)]
 use base64::Engine;
 use crab_serverapi::{
     base::AuthorizedClientApi,
@@ -1326,37 +1327,14 @@ impl SpeechRecognitionModel for BoundPersonAiModels {
     ) -> Result<SpeechRecognitionResponse, ModelError> {
         self.ensure_current()?;
         if model != "speech-auto" {
-            return Err(ModelError::Fatal(
-                "PersonAI file transcription is server-selected; use speech-auto".into(),
-            ));
+            return Err(ModelError::Fatal("PersonAI transcription is server-selected; use speech-auto".into()));
         }
-        let bytes = match request.audio.source {
-            MediaSource::Base64(encoded) => base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|error| ModelError::Fatal(format!("invalid audio base64: {error}")))?,
-            MediaSource::Url(_) => {
-                return Err(ModelError::Fatal(
-                    "PersonAI file transcription requires inline audio bytes".into(),
-                ));
-            }
-        };
-        let file_name = request.audio.name.unwrap_or_else(|| "audio.wav".into());
-        let text = self
-            .services
-            .audio_file
-            .transcribe(
-                &self.account.authorization,
-                &file_name,
-                bytes,
-                request.language.as_deref(),
-            )
-            .await
-            .map_err(|error| self.provider_error(error, model))?;
-        Ok(SpeechRecognitionResponse {
-            model: self.model_ref(model),
-            text,
-            segments: Vec::new(),
-        })
+        let response = crate::speech::PersonAiSpeechRecognitionModel {
+            client: self.services.audio_realtime.clone(),
+            authorization: self.account.authorization.clone(),
+        }.transcribe(model, request).await?;
+        self.ensure_current()?;
+        Ok(response)
     }
 }
 

@@ -6,3 +6,7 @@ incremental = false
 
 [env]
 CCACHE_BASEDIR = { value = ".", relative = true }
+
+# Gitee Git HTTP responses require the system Git transport.
+[net]
+git-fetch-with-cli = true

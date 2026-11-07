@@ -396,6 +396,10 @@ impl ModelInvoker {
         let mut recoveries = 0;
         let mut attempt = 0;
         let mut previous = None;
+        // Quota failures permit replacing an automatic choice, never retrying
+        // that same model. Retain the original structured error if the policy
+        // cannot select another authorized candidate.
+        let mut quota_failures = std::collections::BTreeMap::<ModelRef, ModelError>::new();
         let snapshot = memory.snapshot().await?;
         let selection_messages: Vec<_> = call
             .instructions
@@ -448,6 +452,14 @@ impl ModelInvoker {
                     )
                     .await?
             };
+            if let Some(error) = quota_failures.get(&selected) {
+                return Err(error.clone().into());
+            }
+            if !quota_failures.is_empty() && !self.recovery.candidates.contains(&selected) {
+                return Err(AgentError::InvalidConfiguration(
+                    "quota recovery selected a model outside authorized candidates".into(),
+                ));
+            }
             if catalog.get(&selected).is_none() {
                 self.notify_unavailable(&selected);
                 if retries < call.limits.max_model_retries
@@ -998,10 +1010,16 @@ impl ModelInvoker {
                     overflow = None;
                 }
                 Err(ref error)
-                    if error.is_transient()
+                    if (error.is_transient()
+                        || (matches!(error, ModelError::Provider(detail) if detail.category == ProviderErrorCategory::Quota)
+                            && context.model.is_none()
+                            && self.recovery.candidates.len() > 1))
                         && !stream.emitted.load(Ordering::Acquire)
                         && retries < call.limits.max_model_retries =>
                 {
+                    if matches!(error, ModelError::Provider(detail) if detail.category == ProviderErrorCategory::Quota) {
+                        quota_failures.insert(selected.clone(), error.clone());
+                    }
                     // A forced recovery binding bypasses the selection strategy.
                     // Do not pin subsequent retries to a failed replacement when
                     // the host has authorized further recovery candidates.
