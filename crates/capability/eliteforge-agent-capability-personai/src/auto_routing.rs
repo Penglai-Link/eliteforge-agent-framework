@@ -1,4 +1,4 @@
-//! PersonAI policies consume host metadata; they never read Tron storage.
+//! PersonAI policies consume host metadata; they never read host storage directly.
 use eliteforge_agent_capability_auto_routing::{OrderedAutoRouter, StableAutoRouter};
 use eliteforge_agent_core::*;
 

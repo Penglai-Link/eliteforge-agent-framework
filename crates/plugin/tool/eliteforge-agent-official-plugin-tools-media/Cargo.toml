@@ -2,6 +2,8 @@
 name = "eliteforge-agent-official-plugin-tools-media"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Directory-confined local image and PDF text readers"
 
 [dependencies]

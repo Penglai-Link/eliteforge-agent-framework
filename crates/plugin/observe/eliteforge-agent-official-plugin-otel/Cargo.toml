@@ -3,6 +3,8 @@ name = "eliteforge-agent-official-plugin-otel"
 description = "Privacy-preserving OpenTelemetry middleware for eliteforge-agent-framework"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 [features]
 default = []
 runtime = ["dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:sysinfo", "dep:reqwest", "dep:tokio", "dep:tokio-util", "dep:eliteforge-agent-official-plugin-otel-collector"]

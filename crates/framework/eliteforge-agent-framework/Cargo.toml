@@ -3,17 +3,19 @@ name = "eliteforge-agent-framework"
 description = "Host-neutral pluggable ReAct agents with persistent execution and user interactions"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [features]
 default = ["genai"]
 genai = ["dep:eliteforge-agent-official-plugin-model-genai"]
 
 [dependencies]
-eliteforge-agent-capability-runtime = { path = "../eliteforge-agent-capability-runtime", version = "0.1.0" }
-eliteforge-agent-core = { path = "../eliteforge-agent-core", version = "0.1.0" }
-eliteforge-agent-official-plugin-skills = { path = "../../plugin/skill/eliteforge-agent-official-plugin-skills", version = "0.1.0" }
-eliteforge-agent-official-plugin-model-genai = { path = "../../plugin/model/eliteforge-agent-official-plugin-model-genai", version = "0.1.0", optional = true }
-eliteforge-agent-plugin-core = { version = "0.1.0", path = "../eliteforge-agent-plugin-core" }
+eliteforge-agent-capability-runtime = { path = "../eliteforge-agent-capability-runtime" }
+eliteforge-agent-core = { path = "../eliteforge-agent-core" }
+eliteforge-agent-official-plugin-skills = { path = "../../plugin/skill/eliteforge-agent-official-plugin-skills" }
+eliteforge-agent-official-plugin-model-genai = { path = "../../plugin/model/eliteforge-agent-official-plugin-model-genai", optional = true }
+eliteforge-agent-plugin-core = { path = "../eliteforge-agent-plugin-core" }
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true

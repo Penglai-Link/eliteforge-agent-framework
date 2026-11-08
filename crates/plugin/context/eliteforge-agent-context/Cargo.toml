@@ -2,10 +2,12 @@
 name = "eliteforge-agent-context"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Model-backed context reduction and bounded artifact offload for eliteforge-agent-framework"
 [dependencies]
-eliteforge-agent-context-contracts = { path = "../../../framework/eliteforge-agent-context-contracts", version = "0.1.0" }
-eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-context-contracts = { path = "../../../framework/eliteforge-agent-context-contracts" }
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -3,10 +3,12 @@ name = "eliteforge-agent-official-plugin-connector-gitee"
 description = "Gitee connector for portable agent capabilities"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
 base64 = "0.22"
-eliteforge-agent-connector = { version = "0.1.0", path = "../../../framework/eliteforge-agent-connector" }
+eliteforge-agent-connector = { path = "../../../framework/eliteforge-agent-connector" }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "form"] }
 serde_json.workspace = true

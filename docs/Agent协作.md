@@ -27,7 +27,7 @@ ContextContributor 提供可选 Agent 目录
     → 选定 Agent，清除 request.agent_code，调用 Framework 执行
 ```
 
-Agent 目录、编码解析和授权属于宿主（例如 Tron），Framework 不读取业务配置。
+Agent 目录、编码解析和授权属于宿主，Framework 不读取业务配置。
 宿主实现 `spawn_child` 时可调用目标 `Agent::run_child_with_id(request, parent)`，保留
 取消、预算与 lineage；独立 Thread 使用目标 Agent 的 `start` / `wait`，并由宿主保存
 session_id 到目标 Agent 的绑定，后续 send、answer、read、wait 和 close 必须继续路由到该目标。
@@ -35,7 +35,7 @@ session_id 到目标 Agent 的绑定，后续 send、answer、read、wait 和 cl
 
 默认进程内运行时没有命名 Agent 注册表，带编码的请求会明确报错，不会退回当前 Agent。
 直接执行 `Agent::start` / `run_child` 前也必须完成解析并清除编码，以免遗漏路由。
-本接入不自动为 Tron 安装目录 Contributor 或业务解析器。
+本接入不自动为宿主安装目录 Contributor 或业务解析器。
 
 ## 子 Agent
 

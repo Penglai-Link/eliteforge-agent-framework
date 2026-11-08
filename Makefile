@@ -67,7 +67,7 @@ help:
 	@echo   make lint       格式检查、Clippy、编译检查和严格 Rustdoc 检查
 	@echo   make test       workspace 测试、文档测试及 Framework 无默认特性测试
 	@echo   make build      构建全部 workspace 库的 release 产物
-	@echo   make deploy     发布版本化制品；当前缺少发布配置，执行会报错
+	@echo   make deploy     不提供软件包上传；源码版本使用 scripts/release.py tag
 	@echo 能力：未检测到 Docker、Compose 或应用壳，不生成对应目标
 	@echo 覆盖变量：
 	@echo   VERSION        默认读取 Cargo.toml 的 workspace.package.version；适用于 build、deploy
@@ -117,7 +117,7 @@ ifeq ($(_WORKSPACE_VERSION),)
 else
 	@echo 检查：workspace 版本为 $(_WORKSPACE_VERSION)，使用 Cargo.lock，无仓库 wrapper 或包管理器冲突
 endif
-	@echo 警告：尚未配置制品发布目标与流程，部分 crate 的 path 依赖缺少版本，deploy 不可用
+	@echo 警告：本项目使用 Git tag 发布；版本命令见 docs/Git-tag发布.md
 	@echo 检查：未配置 Docker、Compose 或应用壳，本地目标不要求这些可选工具
 
 install:
@@ -150,9 +150,9 @@ build: _version
 	@echo 检查：cargo build 不隐含测试，SKIP_TESTS 对此目标无测试可跳过；测试使用 make test
 	cargo build $(_CARGO_FLAGS) $(_WORKSPACE_FLAGS) --release
 
-# 缺少发布目标、依赖版本和发布顺序证据，不能猜测为 crates.io 发布。
+# 源码版本通过 scripts/release.py tag 创建，不上传软件包。
 deploy: _version
-	@echo 错误：尚未配置制品发布目标与流程，且部分 path 依赖缺少版本，无法发布 VERSION 对应制品
+	@echo 错误：本项目通过 Git tag 发布；请使用 python3 scripts/release.py tag 创建本地 tag，再显式推送
 	@$(_FAIL)
 
 _version:

@@ -174,7 +174,7 @@ async fn runtime_batch_outcomes_match_live_history_and_transcript() {
     .unwrap();
     assert_eq!(
         fixture, expected,
-        "runtime output changed; rerun Tron/UI consumers"
+        "runtime output changed; rerun downstream consumers"
     );
     assert_ne!(fixture, json!({}));
 }

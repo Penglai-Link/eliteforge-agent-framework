@@ -3,6 +3,8 @@ name = "eliteforge-agent-plugin-core"
 description = "Small host-neutral plugin container with typed services and deterministic cleanup"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true

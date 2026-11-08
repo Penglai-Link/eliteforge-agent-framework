@@ -3,6 +3,8 @@ name = "eliteforge-agent-official-plugin-otel-collector"
 description = "Host-neutral OTLP HTTP receiver backed by the Framework telemetry storage port"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 [dependencies]
 eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
 async-trait.workspace = true

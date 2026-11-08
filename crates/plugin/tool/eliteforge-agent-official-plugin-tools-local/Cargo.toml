@@ -2,10 +2,12 @@
 name = "eliteforge-agent-official-plugin-tools-local"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "In-process filesystem and asynchronous system-command plugins"
 
 [dependencies]
-eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
 async-trait.workspace = true
 base64 = "0.22"
 serde.workspace = true

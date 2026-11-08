@@ -81,7 +81,7 @@ fn batch_contract_fixture_matches_framework_serialization() {
     .unwrap();
     assert_eq!(
         fixture, expected,
-        "Rust wire contract changed; regenerate and run UI/Tron consumer tests"
+        "Rust wire contract changed; regenerate and run consumer tests"
     );
     let batch: ToolBatchResult =
         serde_json::from_value(fixture["interrupted"]["structured"].clone()).unwrap();

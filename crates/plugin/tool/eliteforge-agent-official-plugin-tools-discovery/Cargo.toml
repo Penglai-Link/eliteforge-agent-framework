@@ -2,6 +2,8 @@
 name = "eliteforge-agent-official-plugin-tools-discovery"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Run-scoped discovery and deferred schemas for authorized tool providers"
 
 [dependencies]

@@ -1076,7 +1076,7 @@ checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
 name = "eliteforge-agent-capability-auto-routing"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "eliteforge-agent-core",
  "serde_json",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-capability-chunking"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "eliteforge-agent-core",
  "serde_json",
@@ -1093,7 +1093,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-capability-dev-host"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-capability-external"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "eliteforge-agent-core",
  "eliteforge-agent-framework",
@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-capability-macros"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1139,7 +1139,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-capability-personai"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-capability-runtime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-capability-test-fixture"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1200,7 +1200,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-capability-tools"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1220,7 +1220,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-connector"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-context"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-context-contracts"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1267,7 +1267,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-capability-macros",
@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-framework"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-capability-auto-routing",
@@ -1314,7 +1314,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-integration-tests"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "eliteforge-agent-framework",
  "eliteforge-agent-official-plugin-storage-local",
@@ -1323,7 +1323,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-memory"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-context",
@@ -1342,7 +1342,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-capability-pack"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-capability-auto-routing",
@@ -1371,7 +1371,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-a2ui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1388,7 +1388,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-agent-external"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1403,7 +1403,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-agui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ag-ui",
  "async-trait",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-connector-gitee"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1435,7 +1435,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-connector-github"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-connector",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-connector-gitlab"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-connector",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-model-genai"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1472,7 +1472,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-model-http"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-otel"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1518,7 +1518,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-otel-collector"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1538,7 +1538,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-skills"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-storage-local"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "cap-fs-ext",
@@ -1582,7 +1582,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-tools-agents"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-tools-discovery"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1610,7 +1610,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-tools-human"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-tools-local"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1644,7 +1644,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-tools-mcp"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -1667,7 +1667,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-tools-media"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-official-plugin-tools-web"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-core",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-plugin-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -1710,7 +1710,7 @@ dependencies = [
 
 [[package]]
 name = "eliteforge-agent-test-support"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-trait",
  "eliteforge-agent-framework",

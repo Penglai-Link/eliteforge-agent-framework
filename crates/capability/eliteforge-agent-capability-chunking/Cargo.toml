@@ -3,9 +3,11 @@ name = "eliteforge-agent-capability-chunking"
 description = "Replaceable fixed, heading, structural and automatic document chunking strategies"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core" }
 serde_json.workspace = true
 
 [dev-dependencies]

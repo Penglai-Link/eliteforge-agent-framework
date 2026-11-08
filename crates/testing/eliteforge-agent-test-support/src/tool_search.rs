@@ -1,4 +1,4 @@
-//! Shared scenario for framework, Tron forwarding and UI contract regressions.
+//! Shared scenario for framework and UI contract regressions.
 use eliteforge_agent_framework::*;
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};

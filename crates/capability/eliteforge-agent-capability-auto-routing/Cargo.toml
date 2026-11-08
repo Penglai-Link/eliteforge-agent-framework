@@ -3,9 +3,11 @@ name = "eliteforge-agent-capability-auto-routing"
 description = "Provider-neutral implementations of conversation, text embedding, multimodal embedding and rerank automatic routing"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core" }
 
 [dev-dependencies]
 serde_json.workspace = true

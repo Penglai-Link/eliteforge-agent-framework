@@ -2,11 +2,13 @@
 name = "eliteforge-agent-official-plugin-agent-external"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "External Agent CLI and JSON bridge transports"
 
 [dependencies]
-eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
-eliteforge-agent-official-plugin-tools-local = { path = "../../tool/eliteforge-agent-official-plugin-tools-local", version = "0.1.0" }
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
+eliteforge-agent-official-plugin-tools-local = { path = "../../tool/eliteforge-agent-official-plugin-tools-local" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

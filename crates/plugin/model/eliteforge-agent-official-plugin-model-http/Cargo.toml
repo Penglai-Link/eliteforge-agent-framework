@@ -3,10 +3,12 @@ name = "eliteforge-agent-official-plugin-model-http"
 description = "Explicit single-attempt HTTP model protocols and host-configured connections"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
-eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
-eliteforge-agent-official-plugin-model-genai = { path = "../eliteforge-agent-official-plugin-model-genai", version = "0.1.0" }
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
+eliteforge-agent-official-plugin-model-genai = { path = "../eliteforge-agent-official-plugin-model-genai" }
 async-trait.workspace = true
 tokio.workspace = true
 serde.workspace = true

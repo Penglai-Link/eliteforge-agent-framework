@@ -1,4 +1,4 @@
-//! SQLite extension loading adapted from Tron's eliteforge_agent_sqlite_extensions module.
+//! SQLite extension loading adapted from the host's eliteforge_agent_sqlite_extensions module.
 //! The caller owns a trusted, private cache directory. No business types,
 //! environment variables or source-checkout paths are needed at runtime.
 #[path = "assets.rs"]

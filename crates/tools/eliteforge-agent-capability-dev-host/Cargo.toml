@@ -2,6 +2,8 @@
 name = "eliteforge-agent-capability-dev-host"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [dependencies]
@@ -10,7 +12,7 @@ eliteforge-agent-context = { path = "../../plugin/context/eliteforge-agent-conte
 eliteforge-agent-context-contracts = { path = "../../framework/eliteforge-agent-context-contracts" }
 eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
 eliteforge-agent-official-plugin-storage-local = { path = "../../plugin/storage/eliteforge-agent-official-plugin-storage-local" }
-eliteforge-agent-official-plugin-tools-mcp = {path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-mcp"}
+eliteforge-agent-official-plugin-tools-mcp = { path = "../../plugin/tool/eliteforge-agent-official-plugin-tools-mcp"}
 async-trait.workspace = true
 futures.workspace = true
 serde.workspace = true

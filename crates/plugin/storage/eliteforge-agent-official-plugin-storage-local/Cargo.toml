@@ -2,6 +2,8 @@
 name = "eliteforge-agent-official-plugin-storage-local"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Local-first Framework storage using SQLite for records and the filesystem for artifacts"
 include = ["src/**", "build.rs", "resources/**", "Cargo.toml", "README.md", "tests/**", "examples/**"]
 

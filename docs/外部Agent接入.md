@@ -40,7 +40,7 @@ Codex 新任务使用 `exec --cd`；续聊使用 `exec resume`，不传该子命
 
 ```mermaid
 flowchart LR
-    Host[Tron 或其他宿主] --> Pack[capability-external：选择与装配]
+    Host[宿主] --> Pack[capability-external：选择与装配]
     Pack --> Loop[Framework ExternalAgentLoop]
     Pack --> Plugin[agent-external：CLI 适配]
     Loop --> Plugin

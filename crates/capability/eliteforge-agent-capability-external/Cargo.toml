@@ -2,9 +2,11 @@
 name = "eliteforge-agent-capability-external"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "External Agent runtime capability assembly"
 
 [dependencies]
-eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core", version = "0.1.0" }
-eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", version = "0.1.0", default-features = false }
-eliteforge-agent-official-plugin-agent-external = { path = "../../plugin/agent/eliteforge-agent-official-plugin-agent-external", version = "0.1.0" }
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core" }
+eliteforge-agent-framework = { path = "../../framework/eliteforge-agent-framework", default-features = false }
+eliteforge-agent-official-plugin-agent-external = { path = "../../plugin/agent/eliteforge-agent-official-plugin-agent-external" }

@@ -2,11 +2,13 @@
 name = "eliteforge-agent-memory"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Explicit long-term memory contributors and tools over host-provided storage"
 
 [dependencies]
-eliteforge-agent-context = { path = "../../context/eliteforge-agent-context", version="0.1.0" }
-eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core", version = "0.1.0" }
+eliteforge-agent-context = { path = "../../context/eliteforge-agent-context" }
+eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true

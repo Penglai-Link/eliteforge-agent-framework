@@ -39,7 +39,7 @@ Framework 在 Core 中定义五类可替换接口，显示名称统一如下：
 
 ```mermaid
 flowchart LR
-    H[Tron 宿主：目录、授权、会话状态] --> S[AutoRouteDataSource]
+    H[宿主：目录、授权、会话状态] --> S[AutoRouteDataSource]
     S --> R[五类自动路由接口]
     G[通用能力包：顺序选择、稳定分配] -. 实现 .-> R
     P[PersonAI 能力包：质量筛选、协议偏好] -. 实现 .-> R
@@ -59,7 +59,7 @@ let policy = Arc::new(PersonAiAutoRouter {
     ..Default::default()
 });
 let routers = AutoRouters {
-    source: Some(tron_model_source), // 宿主实现 Arc<dyn AutoRouteDataSource>
+    source: Some(host_model_source), // 宿主实现 Arc<dyn AutoRouteDataSource>
     chat: Some(policy),
     text_generation: Some(Arc::new(PersonAiTextGenerationAutoRouter)),
     embedding: Some(Arc::new(PersonAiAutoRouter::default())),
@@ -71,13 +71,13 @@ let pack = PersonAiCapabilityPack::new(connection).with_auto_routers(routers);
 
 `ModelClient::text_generation(request, limits, stage)` 使用独立的文本生成路由，复用模型执行、预算、超时和取消能力，不创建 Agent 或会话。宿主也可先调用 `AutoRouters::select_text_generation`，再通过已有模型客户端执行选中的绑定。
 
-`PersonAiTextGenerationAutoRouter` 与 `personai_text_generation_candidates` 只接收明确标为 `Middle` 或 `Low` 的 PersonAI 候选，优先中质量；高质量及质量未知的模型不进入该候选集。Tron 的标题生成等临时调用默认使用此路由；正式对话自动路由仅接收高质量候选。质量规则属于 PersonAI 能力包和 Tron，Framework 不解释这些档位。思考参数由各调用场景显式设置。
+`PersonAiTextGenerationAutoRouter` 与 `personai_text_generation_candidates` 只接收明确标为 `Middle` 或 `Low` 的 PersonAI 候选，优先中质量；高质量及质量未知的模型不进入该候选集。宿主可将此路由用于标题生成等临时调用。质量规则属于 PersonAI 能力包，Framework 不解释这些档位。思考参数由各调用场景显式设置。
 
 对话中的显式模型和已有选模策略，以及向量、重排操作的阶段规则和默认模型优先于对应自动路由。向量、重排观察调用在首次选定后固定运行时快照，再执行重试，因此目录更新不会使重试转到另一个账号的适配器。向量索引仍需保存完整 `EmbeddingSpace`，查询必须匹配模型、版本、维度和预处理规则；自动路由不能替换已有索引的向量空间。纯文本请求使用向量自动路由，包含媒体的请求使用独立的多模态向量自动路由；候选由宿主直接提供，供应商标签和候选筛选由对应能力包处理。Framework 核心不解释供应商标签、不按模态改写候选，仅在选中模型后校验调用契约。显式模型和索引空间仍遵循原有模型能力契约。宿主也可调用 `AutoRouters::select_multimodal_embedding` 为多模态索引的纯文本查询选择初始绑定，随后保存 `EmbeddingSpace`。
 
 PersonAI 适配器通过 SDK 的 `EmbeddingsRequest` 支持文本、图片 URL、图片 Base64，以及同一条输入中的图片和说明文字；每条输入最多一张图片，不支持的块直接报错。宿主将已确认支持图文的模型填入 `PersonAiConfig.multimodal_embedding_models`，适配器才会注册 Text/Image 能力。模型列表返回生效 `tags` 与 `dimension`：`text_embedding` 对应文本向量，`multimodal_embedding` 对应图文向量。缺失标签不授予向量能力；宿主也可显式声明绑定。型号名称不参与能力判断。
 
-Tron 的对话路由通过本地目录构造数据源，注入 PersonAI 策略，并保存会话选择；`with_auto_router` 可以替换该策略。向量和重排路由从宿主提供的可用目录中选择具体绑定。向量索引在首批调用前确定具体模型，后续批次、断点恢复和检索沿用同一模型；重排自动路由选择原生 rerank 模型，经 SDK 加密传输调用 `/api/v1/rerank`，保留上游相关性分数。
+宿主可通过本地目录构造数据源，注入 PersonAI 策略，并保存会话选择；`with_auto_router` 可以替换该策略。向量和重排路由从宿主提供的可用目录中选择具体绑定。向量索引在首批调用前确定具体模型，后续批次、断点恢复和检索沿用同一模型；重排自动路由选择原生 rerank 模型，经 SDK 加密传输调用 `/api/v1/rerank`，保留上游相关性分数。
 
 ## 模型同步
 
