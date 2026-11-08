@@ -150,6 +150,12 @@ crates/
 | `eliteforge-agent-official-capability-pack` | 官方插件组合，一次配置到 Framework |
 | `eliteforge-agent-official-plugin-*` | Genai、本地存储、MCP、AG-UI、OTel 等官方实现 |
 
+## Agent 对接技能
+
+[Framework 使用手册技能](skills/eliteforge-agent-framework-integration/SKILL.md) 提供可运行的入门程序、订单能力包项目模板，以及模型、工具、插件、上下文、Skills、MCP、审批和持久恢复教程。将整个 `skills/eliteforge-agent-framework-integration/` 目录交给支持 Agent Skills 的工具，保留其中的 `references/`、`assets/` 和 `agents/`。
+
+技能以 Git tag `1.0.0` 为 API 基线，接入代码和场景说明随技能分发，无需先取得本仓库的 `docs/`。已有项目按需合入代码；新项目可以从 `assets/order-agent/` 开始。
+
 ## 文档
 
 **入门与总览**

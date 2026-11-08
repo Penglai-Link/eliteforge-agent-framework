@@ -1,0 +1,16 @@
+[package]
+name = "order-agent"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+eliteforge-agent-core = { git = "https://gitee.com/person-ai/eliteforge-agent-framework.git", tag = "1.0.0" }
+eliteforge-agent-framework = { git = "https://gitee.com/person-ai/eliteforge-agent-framework.git", tag = "1.0.0", default-features = false }
+eliteforge-agent-official-capability-pack = { git = "https://gitee.com/person-ai/eliteforge-agent-framework.git", tag = "1.0.0" }
+async-trait = "0.1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# 模板复制后自成 workspace；合入已有 workspace 时删除本节并加入其 members。
+[workspace]

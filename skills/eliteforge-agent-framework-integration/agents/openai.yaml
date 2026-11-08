@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Framework 使用手册"
+  short_description: "从可运行示例开始接入 Agent Framework，开发工具、插件和业务能力包"
+  default_prompt: "使用 $eliteforge-agent-framework-integration 的教程和代码模板，在我的项目中实现所需的 Agent、工具与能力包。"
