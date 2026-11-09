@@ -16,6 +16,8 @@ mod pty_process;
 pub mod pty_tools;
 mod search;
 mod tasks;
+mod sudo;
+pub use sudo::{SudoPassword, SudoPasswordProvider, SudoPasswordProviderService};
 pub use pty_process::PtyCommand;
 pub mod text_patch;
 mod tools;

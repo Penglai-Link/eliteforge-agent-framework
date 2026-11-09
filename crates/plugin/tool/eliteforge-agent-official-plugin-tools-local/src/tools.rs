@@ -208,7 +208,7 @@ fn system_command_descriptor() -> ToolDescriptor {
     ToolDescriptor::new(
         "system.command.exec",
         "command_exec",
-        "Run an executable with literal arguments. If it is still running after 10 seconds, return its taskId and captured output. Use command_exec_read to check status and read more output, or command_exec_stop to stop it. The Agent configuration can restrict executable names. This is not a sandbox.",
+        "Run an executable with literal arguments. If it is still running after 10 seconds, return its taskId and captured output. Use command_exec_read to check status and read more output, or command_exec_stop to stop it. The Agent configuration can restrict executable names. This is not a sandbox. For elevated commands set sudo=true and supply the underlying command without sudo; the host requests passwords privately. Never request a sudo password through ask_user or include one in tool arguments.",
         json!({
             "type":"object", "additionalProperties":false, "required":["command"],
             "properties": {
@@ -216,6 +216,7 @@ fn system_command_descriptor() -> ToolDescriptor {
                 "args":{"type":"array", "items":{"type":"string"}},
                 "cwd":{"type":"string", "minLength":1},
                 "stdin":{"type":"string", "maxLength":65536},
+                "sudo":{"type":"boolean", "description":"Elevate with sudo using private host password input only when required. Supply the underlying command, without sudo. Passwords must NEVER appear in command, args, stdin, env or ask_user. Incompatible with stdin, interactive and tty; elevated commands receive EOF after authentication."},
                 "interactive":{"type":"boolean", "description":"Keep stdin open for command_exec_write."},
                 "tty":{"type":"boolean", "description":"Use a PTY; implies interactive input and combines stdout/stderr into stdout."},
                 "rows":{"type":"integer", "minimum":1, "maximum":1000},
@@ -864,6 +865,8 @@ struct SystemCommandInput {
     cwd: Option<String>,
     stdin: Option<String>,
     #[serde(default)]
+    sudo: bool,
+    #[serde(default)]
     interactive: bool,
     #[serde(default)]
     tty: bool,
@@ -889,6 +892,43 @@ impl Tool for SystemCommandTool {
             )));
         }
         let cwd = self.config.resolve_cwd(input.cwd.as_deref())?;
+        let (command, args, sudo) = if input.sudo {
+            if !cfg!(unix) || input.stdin.is_some() || input.tty || input.interactive {
+                return Err(ToolError::Failed(
+                    "sudo requires a Unix host and cannot combine with stdin, interactive or tty"
+                        .into(),
+                ));
+            }
+            if !self.config.allows("sudo") {
+                return Err(ToolError::Failed(
+                    "sudo is not permitted by this Agent configuration".into(),
+                ));
+            }
+            let marker = format!("[framework-sudo-{}]", uuid::Uuid::new_v4());
+            let sudo = crate::sudo::SudoInput {
+                marker: marker.clone(),
+                command: command.clone(),
+                args: args.clone(),
+                submitted: tokio::sync::Mutex::new(false),
+            };
+            // The wrapper gives the target EOF even for cached/NOPASSWD execution.
+            // No model-controlled text is interpolated into shell source.
+            let mut elevated = vec![
+                "-S".into(),
+                "-p".into(),
+                marker,
+                "--".into(),
+                "/bin/sh".into(),
+                "-c".into(),
+                "exec \"$@\" </dev/null".into(),
+                "sudo-command".into(),
+                command,
+            ];
+            elevated.extend(args);
+            ("sudo".into(), elevated, Some(sudo))
+        } else {
+            (command, args, None)
+        };
         if input.stdin.as_ref().is_some_and(|data| data.len() > 65536) {
             return Err(ToolError::Failed(
                 "initial stdin exceeds 65536 bytes".into(),
@@ -910,7 +950,8 @@ impl Tool for SystemCommandTool {
                 cwd,
                 stdin: input.stdin,
                 env: input.env.unwrap_or_default(),
-                interactive: input.interactive,
+                interactive: input.interactive || input.sudo,
+                sudo,
                 tty: input.tty,
                 rows: input.rows.unwrap_or(24),
                 cols: input.cols.unwrap_or(80),
@@ -936,36 +977,36 @@ impl Tool for SystemCommandTool {
             accepted: false,
         };
         let waiting = async {
-            if let Some(progress) = context
+            let progress = context
                 .extensions
-                .get::<crate::CommandProgressSinkService>()
-            {
-                let deadline = tokio::time::Instant::now() + self.config.async_after();
-                let (mut stdout_cursor, mut stderr_cursor) = (0, 0);
-                loop {
-                    let page = task.view(stdout_cursor, stderr_cursor, INITIAL_READ_BYTES);
-                    let (stdout, stderr, next_stdout, next_stderr, terminal) = page.progress();
+                .get::<crate::CommandProgressSinkService>();
+            let deadline = tokio::time::Instant::now() + self.config.async_after();
+            let (mut stdout_cursor, mut stderr_cursor) = (0, 0);
+            loop {
+                task.supply_sudo_password(context).await?;
+                let page = task.view(stdout_cursor, stderr_cursor, INITIAL_READ_BYTES);
+                let (stdout, stderr, next_stdout, next_stderr, terminal) = page.progress();
+                if let Some(progress) = &progress {
                     if !stdout.is_empty() {
                         progress.0.chunk(context, "stdout", stdout);
                     }
                     if !stderr.is_empty() {
                         progress.0.chunk(context, "stderr", stderr);
                     }
-                    stdout_cursor = next_stdout;
-                    stderr_cursor = next_stderr;
-                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                    if terminal || remaining.is_zero() {
-                        break;
-                    }
-                    task.wait_for_output(stdout_cursor, stderr_cursor, remaining)
-                        .await;
                 }
-            } else {
-                task.wait_for_terminal(self.config.async_after()).await;
+                stdout_cursor = next_stdout;
+                stderr_cursor = next_stderr;
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if terminal || remaining.is_zero() {
+                    break;
+                }
+                task.wait_for_output(stdout_cursor, stderr_cursor, remaining)
+                    .await;
             }
+            Ok::<(), ToolError>(())
         };
         tokio::select! {
-            _ = waiting => {}
+            result = waiting => result?,
             _ = context.cancellation.cancelled() => {
                 task.request_stop();
                 task.wait_for_terminal(std::time::Duration::from_secs(3)).await;
@@ -1002,6 +1043,7 @@ impl Tool for SystemCommandTaskReadTool {
         let task = self.tasks.get(&context.session_id, &input.task_id)?;
         self.config
             .authorize_existing_cwd(task.cwd().and_then(|cwd| cwd.to_str()))?;
+        task.supply_sudo_password(context).await?;
         let stdout_cursor = input.stdout_cursor.unwrap_or(0);
         let stderr_cursor = input.stderr_cursor.unwrap_or(0);
         let wait_ms = input
@@ -1014,6 +1056,7 @@ impl Tool for SystemCommandTaskReadTool {
             std::time::Duration::from_millis(wait_ms),
         )
         .await;
+        task.supply_sudo_password(context).await?;
         let output = task.view(
             stdout_cursor,
             stderr_cursor,
@@ -1096,6 +1139,11 @@ impl Tool for SystemCommandTaskWriteTool {
     async fn call(&self, arguments: Value, context: &RunContext) -> Result<ToolOutput, ToolError> {
         let input = parse::<SystemCommandTaskWriteInput>(arguments)?;
         let task = self.tasks.get(&context.session_id, &input.task_id)?;
+        if task.is_sudo() {
+            return Err(ToolError::Failed(
+                "sudo input is managed by the private host channel".into(),
+            ));
+        }
         self.config
             .authorize_existing_cwd(task.cwd().and_then(|cwd| cwd.to_str()))?;
         tokio::select! {

@@ -37,6 +37,7 @@ pub(crate) struct CommandRequest {
     pub env: BTreeMap<String, String>,
     pub env_remove: Vec<String>,
     pub stdin: Option<String>,
+    pub sudo: Option<crate::sudo::SudoInput>,
     pub interactive: bool,
     pub tty: bool,
     pub rows: u16,
@@ -59,7 +60,8 @@ pub(crate) struct CommandSummary {
 }
 
 struct InputMessage {
-    data: String,
+    data: zeroize::Zeroizing<String>,
+    append_newline: bool,
     close: bool,
     ack: oneshot::Sender<Result<(), String>>,
 }
@@ -266,7 +268,8 @@ impl RunningCommand {
                 let (ack, _) = oneshot::channel();
                 sender
                     .try_send(InputMessage {
-                        data: data.clone(),
+                        data: zeroize::Zeroizing::new(data.clone()),
+                        append_newline: false,
                         close: !request.interactive && !request.tty,
                         ack,
                     })
@@ -297,10 +300,15 @@ impl Drop for RunningCommand {
 
 async fn write_pipe_input(mut writer: ChildStdin, mut receiver: mpsc::Receiver<InputMessage>) {
     while let Some(message) = receiver.recv().await {
-        let result = writer
-            .write_all(message.data.as_bytes())
-            .await
-            .map_err(|e| e.to_string());
+        let result = async {
+            writer.write_all(message.data.as_bytes()).await?;
+            if message.append_newline {
+                writer.write_all(b"\n").await?;
+            }
+            Ok::<(), std::io::Error>(())
+        }
+        .await
+        .map_err(|e| e.to_string());
         let failed = result.is_err();
         let _ = message.ack.send(result);
         if failed || message.close {
@@ -316,6 +324,13 @@ fn write_pty_input(
     while let Some(message) = receiver.blocking_recv() {
         let result = writer
             .write_all(message.data.as_bytes())
+            .and_then(|_| {
+                if message.append_newline {
+                    writer.write_all(b"\n")
+                } else {
+                    Ok(())
+                }
+            })
             .and_then(|_| writer.flush())
             .map_err(|e| e.to_string());
         let failed = result.is_err();
@@ -392,6 +407,7 @@ impl CommandTaskManager {
             args: request.args,
             cwd: request.cwd,
             tty: request.tty,
+            sudo: request.sudo,
             pid: process.child.pid,
             input: process.input.clone(),
             created_at: Instant::now(),
@@ -488,6 +504,7 @@ pub(crate) struct CommandTask {
     tty: bool,
     pid: u32,
     input: InputControl,
+    sudo: Option<crate::sudo::SudoInput>,
     created_at: Instant,
     state_tx: watch::Sender<CommandTaskState>,
     changes_tx: watch::Sender<u64>,
@@ -498,6 +515,19 @@ pub(crate) struct CommandTask {
 }
 
 impl CommandTask {
+    pub(crate) fn is_sudo(&self) -> bool {
+        self.sudo.is_some()
+    }
+    pub(crate) async fn supply_sudo_password(
+        &self,
+        run: &eliteforge_agent_core::RunContext,
+    ) -> Result<(), ToolError> {
+        if let Some(input) = &self.sudo {
+            input.supply(self, run).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn cwd(&self) -> Option<&std::path::Path> {
         self.cwd.as_deref()
     }
@@ -524,6 +554,21 @@ impl CommandTask {
     }
 
     pub(crate) async fn write(&self, data: String, close: bool) -> Result<(), ToolError> {
+        self.write_input(zeroize::Zeroizing::new(data), close, false)
+            .await
+    }
+    pub(crate) async fn write_secret(
+        &self,
+        data: zeroize::Zeroizing<String>,
+    ) -> Result<(), ToolError> {
+        self.write_input(data, true, true).await
+    }
+    async fn write_input(
+        &self,
+        data: zeroize::Zeroizing<String>,
+        close: bool,
+        append_newline: bool,
+    ) -> Result<(), ToolError> {
         if data.len() > MAX_INPUT_BYTES {
             return Err(ToolError::Failed(format!(
                 "stdin input exceeds {MAX_INPUT_BYTES} bytes"
@@ -542,7 +587,12 @@ impl CommandTask {
             .await
             .map_err(|_| ToolError::Failed("stdin queue is full; no input was sent".into()))?
             .map_err(|_| ToolError::Failed("command stdin is closed".into()))?;
-        permit.send(InputMessage { data, close, ack });
+        permit.send(InputMessage {
+            data,
+            append_newline,
+            close,
+            ack,
+        });
         match timeout(MAX_READ_WAIT, receipt).await {
             Ok(Ok(Ok(()))) => Ok(()),
             Ok(Ok(Err(error))) => Err(ToolError::Indeterminate(format!("stdin write failed (input may be partial): {error}"))),
@@ -719,6 +769,8 @@ pub(crate) struct CommandTaskOutput {
 }
 
 impl CommandTaskOutput {
+    pub(crate) fn stderr_contains(&self, marker: &str) -> bool { self.stderr.contains(marker) }
+
     pub(crate) fn progress(&self) -> (&str, &str, u64, u64, bool) {
         (
             &self.stdout,
