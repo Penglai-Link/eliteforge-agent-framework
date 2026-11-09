@@ -215,13 +215,13 @@ Person-AI SDK 使用固定 Git 提交，包含 `transcribe_wav` 与全双工会�
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Licensed under the [GNU Affero General Public License, Version 3.0](LICENSE) (`AGPL-3.0-only`).
 
 Rust workspace 通过 Git tag 发布，统一版本升级与引用方式见[发布说明](docs/Git-tag发布.md)。
 
 ## 内置的第三方开源组件
 
-下表列出仓库中直接包含或嵌入的主要第三方资源。它们保留各自的许可证；项目的 Apache 2.0 许可不改变这些条款。Cargo 和 npm 的传递依赖不包含在此表中，具体版本见 `Cargo.lock` 和 `sdk/page/pnpm-lock.yaml`。
+下表列出仓库中直接包含或嵌入的主要第三方资源。它们保留各自的许可证；项目的 AGPL-3.0-only 许可不改变这些条款。Cargo 和 npm 的传递依赖不包含在此表中，具体版本见 `Cargo.lock` 和 `sdk/page/pnpm-lock.yaml`。
 
 | 组件 | 用途 | 许可证及来源 |
 | --- | --- | --- |
