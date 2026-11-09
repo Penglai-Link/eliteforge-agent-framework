@@ -12,7 +12,9 @@ pub const VERSION: &str = "v0.9.1";
 pub const MINIMAL_CATALOG_ID: &str = "https://eliteforge.dev/a2ui/v0.9.1/minimal";
 pub const AGENT_CATALOG_ID: &str = "https://eliteforge.dev/a2ui/v0.9.1/agent";
 mod guidance;
+mod validation;
 pub use guidance::{A2UI_PACK_ID, A2UI_SKILL_NAME, A2uiPack, is_a2ui_tool, negotiated};
+use validation::{envelope_error_details, envelope_operation};
 const KEY: &str = "framework.a2ui.v1";
 const MAX_BYTES: usize = 1024 * 1024;
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -94,7 +96,9 @@ pub fn project_interaction(record: &InteractionRecord) -> InteractionSurface {
         }
         if approval {
             // Preserve the native approval's exact child invocation and batch metadata.
-            if let Some(details) = original.filter(|p| p["tool"].is_string() && p.get("parameters").is_some()) {
+            if let Some(details) =
+                original.filter(|p| p["tool"].is_string() && p.get("parameters").is_some())
+            {
                 component["details"] = details.clone();
             } else if let Some(call) = &record.tool_call {
                 component["details"] = json!({"tool":call.call_name,"parameters":call.arguments});
@@ -232,14 +236,24 @@ impl A2uiService {
     async fn load(&self, session: &str) -> Result<(Option<u64>, SessionState), AgentError> {
         match self.store()?.read_context(session, KEY).await? {
             Some((revision, value)) => {
-                let mut state: SessionState = serde_json::from_value(value).map_err(|_| invalid("Invalid A2UI session state"))?;
+                let mut state: SessionState = serde_json::from_value(value)
+                    .map_err(|_| invalid("Invalid A2UI session state"))?;
                 if let Some(history) = self.history.get() {
-                    let deleted = history.deleted_runs(session).await?.into_iter().map(|id| id.to_string()).collect::<BTreeSet<_>>();
-                    state.surfaces.retain(|_, surface| !deleted.contains(&surface.run_id));
-                    state.actions.retain(|_, action| !deleted.contains(&action.run_id));
+                    let deleted = history
+                        .deleted_runs(session)
+                        .await?
+                        .into_iter()
+                        .map(|id| id.to_string())
+                        .collect::<BTreeSet<_>>();
+                    state
+                        .surfaces
+                        .retain(|_, surface| !deleted.contains(&surface.run_id));
+                    state
+                        .actions
+                        .retain(|_, action| !deleted.contains(&action.run_id));
                 }
                 Ok((Some(revision), state))
-            },
+            }
             None => Ok((None, SessionState::default())),
         }
     }
@@ -310,14 +324,8 @@ impl A2uiService {
         let mut id = None;
         let mut deleted = false;
         let mut last = None;
-        for message in &input.messages {
-            if message["version"] != VERSION {
-                return Err(invalid("Expected A2UI v0.9.1"));
-            }
-            let (operation, payload) = message
-                .as_object()
-                .and_then(|m| m.iter().find(|(k, _)| k.as_str() != "version"))
-                .ok_or_else(|| invalid("Missing operation"))?;
+        for (index, message) in input.messages.iter().enumerate() {
+            let (operation, payload) = envelope_operation(message, index)?;
             let surface_id = payload["surfaceId"]
                 .as_str()
                 .filter(|id| !id.starts_with("interaction:") && !id.is_empty())
@@ -349,7 +357,8 @@ impl A2uiService {
                     "VALIDATION_FAILED: {}",
                     validator
                         .iter_errors(message)
-                        .map(|e| e.to_string())
+                        .take(8)
+                        .flat_map(|error| envelope_error_details(&error, index))
                         .collect::<Vec<_>>()
                         .join("; ")
                 )));
@@ -389,7 +398,7 @@ impl A2uiService {
                     return Err(invalid("Surface ownership or lifecycle mismatch"));
                 }
                 surface.revision = state.revision + 1;
-                match operation.as_str() {
+                match operation {
                     "updateComponents" => {
                         let mut seen = BTreeSet::new();
                         for component in payload["components"]
@@ -783,7 +792,7 @@ pub fn tool_descriptors() -> Vec<ToolDescriptor> {
         if input {"a2ui.request_input"} else {"a2ui.publish"},
         if input {"a2ui_request_input"} else {"a2ui_publish"},
         if input {"Publish a schema-validated SubmitOnce form and wait for its response to resume this run. Use the negotiated catalog and bind submit context.response to the response data model. Follow the a2ui-interface skill."} else {"Create, update or delete validated A2UI v0.9.1 surfaces. Choose Display for read-only reports or Reusable for repeated actions. Use the negotiated catalog, root component and complete envelopes; follow the a2ui-interface skill."},
-        json!({"type":"object","additionalProperties":false,"required":["mode","messages"],"properties":{"mode":{"enum":if input{vec!["SubmitOnce"]}else{vec!["Display","Reusable"]}},"messages":{"type":"array","minItems":1,"maxItems":128,"items":{"type":"object"}},"responseSchema":{"type":"object"}}})
+        json!({"type":"object","additionalProperties":false,"required":["mode","messages"],"properties":{"mode":{"enum":if input{vec!["SubmitOnce"]}else{vec!["Display","Reusable"]}},"messages":{"type":"array","description":"Complete v0.9.1 envelopes. Put surfaceId and components inside the operation, e.g. {\"version\":\"v0.9.1\",\"updateComponents\":{\"surfaceId\":\"form\",\"components\":[...]}}.","minItems":1,"maxItems":128,"items":{"type":"object","required":["version"],"minProperties":2,"maxProperties":2,"additionalProperties":false,"properties":{"version":{"const":VERSION},"createSurface":{"type":"object"},"updateComponents":{"type":"object"},"updateDataModel":{"type":"object"},"deleteSurface":{"type":"object"}}}},"responseSchema":{"type":"object"}}})
     ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command).with_single_input()).collect()
 }
 pub fn tool_category() -> eliteforge_agent_core::ToolCategory {
@@ -874,26 +883,6 @@ impl Tool for A2uiTool {
         }))
     }
 }
-fn form_error_details(error: &jsonschema::ValidationError<'_>, index: usize) -> Vec<String> {
-    use jsonschema::error::ValidationErrorKind;
-    match error.kind() {
-        ValidationErrorKind::OneOfNotValid { context } | ValidationErrorKind::AnyOf { context } => {
-            context
-                .iter()
-                .min_by_key(|branch| branch.len())
-                .into_iter()
-                .flatten()
-                .flat_map(|child| form_error_details(child, index))
-                .take(16)
-                .collect()
-        }
-        _ => vec![format!(
-            "messages[{index}]{}: {error}",
-            error.instance_path()
-        )],
-    }
-}
-
 fn validate_input_messages(
     service: &A2uiService,
     messages: &[Value],
@@ -908,13 +897,18 @@ fn validate_input_messages(
     {
         return Err(invalid("Invalid form size"));
     }
-    let first = &messages[0]["createSurface"];
-    let catalog = first["catalogId"]
-        .as_str()
-        .ok_or_else(|| invalid("Form must begin with createSurface"))?;
+    let (operation, first) = envelope_operation(&messages[0], 0)?;
+    if operation != "createSurface" {
+        return Err(invalid(
+            "messages[0]: form must begin with a createSurface envelope",
+        ));
+    }
+    let catalog = first["catalogId"].as_str().ok_or_else(|| {
+        invalid("messages[0]/createSurface/catalogId: expected a negotiated catalog ID")
+    })?;
     let id = first["surfaceId"]
         .as_str()
-        .ok_or_else(|| invalid("Missing surface ID"))?;
+        .ok_or_else(|| invalid("messages[0]/createSurface/surfaceId: expected a string"))?;
     if !capabilities.catalog_ids.iter().any(|c| c == catalog) {
         return Err(invalid("Catalog not negotiated"));
     }
@@ -927,25 +921,16 @@ fn validate_input_messages(
         if !safe(message) {
             return Err(invalid(format!("messages[{index}]: unsafe form content")));
         }
-        if message["version"] != VERSION {
-            return Err(invalid(format!(
-                "messages[{index}]/version: expected {VERSION}"
-            )));
-        }
+        let (_, payload) = envelope_operation(message, index)?;
         if !validator.is_valid(message) {
             let details = validator
                 .iter_errors(message)
                 .take(8)
-                .flat_map(|error| form_error_details(&error, index))
+                .flat_map(|error| envelope_error_details(&error, index))
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(invalid(format!("Invalid form envelope: {details}")));
         }
-        let payload = message
-            .as_object()
-            .and_then(|m| m.iter().find(|(k, _)| k.as_str() != "version"))
-            .map(|(_, v)| v)
-            .ok_or_else(|| invalid("Missing form operation"))?;
         if payload["surfaceId"] != id
             || index > 0
                 && (message.get("createSurface").is_some()

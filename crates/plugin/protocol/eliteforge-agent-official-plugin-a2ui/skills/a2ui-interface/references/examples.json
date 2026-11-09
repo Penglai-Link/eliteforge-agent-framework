@@ -66,7 +66,8 @@
               "label": "Name",
               "value": {
                 "path": "/name"
-              }
+              },
+              "placeholder": "Enter name"
             },
             {
               "id": "submit",
@@ -133,7 +134,8 @@
               "label": "Query",
               "value": {
                 "path": "/query"
-              }
+              },
+              "placeholder": "Enter query"
             },
             {
               "id": "search",
@@ -249,7 +251,8 @@
               "accessibility": {
                 "label": "Task name"
               },
-              "label": ""
+              "label": "",
+              "placeholder": "Enter task name"
             },
             {
               "id": "priority-field",

@@ -29,6 +29,7 @@ Do not assemble either interaction from primitive controls. Prefer the native to
 
 - Editable controls require `value: {"path":"/..."}` and an initial model value of the correct type. Keep form values under a response subtree; submit that subtree instead of labels, navigation state or report data.
 - `TextField`, `Textarea`, `InputOTP`, `Select`, `Combobox` and `Command` use strings; `NumberField`, `Slider` and `Pagination` use numbers; `Switch`, `CheckBox` and `Toggle` use booleans. Check each schema for constraints.
+- `TextField.placeholder` accepts a string or `{ "path": "/hint" }` binding in both bundled catalogs. It is shown only when the value is empty and never becomes submitted data. Keep `label` for accessibility; put initial input data in `value`, not `placeholder`. Check the negotiated schema when using an older client.
 - `ChoicePicker` uses a string array, including single choice. `ToggleGroup` also uses an array. Make the response schema agree with the actual value.
 - `Calendar` and `DatePicker` use date-only `YYYY-MM-DD` strings. `DateTimeInput` chooses date/time fields via its schema; do not assume every date control emits an ISO timestamp.
 - `Field` wraps a `child` and adds `label`, optional `description` and `error`. Avoid repeating the same visible label on the child.

@@ -3,3 +3,5 @@ A2UI interactive interfaces are available. Proactively consider and prefer them 
 A Field renders its child controls. Reference only the Field in the parent layout, not both the Field and its controls. For example, root.children=["name-field","submit"] and name-field.child="name"; do not also put "name" in root.children. Each input still needs a component definition in updateComponents; defining a component does not add it to the layout.
 
 Within each selection control, every options[].value must be unique. Do not append an option already present when assembling or updating a form.
+
+Every messages[] item is a complete envelope, for example {"version":"v0.9.1","updateComponents":{"surfaceId":"form","components":[...]}}. Keep surfaceId and components inside the operation; keep mode and responseSchema outside messages. TextField supports a placeholder string or data binding; retain its label and use value only for actual field data.
