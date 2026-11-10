@@ -1565,6 +1565,7 @@ dependencies = [
  "eliteforge-agent-framework",
  "eliteforge-agent-official-plugin-agui",
  "eliteforge-agent-official-plugin-tools-human",
+ "eliteforge-agent-plugin-core",
  "eliteforge-agent-test-support",
  "futures",
  "rusqlite",

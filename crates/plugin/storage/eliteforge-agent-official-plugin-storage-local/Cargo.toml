@@ -13,6 +13,7 @@ bundled-native = []
 
 [dependencies]
 eliteforge-agent-core = { path = "../../../framework/eliteforge-agent-core" }
+eliteforge-agent-plugin-core = { path = "../../../framework/eliteforge-agent-plugin-core" }
 eliteforge-agent-context-contracts = { path = "../../../framework/eliteforge-agent-context-contracts" }
 async-trait.workspace = true
 futures.workspace = true

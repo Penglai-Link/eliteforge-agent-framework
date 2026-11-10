@@ -13,6 +13,7 @@ mod local_artifact;
 mod long_term;
 mod model_catalog;
 mod operations;
+mod runtime;
 mod state;
 mod summary;
 mod telemetry;
@@ -30,6 +31,7 @@ pub use local_artifact::LocalArtifactStore;
 pub use long_term::{MemoryStoreOptions, SqliteLongTermMemory};
 pub use model_catalog::SqliteModelCatalogStore;
 pub use operations::*;
+pub use runtime::{BorrowedLocalStoragePlugin, LocalStorageRuntime};
 pub use state::{SqliteExecutionPlugin, SqliteOptions, SqliteStateStore};
 pub use summary::{SqliteSummaryStore, SummaryStoreOptions};
 

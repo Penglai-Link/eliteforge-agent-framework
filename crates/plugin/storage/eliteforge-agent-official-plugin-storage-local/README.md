@@ -106,6 +106,40 @@ The plugin closes a runtime it opens itself. With `with_database`, the applicati
 owns runtime shutdown and can continue using its business tables after Framework
 shutdown. Individual stores never close the injected connection.
 
+## Sharing storage across replaceable Frameworks
+
+`with_database` shares a connection, not the lifecycle of the individual stores.
+Those stores still close with their installing plugin. A host that replaces its
+Framework while keeping application services alive should own one
+`LocalStorageRuntime` instead:
+
+```rust,ignore
+use eliteforge_agent_official_plugin_storage_local::{LocalStorageConfig, LocalStorageRuntime};
+
+let mut config = LocalStorageConfig::new("application.db", "artifacts");
+config.database = Some(database.clone());
+let storage = LocalStorageRuntime::open(config).await?;
+let first = Framework::builder().plugin(storage.plugin()).build().await?;
+let replacement = Framework::builder().plugin(storage.plugin()).build().await?;
+first.close().await; // Releases this borrow; all storage objects remain usable.
+// Application repositories and replacement share the same service instances.
+replacement.close().await;
+storage.close().await; // Closes the stores once, after all borrowers release.
+database.close().await?; // The injected connection is still owned by the host.
+```
+
+`plugin()` registers the complete original service and extension set under
+`storage.local`, without creating stores or registering their shutdown callbacks
+again. Failed or cancelled Framework installation releases only its borrow.
+Application services may also retrieve typed services through `storage.services()`.
+Do not reuse a borrowed service after its owning storage runtime has closed.
+
+Close borrowing Frameworks before closing the owner. `close()` rejects new
+borrowers, waits for existing containers to release their leases, and runs the
+original plugin cleanup exactly once. Concurrent or cancelled close callers
+observe the same independently owned shutdown task. Replacing a Framework never
+creates another database, copies history, or reruns storage recovery.
+
 See [Session and Goal API](../../../../docs/会话与目标存储.md) for lifecycle
 and continuation examples.
 
