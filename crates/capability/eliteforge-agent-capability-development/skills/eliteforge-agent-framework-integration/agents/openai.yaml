@@ -1,4 +1,4 @@
 interface:
   display_name: "Agent Framework 使用手册"
-  short_description: "接入 Agent Framework，开发工具、插件与能力包，核对 Tron 菜单编码"
-  default_prompt: "使用 $eliteforge-agent-framework-integration 的教程和代码模板，在我的项目中实现所需的 Agent、工具与能力包；涉及 Tron 菜单时严格核对编码和导航契约。"
+  short_description: "接入 Agent Framework，先生成 Tron 能力包骨架再实现业务，并校验导航"
+  default_prompt: "使用 $eliteforge-agent-framework-integration 在我的项目中实现所需的 Agent、工具与能力包；新建 Tron 能力包时先执行随技能提供的生成器，再填写业务内容，并核对菜单编码和导航契约。"
