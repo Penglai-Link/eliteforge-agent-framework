@@ -33,6 +33,7 @@
 | 范围 | `data-theme-part` | `data-theme-anchor` |
 | --- | --- | --- |
 | Chat 面板 | `chat` | `chat` |
+| 对话历史索引 | `chat-history` | 无 |
 | 用户/助手/系统通知 | `chat-message-user` / `chat-message-assistant` / `chat-message-system` | `chat-message` |
 | Composer 根 | `composer` | `composer` |
 | 输入框 | `chat-input` | `chat-input` |
@@ -49,6 +50,28 @@ React/Vue 对应节点保持一致；更细的 A2UI 挂点见主题文档。`dat
 两端由 `styles.css` 中的消息操作行规则实现，不增加 JS 状态、动画、主题变量或组件参数。仅改变显示策略，复制、编辑、删除及时间格式保持原行为。此行为从 `1.0.0-preview.4` 开始提供。
 
 工作过程的摘要、分组和工具条目末尾的展开箭头，在支持 hover 的精确指针设备上仅在对应行悬停或获得键盘焦点时显示；无 hover 或粗指针设备保持可见。隐藏箭头时保留占位，不改变展开状态或点击范围。此行为从 `1.0.0-preview.4` 开始提供。
+
+## 对话历史索引
+
+`1.0.0-preview.12` 的 React/Vue 历史索引共用 `packages/chat-core/src/history-rail.css`，两端 `styles.css` 导入并随构建合并；它不是新增的 npm 样式入口。索引绝对定位在聊天左侧原有留白中，正文和输入框宽度不变。普通轮次是微点，当前轮次为短竖线；透明按钮提供较宽点击区域，悬停或聚焦显示单条问题与最多两行纯文本回复。预览不渲染链接、图片或 Mermaid，也不进入正文布局。
+
+| 变量 | 默认值 / 用途 |
+| --- | --- |
+| `--agent-ui-chat-history-inset` | `2px`，距聊天左边缘 |
+| `--agent-ui-chat-history-hit-width` | `16px`，透明点击区域宽度 |
+| `--agent-ui-chat-history-step` | `12px`，轮次间距 / 按钮高度 |
+| `--agent-ui-chat-history-dot-size` | `3px`，微点直径和竖线宽度 |
+| `--agent-ui-chat-history-active-size` | `9px`，当前竖线高度 |
+| `--agent-ui-chat-history-color` | 次要文字色混合 65% 不透明度 |
+| `--agent-ui-chat-history-active-color` | 聊天正文色，宿主可改为主题强调色 |
+| `--agent-ui-chat-history-preview-width` | `260px`，同时受聊天容器宽度约束 |
+| `--agent-ui-chat-history-preview-shadow` | `0 4px 16px rgb(0 0 0 / 10%)` |
+| `--agent-ui-chat-history-preview-font-size` | `13px`，问题摘要字号 |
+| `--agent-ui-chat-history-preview-detail-font-size` | `12px`，回复摘要字号 |
+
+变量可从宿主祖先继承；预览复用 Chat 的表面、边框、正文和次要文字色，以及通用间距、圆角和焦点变量。调整点击宽度时保持它落在宿主现有留白内，不通过增大正文 padding 容纳索引。
+
+索引高度受聊天内容区约束，长对话只在索引内部滚动，当前位置跟随正文。方向键、Home / End 移动焦点，Enter / 空格定位，Escape 关闭预览。跳转仅滚动正文容器，不带动页面或宿主祖先；MotionProvider 的 reduced/off 策略和系统减少动效偏好关闭平滑跳转及微点过渡。消费方升级到 `1.0.0-preview.12` 后生效。
 
 ## A2UI 与 Composer
 
