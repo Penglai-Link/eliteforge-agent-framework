@@ -1,0 +1,15 @@
+{
+  "name": "tron-harness-cap-template",
+  "version": "0.1.0",
+  "description": "Generate complete Tron capability pack scaffolds before implementing business logic",
+  "type": "module",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "engines": { "node": ">=22" },
+  "bin": { "tron-cap": "scripts/tron-cap.mjs" },
+  "files": ["scripts/tron-cap.mjs", "scripts/pack.mjs", "scripts/archive.mjs", "scripts/project.mjs", "template", "docs"],
+  "scripts": {
+    "help": "node scripts/tron-cap.mjs help",
+    "create": "node scripts/tron-cap.mjs create"
+  }
+}

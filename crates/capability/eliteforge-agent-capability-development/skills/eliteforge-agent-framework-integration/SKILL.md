@@ -1,8 +1,8 @@
 ---
 name: eliteforge-agent-framework-integration
-description: 使用 EliteForge Agent Framework 构建 Rust Agent 应用。提供可运行的入门程序、业务工具与能力包模板，以及模型、上下文、Skills、MCP、审批、持久化、流式输出和插件扩展教程；适用于接入框架或开发其插件、能力包，包括 Tron 能力包菜单编码与导航校验。
+description: 使用 EliteForge Agent Framework 构建 Rust Agent 应用、插件、工具与能力包。新建 Tron 能力包时先调用随技能提供的生成器创建完整骨架，再填写业务内容；提供模型、上下文、Skills、MCP、审批、持久化、流式输出教程，以及 Tron 菜单编码与导航校验。
 metadata:
-  version: 1.0.2
+  version: 1.0.4
 ---
 
 # EliteForge Agent Framework 使用手册
@@ -12,6 +12,32 @@ metadata:
 本技能的 API 基线为 Git tag `1.0.0`。正文和随附章节包含实现所需的代码，无需先取得 Framework 仓库或阅读 `docs/`。仅在目标项目使用其他版本、接口不匹配或需要修改框架内部实现时，查实际锁定版本的源码。
 
 执行任务时，先读目标项目的 Cargo 清单与装配入口，再按下方教程实现。已有应用沿用其配置、目录和身份体系，不照搬示例的数据和全局作用域。
+
+## 新建 Tron 能力包：先生成骨架，再填内容
+
+内部开发者、外部开发者和 Tron 中的 Agent 均使用本技能。接到新建 Tron 能力包的任务后，执行以下流程；修改已有包时沿用原项目，不重新生成。
+
+1. 从任务确定包 ID、名称、版本和输出目录；缺少业务需求时先澄清。检查 Node.js 22+ 是否可用。
+2. 以本 `SKILL.md` 所在目录替换下方 `<skill-dir>`，用命令工具执行生成器。无需先读取全部模板文件或逐个编写基础文件。
+
+   ```sh
+   node "<skill-dir>/assets/tron-harness-cap-template/scripts/tron-cap.mjs" create --id com.example.assistant --name "示例助手" --version 0.1.0 --out "<用户工作目录>/example-assistant"
+   ```
+
+3. 生成器一次建立 `skills/`、`native/`、`ui/`、`tron/`、`mcp/`、`resources/`、`scripts/`，以及清单、Makefile 和开发说明。不分类型，不覆盖已有目录。若生成器文件缺失，说明技能资源不完整并修复分发，不能悄悄改成让模型重写模板。
+4. 读取生成项目的 `AGENTS.md`、`README.md` 和需求相关文件，填写业务工具、页面、技能、导航、MCP 配置和资源。根据实际贡献调整清单，保留完整目录结构。示例 echo 工具与页面仅是骨架，不代表任务完成。
+5. 按项目命令执行 `make install`、`make lint`、`make build`；原生构建另需 Rust 2024 工具链。核对业务行为与最终 ZIP，说明未验证的安装或外部服务环节。是否写测试遵循用户要求。
+
+```mermaid
+flowchart LR
+    A[能力需求] --> B[本技能]
+    B --> C[执行生成器]
+    C --> D[完整项目骨架]
+    D --> E[Agent 填写业务内容]
+    E --> F[校验与构建]
+```
+
+模板与打包契约见[能力包约定](assets/tron-harness-cap-template/docs/pack-contract.md)。只按需读取；普通 Framework 应用仍使用下方入门程序或订单助手模板。
 
 ## Tron 能力包菜单编码（强制）
 
@@ -145,7 +171,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Environment Variables
 
-以下变量用于入门程序和订单模板；合入现有应用时可改用宿主配置对象。
+以下变量用于入门程序和订单模板；Tron 骨架生成命令不需要这些变量。合入现有应用时可改用宿主配置对象。
 
 - `ELITEFORGE_SKILL_AGENT_FRAMEWORK_MODEL` [required] 服务实际提供的 Chat 模型 ID。
 - `ELITEFORGE_SKILL_AGENT_FRAMEWORK_ENDPOINT` [required] 模型协议基础 URL，包含服务所需的版本前缀。
@@ -154,3 +180,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Output Path
 
 依次采用：用户指定的项目与文件 → 当前项目已有 Cargo 清单、配置入口和 Agent 装配模块。需要新项目时才复制 `assets/order-agent/`；目录参数视为项目根，不覆盖已有同名文件。现有项目按其模块布局合入示例，不修改 Cargo 依赖缓存。
+
+新建 Tron 能力包优先采用用户指定的目录，否则在当前已授权工作目录下创建独立子目录；将完整新目录传给生成器的 `--out`。构建归档写入生成项目的 `output/`。不能在技能的 `assets/` 中生成业务项目或构建产物。

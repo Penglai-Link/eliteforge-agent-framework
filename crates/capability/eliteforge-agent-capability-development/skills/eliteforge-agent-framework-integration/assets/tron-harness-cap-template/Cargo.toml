@@ -1,0 +1,17 @@
+[package]
+name = "tron-cap-pack-validator"
+description = "Validate generated capability archives with the Framework installer"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[dependencies]
+eliteforge-agent-capability-runtime = { git = "https://gitee.com/person-ai/eliteforge-agent-framework.git", rev = "e4e53e9072160925c178f81bf7989cefb07c018f" }
+tempfile = "3"
+
+[[bin]]
+name = "validate-pack"
+path = "src/bin/validate-pack.rs"
+
+[workspace]
