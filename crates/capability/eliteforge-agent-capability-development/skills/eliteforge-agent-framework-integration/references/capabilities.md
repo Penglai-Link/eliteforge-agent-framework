@@ -239,6 +239,8 @@ flowchart LR
 
 安装新版本不会修改当前 Framework。切换时构建候选 Framework、验证 Agent、排空旧执行后发布，再关闭旧 Framework。恢复任务需要旧包版本/pin 时保留它；代码回滚不自动回滚业务数据。
 
+面向 Tron 提供菜单或包页面时，必须遵守主技能的菜单编码硬约束，并读取 [Tron 导航契约](tron-navigation.md)。通用能力包校验不会替代 Tron 对大写下划线编码、布局引用及资源重名的校验。
+
 ## 9. 可观测与界面
 
 官方包的 OTel 默认使用宿主全局 provider；需要指定 provider 时：

@@ -1,15 +1,27 @@
 ---
 name: eliteforge-agent-framework-integration
-description: 使用 EliteForge Agent Framework 构建 Rust Agent 应用。提供可运行的入门程序、业务工具与能力包模板，以及模型、上下文、Skills、MCP、审批、持久化、流式输出和插件扩展教程；适用于接入框架或开发其插件、能力包。
+description: 使用 EliteForge Agent Framework 构建 Rust Agent 应用。提供可运行的入门程序、业务工具与能力包模板，以及模型、上下文、Skills、MCP、审批、持久化、流式输出和插件扩展教程；适用于接入框架或开发其插件、能力包，包括 Tron 能力包菜单编码与导航校验。
 metadata:
-  version: 1.0.0
+  version: 1.0.2
 ---
 
 # EliteForge Agent Framework 使用手册
 
+本技能由 Framework 的 `eliteforge.agent-development` 能力包统一维护和分发；更新 Framework 接口时，同步此目录的说明、references 和模板。
+
 本技能的 API 基线为 Git tag `1.0.0`。正文和随附章节包含实现所需的代码，无需先取得 Framework 仓库或阅读 `docs/`。仅在目标项目使用其他版本、接口不匹配或需要修改框架内部实现时，查实际锁定版本的源码。
 
 执行任务时，先读目标项目的 Cargo 清单与装配入口，再按下方教程实现。已有应用沿用其配置、目录和身份体系，不照搬示例的数据和全局作用域。
+
+## Tron 能力包菜单编码（强制）
+
+为 Tron 创建、修改、打包或发布带菜单的能力包时，必须先读取[Tron 导航契约](references/tron-navigation.md)，并遵守以下规则；这些是 Tron 宿主约束，不是所有 Framework 宿主的通用限制。
+
+- `tron/navigation.json` 的 `domains[].code`、`menus[].code` 必须原样匹配 `^[A-Z0-9_]{1,64}$`：仅 ASCII 大写字母、数字和下划线，长度 1–64。禁止小写、点、连字符、空白、中文及其他符号；不能依赖导入时自动 trim 或转大写。
+- `layouts` 的键必须精确引用本包声明的领域编码，`menuCode` 必须精确引用本包声明的菜单编码；非空 `parentMenuCode` 必须引用同一布局中的 `Group` 菜单。修改编码时必须同步全部引用。
+- 领域编码和菜单编码分别在各自全局空间内唯一；不能覆盖内置、用户自建或其他包的同类编码。生成时使用稳定的包专属大写下划线前缀，包内也不得重复。正常升级保持编码稳定，不把版本号加入编码。
+- 不混淆包 ID、菜单编码与页面 ID：包 `example.page-demo` 的菜单可为 `EXAMPLE_PAGE_DEMO_OVERVIEW`，`PackPage.pageCode` 则填写本包 `tron/pages.json` 中的原始页面 ID（如 `overview`），不得改成菜单编码、URL 或手工拼上包 ID。
+- 打包、上传或声称可安装前，必须核对最终 ZIP 中的编码、引用、资源声明与宿主校验结果。仅 JSON 可解析或 Framework 通用 ZIP 校验通过，不代表 Tron 菜单可安装。失败时先修复，不能通过删除菜单或改包 ID 绕过问题；未执行实际导入/升级时明确说明未验证。
 
 ## 1. 五个核心对象
 

@@ -1,0 +1,13 @@
+[package]
+name = "eliteforge-agent-capability-development"
+description = "Bundled EliteForge Framework and Agent UI development skills"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core" }
+
+[build-dependencies]
+eliteforge-agent-core = { path = "../../framework/eliteforge-agent-core" }

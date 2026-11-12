@@ -1117,6 +1117,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "eliteforge-agent-capability-development"
+version = "1.0.0"
+dependencies = [
+ "eliteforge-agent-core",
+]
+
+[[package]]
 name = "eliteforge-agent-capability-external"
 version = "1.0.0"
 dependencies = [

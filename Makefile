@@ -66,6 +66,7 @@ help:
 	@echo   make format     格式化全部 Rust 源码
 	@echo   make lint       格式检查、Clippy、编译检查和严格 Rustdoc 检查
 	@echo   make test       workspace 测试、文档测试及 Framework 无默认特性测试
+	@echo   make development-capability-check 校验并编译开发技能能力包
 	@echo   make build      构建全部 workspace 库的 release 产物
 	@echo   make deploy     不提供软件包上传；源码版本使用 scripts/release.py tag
 	@echo 能力：未检测到 Docker、Compose 或应用壳，不生成对应目标
@@ -175,3 +176,13 @@ ifeq ($(OS),Windows_NT)
 else
 	@mkdir -p "$(SCCACHE_DIR)" "$(CCACHE_DIR)"
 endif
+
+# Development skill sources belong to this workspace; consumers only install the pack.
+PYTHON ?= python3
+SKILL_VALIDATOR ?= $(if $(strip $(CODEX_HOME)),$(CODEX_HOME),$(_BUILD_CACHE_HOME)/.codex)/skills/.system/skill-creator/scripts/quick_validate.py
+.PHONY: development-capability-check
+development-capability-check:
+	$(PYTHON) "$(SKILL_VALIDATOR)" crates/capability/eliteforge-agent-capability-development/skills/eliteforge-agent-framework-integration
+	$(PYTHON) "$(SKILL_VALIDATOR)" crates/capability/eliteforge-agent-capability-development/skills/eliteforge-agent-ui-integration
+	$(PYTHON) "$(SKILL_VALIDATOR)" crates/capability/eliteforge-agent-capability-development/skills/eliteforge-agent-ui-theme
+	cargo check $(_CARGO_FLAGS) -p eliteforge-agent-capability-development

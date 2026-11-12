@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/capability/eliteforge-agent-capability-development",
     "crates/capability/eliteforge-agent-capability-chunking",
     "crates/capability/eliteforge-agent-capability-auto-routing",
     "crates/capability/eliteforge-agent-capability-external",
