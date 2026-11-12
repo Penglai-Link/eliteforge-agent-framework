@@ -1,7 +1,7 @@
 //! Durable ReAct model and tool execution.
 use crate::*;
 use async_trait::async_trait;
-use futures::{StreamExt, stream::FuturesUnordered};
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 pub(crate) struct ModelExecutionLoop {
     lease_duration: Duration,
@@ -748,12 +748,11 @@ impl ModelExecutionRuntime<'_> {
             })
             .map(|(i, e)| (i, e.clone()))
             .collect();
-        let mut failure = None;
         for (index, execution) in pending {
             let ToolExecutionState::Finished(mut output) = execution.state.clone() else {
                 continue;
             };
-            let processed = async {
+            let processed = std::panic::AssertUnwindSafe(async {
                 // Resolve native effects before publishing/auditing a final result.
                 // A rejected exposure must never be persisted as a success.
                 output = self.apply_tool_effect(output)?;
@@ -786,26 +785,26 @@ impl ModelExecutionRuntime<'_> {
                     output = self.apply_tool_effect(output)?;
                 }
                 Ok::<_, AgentError>(output)
-            }
-            .await;
+            })
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| Err(AgentError::Run("tool result processor panicked".into())));
             let output = match processed {
                 Ok(output) => output,
                 Err(error) => {
                     // The call already returned. Do not expose unprocessed data
                     // (a host processor may redact it), or claim it never ran.
-                    // A host storage error is not an unknown checkpoint commit.
-                    failure.get_or_insert_with(|| {
-                        AgentError::Run(format!("Tool result processing failed: {error}"))
-                    });
-                    ToolOutput::error(
-                        "Tool result processing failed. Execution effects may already exist. Verify them before retrying; the unprocessed result is unavailable.",
-                    )
+                    // Report a failed result to the model without replaying the
+                    // call or aborting unrelated tools in the same batch.
+                    ToolOutput::error(format!(
+                        "Tool result processing failed: {error}. Execution effects may already exist. Verify them before retrying; the unprocessed result is unavailable."
+                    ))
                 }
             };
             self.execution_mut(index).state = ToolExecutionState::Finished(output);
             self.processed_results.insert(execution.invocation_id);
         }
-        failure.map_or(Ok(()), Err)
+        Ok(())
     }
     fn apply_tool_effect(&mut self, mut output: ToolOutput) -> Result<ToolOutput, AgentError> {
         match &output.effect {
@@ -1163,7 +1162,11 @@ impl ModelExecutionRuntime<'_> {
                     let disposition = response.disposition;
                     let mut assistant_messages = response.assistant_messages();
                     let output_group_id = (!response.output_items.is_empty()).then(|| {
-                        self.checkpoint.history.steps.last().map(|step| step.id.clone())
+                        self.checkpoint
+                            .history
+                            .steps
+                            .last()
+                            .map(|step| step.id.clone())
                             .unwrap_or_else(|| RunId::new_v4().to_string())
                     });
                     for message in &mut assistant_messages {
@@ -1173,9 +1176,13 @@ impl ModelExecutionRuntime<'_> {
                     if response.tool_calls.is_empty() {
                         self.checkpoint.transcript.extend(assistant_messages);
                         if disposition == Some(ModelDisposition::Continue) {
-                            if self.state.phase_continuations >= self.state.request.limits.max_phase_continuations {
+                            if self.state.phase_continuations
+                                >= self.state.request.limits.max_phase_continuations
+                            {
                                 self.save(None).await?;
-                                return Err(AgentError::Run("model returned only commentary without a final answer".into()));
+                                return Err(AgentError::Run(
+                                    "model returned only commentary without a final answer".into(),
+                                ));
                             }
                             self.state.phase_continuations += 1;
                             self.save(None).await?;
@@ -1395,18 +1402,22 @@ impl ModelExecutionRuntime<'_> {
                     (b.exposed || self.state.request.limits.allow_unexposed_tools)
                         && !self.context.is_tool_revoked(&b.descriptor.id)
                         && b.descriptor == execution.descriptor
-                })
-                .ok_or_else(|| {
-                    AgentError::InvalidConfiguration(
-                        "pending tool contract is no longer available".into(),
-                    )
-                })?;
-            if !compile_schema(&binding.descriptor.input_schema)?
-                .is_valid(&execution.call.arguments)
-            {
+                });
+            let Some(binding) = binding else {
                 self.execution_mut(index).state = ToolExecutionState::Finished(ToolOutput::error(
-                    "Tool arguments do not match input schema",
+                    "Tool not executed: its contract is no longer available. Discover the current tools before continuing.",
                 ));
+                continue;
+            };
+            let validation = compile_schema(&binding.descriptor.input_schema)
+                .map(|schema| schema.is_valid(&execution.call.arguments));
+            if !matches!(validation, Ok(true)) {
+                let message = match validation {
+                    Err(error) => format!("Tool not executed: invalid input schema: {error}"),
+                    _ => "Tool arguments do not match input schema".into(),
+                };
+                self.execution_mut(index).state =
+                    ToolExecutionState::Finished(ToolOutput::error(message));
                 continue;
             }
             let invocation_id = execution.invocation_id.to_string();
@@ -1421,18 +1432,31 @@ impl ModelExecutionRuntime<'_> {
             let mut approval = None;
             let mut denied = None;
             for policy in &self.services.tool_policy {
-                match policy.evaluate(&invocation).await? {
-                    ToolPolicyDecision::Allow => {}
-                    ToolPolicyDecision::Deny(reason) => {
+                let decision = std::panic::AssertUnwindSafe(policy.evaluate(&invocation))
+                    .catch_unwind()
+                    .await;
+                match decision {
+                    Ok(Ok(ToolPolicyDecision::Allow)) => {}
+                    Ok(Ok(ToolPolicyDecision::Deny(reason))) => {
                         denied = Some(reason);
                         break;
                     }
-                    ToolPolicyDecision::RequireApproval(prompt) if !approved => {
+                    Ok(Ok(ToolPolicyDecision::RequireApproval(prompt))) if !approved => {
                         if approval.is_none() {
                             approval = Some(prompt);
                         }
                     }
-                    ToolPolicyDecision::RequireApproval(_) => {}
+                    Ok(Ok(ToolPolicyDecision::RequireApproval(_))) => {}
+                    Ok(Err(error)) => {
+                        denied = Some(format!(
+                            "Tool not executed: policy evaluation failed: {error}"
+                        ));
+                        break;
+                    }
+                    Err(_) => {
+                        denied = Some("Tool not executed: policy evaluation panicked".into());
+                        break;
+                    }
                 }
             }
             if let Some(reason) = denied {
@@ -1525,19 +1549,34 @@ impl ModelExecutionRuntime<'_> {
         let mut output = match result {
             Ok(output) => output,
             Err(error @ ToolError::Indeterminate(_)) => {
-                self.context.check_cancelled()?;
-                return Err(AgentError::Run(error.to_string()));
+                // Finish and persist this invocation so recovery never silently
+                // dispatches it again. Uncertainty is a tool result, not a reason
+                // to stop the model from inspecting state or choosing another tool.
+                let mut output = ToolOutput::error(format!(
+                    "{error}. The operation may already have taken effect. Do not repeat it automatically. Inspect fresh external state before deciding whether to act again."
+                ));
+                output.structured = Some(serde_json::json!({
+                    "kind": "toolExecutionError", "code": "TOOL_OUTCOME_UNCERTAIN",
+                    "outcomeUncertain": true, "tool": execution.call.call_name,
+                    "message": error.to_string(), "nextStep": "inspect_state",
+                }));
+                output
             }
             Err(error) => ToolOutput::error(error.to_string()),
         };
         if output.effect == ToolEffect::AwaitInput {
-            output.effect = ToolEffect::RequestInput(Box::new(InteractionRequest::input(
+            output = match InteractionRequest::input(
                 &output.content,
                 serde_json::json!({"type":"string"}),
-            )?));
+            ) {
+                Ok(interaction) => output.request_input(interaction),
+                Err(error) => {
+                    ToolOutput::error(format!("Tool returned an invalid input request: {error}"))
+                }
+            };
         }
         if let ToolEffect::RequestInput(interaction) = &output.effect {
-            if !matches!(interaction.kind, InteractionKind::Input)
+            let invalid_identity = !matches!(interaction.kind, InteractionKind::Input)
                 || interaction.id.is_nil()
                 || self
                     .state
@@ -1548,27 +1587,30 @@ impl ModelExecutionRuntime<'_> {
                     .state
                     .answers
                     .iter()
-                    .any(|a| a.interaction_id == interaction.id)
-            {
-                return Err(AgentError::Run(
-                    "tool returned invalid interaction identity/kind".into(),
+                    .any(|a| a.interaction_id == interaction.id);
+            let schema = compile_response_schema(&interaction.response_schema);
+            if invalid_identity {
+                output = ToolOutput::error("Tool returned invalid interaction identity/kind");
+            } else if let Err(error) = schema {
+                output = ToolOutput::error(format!(
+                    "Tool returned an invalid interaction schema: {error}"
                 ));
-            }
-            compile_response_schema(&interaction.response_schema)?;
-            self.state.interactions.push(interaction.as_ref().clone());
-            // An answer may change the plan. In-flight siblings must still be
-            // collected; only calls not dispatched yet can be skipped.
-            if let ReactCursor::Tools { executions, .. } = &mut self.state.cursor {
-                for (other, pending) in executions.iter_mut().enumerate() {
-                    if other != index
-                        && matches!(
-                            pending.state,
-                            ToolExecutionState::Planned | ToolExecutionState::Approved
-                        )
-                    {
-                        pending.state = ToolExecutionState::Finished(ToolOutput::error(
-                            "Tool not executed: awaiting input; replan after the answer",
-                        ));
+            } else {
+                self.state.interactions.push(interaction.as_ref().clone());
+                // An answer may change the plan. In-flight siblings must still be
+                // collected; only calls not dispatched yet can be skipped.
+                if let ReactCursor::Tools { executions, .. } = &mut self.state.cursor {
+                    for (other, pending) in executions.iter_mut().enumerate() {
+                        if other != index
+                            && matches!(
+                                pending.state,
+                                ToolExecutionState::Planned | ToolExecutionState::Approved
+                            )
+                        {
+                            pending.state = ToolExecutionState::Finished(ToolOutput::error(
+                                "Tool not executed: awaiting input; replan after the answer",
+                            ));
+                        }
                     }
                 }
             }
@@ -1649,7 +1691,7 @@ impl ModelExecutionRuntime<'_> {
                 }
                 failure.get_or_insert(error);
             }
-            // Even after cancellation/indeterminate execution, drain in-flight
+            // Even after cancellation or a persistence failure, drain in-flight
             // results before returning the error. Known successes remain known.
         }
         self.context.check_cancelled()?;
