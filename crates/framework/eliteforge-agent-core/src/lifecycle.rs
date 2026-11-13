@@ -230,6 +230,20 @@ pub trait SessionLifecycleStore: Send + Sync {
     async fn register_run(&self, run: ManagedRun, resume: bool) -> Result<(), StateError>;
     async fn finish_run(&self, run: ManagedRun) -> Result<(), StateError>;
     async fn get_run(&self, id: RunId) -> Result<ManagedRun, StateError>;
+    /// Read selected runs in input order, preserving duplicates and absent IDs.
+    /// Adapters should override this compatibility fallback with a storage batch.
+    /// The caller owns authorization; these are snapshots, not execution leases.
+    async fn find_runs(&self, ids: &[RunId]) -> Result<Vec<Option<ManagedRun>>, StateError> {
+        let mut runs = Vec::with_capacity(ids.len());
+        for id in ids {
+            runs.push(match self.get_run(*id).await {
+                Ok(run) => Some(run),
+                Err(StateError::NotFound) => None,
+                Err(error) => return Err(error),
+            });
+        }
+        Ok(runs)
+    }
     async fn list_runs(&self, session: &str) -> Result<Vec<ManagedRun>, StateError>;
     async fn append_event(&self, event: SessionEvent) -> Result<SessionEvent, StateError>;
     async fn list_events(

@@ -144,6 +144,8 @@ let session = framework.transaction(async {
 
 宿主可在同一事务中写 session 到用户/工作区的关联。不要把模型调用或 `agent.run` 放在数据库事务内，也不要在事务中 spawn 一个等待同库的任务。
 
+已授权的一组运行使用 `sessions.store.find_runs(&run_ids).await?` 批量读取。返回值按输入顺序保留重复 ID，缺失项为 `None`；SQLite 实现使用一次查询，空输入不访问数据库。自定义存储可继承逐项读取的兼容实现，但应覆盖它以提供批量查询。该接口不授予访问权限，也不取得执行租约；宿主仍须在状态锁内刷新业务记录，使用 revision 校验写回，不能把批量快照当成续跑或完成状态的锁。
+
 普通 SQLite 持久化不需要中文分词/向量原生扩展。确实需要这些扩展时才在 storage-local 依赖启用 `bundled-native`，配置 `ExtensionConfig` 并读取加载报告；`Required` 不可用要失败，`Preferred` 降级后不得继续假定扩展功能存在。不要为了普通聊天安装全部原生扩展。
 
 ## 5. 长期记忆

@@ -625,6 +625,27 @@ impl SessionLifecycleStore for SqliteLifecycleStore {
         .await
         .map_err(worker)
     }
+    async fn find_runs(&self, ids: &[RunId]) -> Result<Vec<Option<ManagedRun>>, StateError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = encode(&ids)?;
+        self.execute_read(move |c| {
+            let mut query = c
+                .prepare(
+                    "SELECT r.record FROM json_each(?1) requested \
+                 LEFT JOIN ef_runs r ON r.id=requested.value ORDER BY requested.key",
+                )
+                .map_err(sql)?;
+            query
+                .query_map([ids], |row| row.get::<_, Option<String>>(0))
+                .map_err(sql)?
+                .map(|row| row.map_err(sql)?.map(decode).transpose())
+                .collect()
+        })
+        .await
+        .map_err(worker)
+    }
     async fn list_runs(&self, session: &str) -> Result<Vec<ManagedRun>, StateError> {
         let id = session.to_owned();
         self.execute(move |c| { let mut q=c.prepare("SELECT record FROM ef_runs WHERE session_id=?1 OR owner_session_id=?1 ORDER BY rowid").map_err(sql)?;
