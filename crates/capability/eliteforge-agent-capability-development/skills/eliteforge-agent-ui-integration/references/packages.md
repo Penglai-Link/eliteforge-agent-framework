@@ -44,7 +44,7 @@ npm view @personai/agent-ui-chat-react@1.0.0-preview.12 version peerDependencies
 npm ls --all
 ```
 
-`latest` / `next` 是可移动标签，不是版本一致性的证明。检查锁文件中的所有 Agent UI 项，包括间接依赖，确认版本一致、没有 `link: true` 或 `file:`，且 resolved 指向公共 npm tarball；再检查实际安装包的 realpath。
+`latest` 默认指向最近一次正式或预发布版本，`next` 等附加标签也可能存在；它们都是可移动标签，不是版本一致性的证明。检查锁文件中的所有 Agent UI 项，包括间接依赖，确认版本一致、没有 `link: true` 或 `file:`，且 resolved 指向公共 npm tarball；再检查实际安装包的 realpath。
 
 从本地依赖迁移时，清理 manifest/lockfile、bundler alias、TS paths、prepare/build 脚本及 `.agent-deps` 遗留软链接。删除软链接本身，不删除它指向的源码仓库。Agent UI 自身 monorepo 的工作区链接不属于宿主迁移范围。
 
