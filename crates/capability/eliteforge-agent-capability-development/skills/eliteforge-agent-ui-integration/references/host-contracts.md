@@ -151,6 +151,16 @@ stateDiagram-v2
     运行中 --> 已结束: 完成、失败或停止
 ```
 
+## 对话历史定位栏（`1.0.0-preview.12`）
+
+React `ChatRuntimeWindow` / `ChatPanel` / `ChatWindow` 与 Vue `ChatRuntimeWindow` / `ChatPanel` 默认显示左侧历史定位栏；宿主可用 React `showHistoryRail={false}`、Vue `:show-history-rail="false"` 关闭。Vue `ChatWindow` 的类型虽包含 `showHistoryRail`，当前源码未把它传给内部 `ChatPanel`，需要关闭时先核对目标版本或改用 `ChatPanel`。它只影响展示，不改变后端历史读取或 `loadHistory` 契约。
+
+索引绝对定位在聊天左侧既有留白内，不占用正文和输入框宽度；普通轮次为微点，当前轮次为短竖线。悬停或键盘聚焦显示问题与最多两行纯文本回复摘要；点击、Enter 或空格只滚动正文，方向键、Home/End 选择轮次，Escape 关闭预览。长历史索引在自身范围内滚动，跳转遵循 MotionProvider 与系统减少动效设置。
+
+主题通过 `data-theme-part="chat-history"` 和 `--agent-ui-chat-history-*` 调整；变量清单与默认值见主题 skill 的 Chat 主题契约。接入时按宿主既有留白核对 16px 点击区域，不通过增加正文 padding 容纳索引。
+
+源码导航：`packages/chat-core/src/history-rail.css`、两端 `src/chatHistory.ts`、`packages/chat-react/src/ChatHistoryRail.tsx`、`packages/chat-vue/src/components/ChatHistoryRail.vue`、两端 Chat README。
+
 ## 工具分组总数
 
 当前源码中，React/Vue 工具分组标题只显示已开始的工具调用总数，使用 `workRailLabels.tool.group(count)`，例如“13 个工具调用”；失败的调用也计入总数，一次批量调用计为一次。分组不再按命令、搜索、读写或其他操作分类统计，旧 `groupSummary` 回调保留类型兼容但不再调用。展开后的工具明细保持原有展示。消费方需安装包含此变更的 npm 版本后生效。

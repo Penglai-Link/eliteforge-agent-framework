@@ -21,6 +21,6 @@ flowchart LR
 
 Framework 或 Agent UI 接口变化时，在对应代码改动中同步本目录，更新受影响技能的 `metadata.version`，并核对 `agents/openai.yaml`。Framework 根目录 `skills/` 与 Agent UI 仓库只保留维护指引，不保留技能副本。引用中的 Framework/UI 源码路径均相对于各自仓库根目录；npm 和 Git 版本基线仍以技能正文为准。
 
-Tron 生成器和完整模板直接维护在本技能的 `assets/tron-harness-cap-template/`，不再维护独立模板项目。修改后在 Tron 执行 `make development-skills-sync` 更新随附技能。技能分发必须保留完整目录，不能只复制 `SKILL.md`。
+Tron 生成器和完整模板直接维护在本技能的 `assets/tron-harness-cap-template/`，不再维护独立模板项目。修改后发布 Framework 更新，由 Tron 更新依赖锁定版本并重新构建。技能分发必须保留完整目录，不能只复制 `SKILL.md`。
 
 在 Framework 根目录执行 `make development-capability-check` 校验技能并编译能力包；Tron 通过能力包依赖完成默认装配，在 Tron 根目录执行 `make be-check` 检查宿主接入。不需要新增测试代码。

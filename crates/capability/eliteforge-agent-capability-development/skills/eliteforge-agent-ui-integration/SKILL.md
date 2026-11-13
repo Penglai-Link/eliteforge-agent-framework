@@ -2,7 +2,7 @@
 name: eliteforge-agent-ui-integration
 description: "指导其他 agent 将 @personai/agent-ui-* npm 包接入 React/Vue 或浏览器应用，包括包选择、统一版本、样式、ChatAdapter、A2UI action、Composer 回调和终端 transport；也用于从本地链接迁移到 npm。"
 metadata:
-  version: 1.0.14
+  version: 1.0.15
 ---
 
 # EliteForge Agent UI 对接
@@ -39,7 +39,7 @@ metadata:
 
 - 所有已使用的 `@personai/agent-ui-*` 版本一致，锁文件解析到 npm tarball；`npm ls --all` 无缺失或无效依赖。
 - 检查 manifest、lockfile、构建 alias、TS paths、安装脚本和 `.agent-deps`；实际安装路径不得指向本地 Agent UI 源码。检查嵌套依赖，不能只检查顶层版本号。
-- 按本次接入范围验证：消息发送/恢复/停止、输入法与附件、A2UI action、主题切换、终端连接/resize/dispose；未实现能力不要声明为支持。
+- 按本次接入范围验证：消息发送/恢复/停止、历史定位栏的默认显示与关闭、输入法与附件、A2UI action、主题切换、终端连接/resize/dispose；未实现能力不要声明为支持。
 - 汇报修改的宿主项目、分支、包版本、真实后端覆盖及未完成事项。安装成功、构建成功与端到端通过是不同结论。
 
 ## 维护依据
