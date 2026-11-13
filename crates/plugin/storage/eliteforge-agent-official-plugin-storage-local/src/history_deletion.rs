@@ -155,26 +155,46 @@ pub(super) fn delete(
 }
 
 fn rebase(c: &rusqlite::Connection, session: &str, root: &str) -> Result<(), StateError> {
-    let branches: Vec<(String, String, String)> = {
-        let mut q = c
-            .prepare("SELECT branch,generation,messages FROM ef_conversations WHERE session=?1")
+    // Select only affected generations, then read all their spans in one query.
+    // All reads and rewrites remain inside delete()'s transaction and busy fence.
+    let mut spans_by_branch =
+        std::collections::BTreeMap::<(String, String), Vec<(String, usize, usize, bool)>>::new();
+    {
+        let mut q = c.prepare("SELECT s.branch,s.generation,s.run_id,s.start,s.end,r.root_run_id=?2 FROM ef_history_transcript_spans s JOIN ef_history_runs r ON r.id=s.run_id JOIN ef_conversations v ON v.session=s.session_id AND v.branch=s.branch AND v.generation=s.generation WHERE s.session_id=?1 AND EXISTS(SELECT 1 FROM ef_history_transcript_spans d JOIN ef_history_runs dr ON dr.id=d.run_id WHERE d.session_id=s.session_id AND d.branch=s.branch AND d.generation=s.generation AND dr.root_run_id=?2) ORDER BY s.branch,s.generation,s.start").map_err(sql)?;
+        let rows = q
+            .query_map(params![session, root], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
             .map_err(sql)?;
-        q.query_map([session], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(sql)?
-            .collect::<Result<_, _>>()
-            .map_err(sql)?
+        for row in rows {
+            let (branch, generation, run, start, end, deleted) = row.map_err(sql)?;
+            spans_by_branch
+                .entry((branch, generation))
+                .or_default()
+                .push((run, start, end, deleted));
+        }
+    }
+    let branches: Vec<(String, String, String)> = {
+        let mut q = c.prepare("SELECT v.branch,v.generation,v.messages FROM ef_conversations v WHERE v.session=?1 AND EXISTS(SELECT 1 FROM ef_history_transcript_spans s JOIN ef_history_runs r ON r.id=s.run_id WHERE s.session_id=v.session AND s.branch=v.branch AND s.generation=v.generation AND r.root_run_id=?2)").map_err(sql)?;
+        q.query_map(params![session, root], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .map_err(sql)?
+        .collect::<Result<_, _>>()
+        .map_err(sql)?
     };
     for (branch, generation, data) in branches {
         let mut messages: Vec<Message> = decode(data)?;
-        let spans: Vec<(String, usize, usize, bool)> = {
-            let mut q = c.prepare("SELECT s.run_id,s.start,s.end,r.root_run_id=?4 FROM ef_history_transcript_spans s JOIN ef_history_runs r ON r.id=s.run_id WHERE s.session_id=?1 AND s.branch=?2 AND s.generation=?3 ORDER BY s.start").map_err(sql)?;
-            q.query_map(params![session, branch, generation, root], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
-            .map_err(sql)?
-            .collect::<Result<_, _>>()
-            .map_err(sql)?
-        };
+        let spans = spans_by_branch
+            .remove(&(branch.clone(), generation))
+            .unwrap_or_default();
         // Unrelated conversation branches are unaffected.
         if !spans.iter().any(|(_, _, _, deleted)| *deleted) {
             continue;

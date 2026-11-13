@@ -65,8 +65,41 @@ pub(crate) fn managed_run(
         run.status,
         ManagedRunStatus::Cancelled | ManagedRunStatus::Failed | ManagedRunStatus::RecoveryRequired
     ) {
-        interrupt_unfinished(c, run.id)?;
+        interrupt_unfinished(c, &[run.id])?;
     }
+    put_managed_run(c, run, owner)
+}
+
+pub(crate) fn managed_runs(
+    c: &rusqlite::Connection,
+    runs: &[(ManagedRun, String)],
+) -> Result<(), StateError> {
+    let interrupted = runs
+        .iter()
+        .filter(|(run, _)| {
+            matches!(
+                run.status,
+                ManagedRunStatus::Cancelled
+                    | ManagedRunStatus::Failed
+                    | ManagedRunStatus::RecoveryRequired
+            )
+        })
+        .map(|(run, _)| run.id)
+        .collect::<Vec<_>>();
+    if !interrupted.is_empty() {
+        interrupt_unfinished(c, &interrupted)?;
+    }
+    for (run, owner) in runs {
+        put_managed_run(c, run, owner)?;
+    }
+    Ok(())
+}
+
+fn put_managed_run(
+    c: &rusqlite::Connection,
+    run: &ManagedRun,
+    owner: &str,
+) -> Result<(), StateError> {
     put_run(
         c,
         &HistoryRun {
@@ -89,9 +122,10 @@ pub(crate) fn managed_run(
         owner,
     )
 }
-fn interrupt_unfinished(c: &rusqlite::Connection, run: RunId) -> Result<(), StateError> {
+fn interrupt_unfinished(c: &rusqlite::Connection, runs: &[RunId]) -> Result<(), StateError> {
     let now = unix_time_ms();
-    for mut record in records::<HistoryMessage>(c, "ef_history_messages", run)? {
+    let runs = encode(&runs)?;
+    for mut record in records::<HistoryMessage>(c, "ef_history_messages", &runs)? {
         if record.status == HistoryStatus::Running {
             record.status = HistoryStatus::Interrupted;
             c.execute(
@@ -101,7 +135,7 @@ fn interrupt_unfinished(c: &rusqlite::Connection, run: RunId) -> Result<(), Stat
             .map_err(sql)?;
         }
     }
-    for mut record in records::<HistoryStep>(c, "ef_history_steps", run)? {
+    for mut record in records::<HistoryStep>(c, "ef_history_steps", &runs)? {
         if record.status == HistoryStatus::Running {
             record.status = HistoryStatus::Interrupted;
             record.finished_at_ms = Some(now);
@@ -112,7 +146,7 @@ fn interrupt_unfinished(c: &rusqlite::Connection, run: RunId) -> Result<(), Stat
             .map_err(sql)?;
         }
     }
-    for mut record in records::<HistoryToolInvocation>(c, "ef_history_tools", run)? {
+    for mut record in records::<HistoryToolInvocation>(c, "ef_history_tools", &runs)? {
         if record.status == HistoryStatus::Running {
             record.status = HistoryStatus::Unknown;
             c.execute(
@@ -293,14 +327,14 @@ pub(crate) fn answer(
 fn records<T: DeserializeOwned>(
     c: &rusqlite::Connection,
     table: &str,
-    run: RunId,
+    runs: &str,
 ) -> Result<Vec<T>, StateError> {
     let mut q = c
         .prepare(&format!(
-            "SELECT record FROM {table} WHERE run_id=?1 ORDER BY position"
+            "SELECT record FROM {table} WHERE run_id IN (SELECT value FROM json_each(?1)) AND json_extract(record,'$.status')='Running' ORDER BY run_id,position"
         ))
         .map_err(sql)?;
-    q.query_map([run.to_string()], |r| r.get(0))
+    q.query_map([runs], |r| r.get(0))
         .map_err(sql)?
         .map(|r| decode(r.map_err(sql)?))
         .collect()
