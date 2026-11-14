@@ -5,6 +5,7 @@ members = [
     "crates/capability/eliteforge-agent-capability-auto-routing",
     "crates/capability/eliteforge-agent-capability-external",
     "crates/capability/eliteforge-agent-capability-personai",
+    "crates/capability/eliteforge-agent-capability-remote-access",
     "crates/framework/eliteforge-agent-capability-macros",
     "crates/framework/eliteforge-agent-capability-runtime",
     "crates/framework/eliteforge-agent-context-contracts",

@@ -1169,6 +1169,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "eliteforge-agent-capability-remote-access"
+version = "1.0.0"
+dependencies = [
+ "async-trait",
+ "eliteforge-agent-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "eliteforge-agent-capability-runtime"
 version = "1.0.0"
 dependencies = [
