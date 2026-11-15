@@ -1,0 +1,18 @@
+[package]
+name = "eliteforge-agent-remote-protocol"
+description = "Wire protocol, pairing, identity and frames for PersonAI remote access"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+base64 = "0.22"
+rand = "0.9"
+sha2 = "0.10"
+url = "2"
+hex = "0.4"
