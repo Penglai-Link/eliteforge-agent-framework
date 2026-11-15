@@ -292,13 +292,27 @@ impl RemoteAccessService {
             .await
             .map_err(RemoteError::Store)?;
         *self.settings.write().await = settings;
-        self.active.store(enabled, Ordering::Relaxed);
-        if enabled {
-            self.refresh_pairing().await.ok();
-        } else {
+        // The listener supervisor owns `active`: enabling settings is not the
+        // same as having successfully bound the remote listener.
+        if !enabled {
+            self.active.store(false, Ordering::Relaxed);
             *self.ticket.write().await = None;
         }
+        if enabled {
+            self.refresh_pairing().await.ok();
+        }
         Ok(self.status().await)
+    }
+
+    /// Records whether the dedicated listener is currently bound. Called by
+    /// the host listener supervisor, never by settings changes directly.
+    pub fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Relaxed);
+    }
+
+    /// Snapshot of the current service settings for host-side synchronization.
+    pub async fn current_settings(&self) -> RemoteSettings {
+        self.settings.read().await.clone()
     }
 
     pub async fn devices(&self) -> Vec<DeviceSummary> {
