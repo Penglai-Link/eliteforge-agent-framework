@@ -136,6 +136,10 @@ pub struct SessionHistoryParams {
     pub cursor: Option<String>,
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Product-specific context (for example a Dude code) the client already
+    /// knows; the pack may forward it to the product's own API.
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -195,6 +199,8 @@ pub struct SessionStopRunParams {
     pub session_id: String,
     #[serde(default)]
     pub run_id: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

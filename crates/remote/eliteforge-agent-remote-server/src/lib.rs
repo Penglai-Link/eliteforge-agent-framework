@@ -21,7 +21,7 @@ use eliteforge_agent_remote_protocol::{
 };
 use eliteforge_agent_remote_rpc::{
     EventEmitter, RemotePack, RemotePrincipal, RpcError, RpcRegistry, SessionCreateParams,
-    SessionHistoryParams, SessionListParams, SessionSendMessageParams,
+    SessionHistoryParams, SessionListParams, SessionRpc, SessionSendMessageParams,
     SessionStopRunParams, SessionUnwatchEventsParams, SessionWatchEventsParams,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -346,6 +346,24 @@ impl RemoteAccessService {
         let snapshot = devices.clone();
         drop(devices);
         self.refresh_pairing().await.ok();
+        self.store
+            .save_devices(&snapshot)
+            .await
+            .map_err(RemoteError::Store)
+    }
+
+    /// Permanently removes a pairing record. Revoking keeps the row for audit
+    /// and blocks the device; removing drops the record after the user cleans
+    /// up a stale pairing.
+    pub async fn remove_device(&self, device_id: &str) -> Result<(), RemoteError> {
+        let mut devices = self.devices.write().await;
+        let original = devices.len();
+        devices.retain(|device| device.device_id != device_id);
+        if devices.len() == original {
+            return Err(RemoteError::DeviceNotFound);
+        }
+        let snapshot = devices.clone();
+        drop(devices);
         self.store
             .save_devices(&snapshot)
             .await
@@ -740,6 +758,61 @@ async fn handle_socket(
     Ok(())
 }
 
+/// Upper bound for draining queued events after a streaming call returns.
+/// It is a safety valve, not a delay: the forwarder ends as soon as the
+/// product drops its `EventEmitter`.
+const EVENT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Methods that emit a stream of AG-UI events in addition to their result.
+fn is_streaming_rpc_method(method: &str) -> bool {
+    matches!(
+        method,
+        eliteforge_agent_remote_rpc::SESSION_SEND_MESSAGE
+            | eliteforge_agent_remote_rpc::SESSION_WATCH_EVENTS
+    )
+}
+
+fn session_rpc(service: &Arc<RemoteAccessService>) -> Result<Arc<dyn SessionRpc>, RpcError> {
+    service
+        .registry
+        .session_rpc()
+        .ok_or_else(|| RpcError::unsupported("session RPC is not implemented by this product"))
+}
+
+/// Streaming calls parse their params before the event channel exists, so a
+/// malformed request never leaves a sender open.
+enum StreamingCall {
+    SendMessage(SessionSendMessageParams),
+    WatchEvents(SessionWatchEventsParams),
+}
+
+fn parse_streaming_call(method: &str, params: Value) -> Result<StreamingCall, RpcError> {
+    match method {
+        eliteforge_agent_remote_rpc::SESSION_SEND_MESSAGE => serde_json::from_value(params)
+            .map(StreamingCall::SendMessage)
+            .map_err(|e| RpcError::invalid_params(e.to_string())),
+        eliteforge_agent_remote_rpc::SESSION_WATCH_EVENTS => serde_json::from_value(params)
+            .map(StreamingCall::WatchEvents)
+            .map_err(|e| RpcError::invalid_params(e.to_string())),
+        other => Err(RpcError::unsupported(format!(
+            "{other} is not a streaming method"
+        ))),
+    }
+}
+
+fn json_value<T: serde::Serialize>(value: T) -> Result<Value, RpcError> {
+    serde_json::to_value(value).map_err(|e| RpcError::internal(e.to_string()))
+}
+
+fn send_rpc_result(out: &mpsc::UnboundedSender<WireFrame>, id: u64, result: Value) {
+    let _ = out.send(WireFrame::RpcResult { id, result });
+    let _ = out.send(WireFrame::RpcEnd { id });
+}
+
+/// Dispatches one RPC on the path its method needs. Streaming and unary calls
+/// used to share one event channel; the unary path then waited on a sender
+/// that only closed when the request ended, adding a fixed 5s to every plain
+/// call (workspaces, session groups, dudes, products, ...).
 async fn dispatch_rpc(
     service: &Arc<RemoteAccessService>,
     principal: &RemotePrincipal,
@@ -749,12 +822,71 @@ async fn dispatch_rpc(
     out: mpsc::UnboundedSender<WireFrame>,
     cancel: CancellationToken,
 ) -> Result<(), RpcError> {
-    // EventEmitter is the RPC output side. A small forwarding task maps AG-UI
-    // values to WireFrame::RpcEvent frames.
+    if is_streaming_rpc_method(method) {
+        dispatch_streaming_rpc(service, principal, id, method, params, out, cancel).await
+    } else {
+        dispatch_unary_rpc(service, principal, id, method, params, out).await
+    }
+}
+
+/// One request, one result. These methods cannot emit AG-UI events, so there
+/// is no channel to drain and no reason to wait.
+async fn dispatch_unary_rpc(
+    service: &Arc<RemoteAccessService>,
+    principal: &RemotePrincipal,
+    id: u64,
+    method: &str,
+    params: Value,
+    out: mpsc::UnboundedSender<WireFrame>,
+) -> Result<(), RpcError> {
+    let session = session_rpc(service)?;
+    let result = match method {
+        eliteforge_agent_remote_rpc::SESSION_LIST => {
+            let params = serde_json::from_value::<SessionListParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            serde_json::to_value(session.list(principal, params).await?).map_err(|e| RpcError::internal(e.to_string()))?
+        }
+        eliteforge_agent_remote_rpc::SESSION_HISTORY => {
+            let params = serde_json::from_value::<SessionHistoryParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            serde_json::to_value(session.history(principal, params).await?).map_err(|e| RpcError::internal(e.to_string()))?
+        }
+        eliteforge_agent_remote_rpc::SESSION_CREATE => {
+            let params = serde_json::from_value::<SessionCreateParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            serde_json::to_value(session.create(principal, params).await?).map_err(|e| RpcError::internal(e.to_string()))?
+        }
+        eliteforge_agent_remote_rpc::SESSION_STOP_RUN => {
+            let params = serde_json::from_value::<SessionStopRunParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            serde_json::to_value(session.stop_run(principal, params).await?).map_err(|e| RpcError::internal(e.to_string()))?
+        }
+        eliteforge_agent_remote_rpc::SESSION_UNWATCH_EVENTS => {
+            let params = serde_json::from_value::<SessionUnwatchEventsParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+            session.unwatch_events(principal, params).await?;
+            Value::Null
+        }
+        other => service.registry.dispatch(principal, other, params).await?,
+    };
+    send_rpc_result(&out, id, result);
+    Ok(())
+}
+
+/// Forwards events while the product runs. When the call returns, its
+/// `EventEmitter` is dropped, so awaiting the forwarder drains only the events
+/// still queued; that ordering is what keeps `rpc_result`/`rpc_end` last.
+async fn dispatch_streaming_rpc(
+    service: &Arc<RemoteAccessService>,
+    principal: &RemotePrincipal,
+    id: u64,
+    method: &str,
+    params: Value,
+    out: mpsc::UnboundedSender<WireFrame>,
+    cancel: CancellationToken,
+) -> Result<(), RpcError> {
+    let session = session_rpc(service)?;
+    let call = parse_streaming_call(method, params)?;
+
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Value>();
-    let events = EventEmitter::new(event_tx, cancel.clone());
+    let events = EventEmitter::new(event_tx, cancel);
     let out_for_events = out.clone();
-    let mut event_task = tokio::spawn(async move {
+    let mut forward = tokio::spawn(async move {
         let mut seq = 0u64;
         while let Some(data) = event_rx.recv().await {
             seq = seq.saturating_add(1);
@@ -770,52 +902,25 @@ async fn dispatch_rpc(
             }
         }
     });
-    let session = service
-        .registry
-        .session_rpc()
-        .ok_or_else(|| RpcError::unsupported("session RPC is not implemented by this product"))?;
-    let result = match method {
-        eliteforge_agent_remote_rpc::SESSION_LIST => {
-            let params = serde_json::from_value::<SessionListParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
-            serde_json::to_value(session.list(principal, params).await?).map_err(|e| RpcError::internal(e.to_string()))?
-        }
-        eliteforge_agent_remote_rpc::SESSION_HISTORY => {
-            let params = serde_json::from_value::<SessionHistoryParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
-            serde_json::to_value(session.history(principal, params).await?).map_err(|e| RpcError::internal(e.to_string()))?
-        }
-        eliteforge_agent_remote_rpc::SESSION_CREATE => {
-            let params = serde_json::from_value::<SessionCreateParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
-            serde_json::to_value(session.create(principal, params).await?).map_err(|e| RpcError::internal(e.to_string()))?
-        }
-        eliteforge_agent_remote_rpc::SESSION_SEND_MESSAGE => {
-            let params = serde_json::from_value::<SessionSendMessageParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
-            let result = session.send_message(principal, params, events).await?;
-            serde_json::to_value(result).map_err(|e| RpcError::internal(e.to_string()))?
-        }
-        eliteforge_agent_remote_rpc::SESSION_STOP_RUN => {
-            let params = serde_json::from_value::<SessionStopRunParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
-            serde_json::to_value(session.stop_run(principal, params).await?).map_err(|e| RpcError::internal(e.to_string()))?
-        }
-        eliteforge_agent_remote_rpc::SESSION_WATCH_EVENTS => {
-            let params = serde_json::from_value::<SessionWatchEventsParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
-            let result = session.watch_events(principal, params, events).await?;
-            serde_json::to_value(result).map_err(|e| RpcError::internal(e.to_string()))?
-        }
-        eliteforge_agent_remote_rpc::SESSION_UNWATCH_EVENTS => {
-            let params = serde_json::from_value::<SessionUnwatchEventsParams>(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
-            session.unwatch_events(principal, params).await?;
-            Value::Null
-        }
-        other => service.registry.dispatch(principal, other, params).await?,
+
+    let outcome = match call {
+        StreamingCall::SendMessage(params) => session
+            .send_message(principal, params, events)
+            .await
+            .and_then(json_value),
+        StreamingCall::WatchEvents(params) => session
+            .watch_events(principal, params, events)
+            .await
+            .and_then(json_value),
     };
-    if tokio::time::timeout(std::time::Duration::from_secs(5), &mut event_task)
+    // Never let a failure overtake events the product already emitted.
+    if tokio::time::timeout(EVENT_DRAIN_TIMEOUT, &mut forward)
         .await
         .is_err()
     {
-        event_task.abort();
+        forward.abort();
     }
-    let _ = out.send(WireFrame::RpcResult { id, result });
-    let _ = out.send(WireFrame::RpcEnd { id });
+    send_rpc_result(&out, id, outcome?);
     Ok(())
 }
 
