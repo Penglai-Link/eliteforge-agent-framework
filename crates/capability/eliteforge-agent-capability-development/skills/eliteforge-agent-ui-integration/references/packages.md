@@ -14,6 +14,8 @@
 | 自定义动效 | `motion-react` / `motion-vue` | `MotionProvider`、`AgentMotion`、`useMotion` |
 | 动效公共参数与策略样式 | `motion-core` | 框架动效包依赖它 |
 | 浏览器终端 | `terminal` | `initTerminal`、`TerminalTransport`、`AITransport` |
+| React Native 聊天 | `chat-react-native` | `ChatPanel`、`MessageBubble`、`ToolCard`、`ApprovalCard` |
+| React Native A2UI | `a2ui-react-native` | `A2UISurface`、`A2UIRenderer` |
 
 Chat 与 A2UI 的框架包也重导出 MotionProvider 等动效 API，无需仅为 Provider 重复安装框架 motion 包。直接从某个包导入时，应在宿主清单中声明该包，不依赖偶然的依赖提升。
 
@@ -28,10 +30,10 @@ Chat 与 A2UI 的框架包也重导出 MotionProvider 等动效 API，无需仅�
 当前基线 React 聊天示例：
 
 ```sh
-npm install --save-exact @personai/agent-ui-chat-react@1.0.0-preview.16 @personai/agent-ui-chat-core@1.0.0-preview.16
+npm install --save-exact @personai/agent-ui-chat-react@1.0.0-preview.21 @personai/agent-ui-chat-core@1.0.0-preview.21
 ```
 
-Vue 将 `chat-react` 换成 `chat-vue`。需要完整全局主题时另装同版本 `chat-theme`；其他包按表选择。所有包都是 ESM，构建工具需要处理对应 CSS。
+Vue 将 `chat-react` 换成 `chat-vue`；React Native 使用 `chat-react-native`（peer 为 `react`/`react-native`，无 CSS 入口）。需要完整全局主题时另装同版本 `chat-theme`；其他包按表选择。所有包都是 ESM，构建工具需要处理对应 CSS。
 
 当前 React 包要求 React `^19.2.5`（Chat 还要求同范围 react-dom）；Vue Chat/Composer/Motion 要求 Vue `^3.5.18`，A2UI Vue 要求 `^3.5.0`。图标、Markdown 与终端 xterm peers 以目标包元数据为准；不要用强制忽略 peer 冲突作为默认方案。
 
@@ -40,7 +42,7 @@ Vue 将 `chat-react` 换成 `chat-vue`。需要完整全局主题时另装同版
 核查版本、依赖与安装来源：
 
 ```sh
-npm view @personai/agent-ui-chat-react@1.0.0-preview.16 version peerDependencies exports --json --registry=https://registry.npmjs.org/
+npm view @personai/agent-ui-chat-react@1.0.0-preview.21 version peerDependencies exports --json --registry=https://registry.npmjs.org/
 npm ls --all
 ```
 
