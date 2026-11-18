@@ -2,7 +2,7 @@
 name: eliteforge-agent-ui-integration
 description: "指导其他 agent 将 @personai/agent-ui-* npm 包接入 React/Vue 或浏览器应用，包括包选择、统一版本、样式、ChatAdapter、A2UI action、Composer 回调和终端 transport；也用于从本地链接迁移到 npm。"
 metadata:
-  version: 1.0.18
+  version: 1.0.21
 ---
 
 # EliteForge Agent UI 对接
@@ -32,7 +32,7 @@ metadata:
 - A2UI 每条消息包含 `version` 和一个操作，`surfaceId`、`components` 放在操作对象内。`1.0.0-preview.4` 支持 `TextField.placeholder` 字符串/路径绑定；启用时必须核对前后端 Catalog 和渲染版本，不将提示作为字段值。
 - A2UI Surface 展示消息沿用所属运行的状态，不独立代表执行中。`1.0.0-preview.4` 修复 Surface 缺少历史记录导致已完成运行持续显示“工作中”的问题；验收时同时检查历史恢复与真实执行中的状态。
 - 浏览器终端通过宿主 PTY 服务工作，不在前端创建 shell。服务端凭据、模型密钥和权限判断留在服务端。
-- React Native 宿主使用 `chat-react-native` + `a2ui-react-native`，不从 `chat-react` 或 CSS 入口取样式。RN `ToolCard` 与 Web tool row 一致：只显示简约工具名/命令计数，展开只显示操作字段，不渲染参数或结果 JSON；审批/问答用 `ApprovalCard`，A2UI 用 `ChatA2uiSession` 水合状态。
+- React Native 宿主使用 `chat-react-native` + `a2ui-react-native`，不从 `chat-react` 或 CSS 入口取样式。RN `ToolCard` 与 Web tool row 一致：只显示简约工具名/命令计数，展开只显示操作字段，不渲染参数或结果 JSON；审批/问答用 `ApprovalCard`，A2UI 用 `ChatA2uiSession` 水合状态。问答/审批卡片自带边框、圆角和内边距，宿主不要再包一层卡片；它应作为转录/消息列表的一部分按内容自然撑高，不要放进固定高度或嵌套 `ScrollView`，否则会出现内层滚动条、题头或确认按钮被裁切。提交后必须保留 `InteractionReceipt`（“已解答疑惑 / 已提供数据 / 已批准”胶囊），不要只删除待回答卡片；`ChatPanel` 会自动用 `interactionMessages` 装饰，自行组装列表时也要传入已回答的 `ChatUserInputRequest`。
 
 - `1.0.0-preview.8` 的 React/Vue 工作时间使用前端单调时钟每秒刷新，事件只提供首次历史基线；等待回答时暂停，回答确认后恢复。宿主须保留 `requestId`、`runId`、`status` 与 `answeredAt`，已回答请求不能继续显示为等待。详见宿主运行契约。
 
