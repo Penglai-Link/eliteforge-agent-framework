@@ -183,6 +183,16 @@ pub struct SessionSendMessageParams {
     pub attachments: Option<Value>,
     #[serde(default)]
     pub client_capabilities: Option<Value>,
+    /// Product-owned model selection (opaque to the framework).
+    ///
+    /// The framework never interprets it; a pack forwards it to its product so
+    /// a remote client can pick the same model as the desktop client instead of
+    /// silently falling back to a placeholder route.
+    #[serde(default)]
+    pub model_selection: Option<Value>,
+    /// Reasoning effort name (`Low`, `High`, ...); product-owned vocabulary.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub metadata: Option<Value>,
 }

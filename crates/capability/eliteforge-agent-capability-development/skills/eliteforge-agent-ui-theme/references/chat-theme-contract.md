@@ -35,6 +35,7 @@
 | Chat 面板 | `chat` | `chat` |
 | 对话历史索引 | `chat-history` | 无 |
 | 用户/助手/系统通知 | `chat-message-user` / `chat-message-assistant` / `chat-message-system` | `chat-message` |
+| 交付文件列表 | `chat-artifacts` | 无 |
 | Composer 根 | `composer` | `composer` |
 | 输入框 | `chat-input` | `chat-input` |
 | Chat 弹窗 | 按实际组件核对 | `dialog` |
@@ -42,6 +43,8 @@
 | A2UI 组件 | `a2ui-<组件名称小写>` | 按渲染实现核对 |
 
 React/Vue 对应节点保持一致；更细的 A2UI 挂点见主题文档。`data-theme-effect-layer="chat"` 是可选背景效果区域，使用 `pointer-events: none`，内容位于其上方。宿主负责效果生命周期和样式范围；公共包不接收或执行主题脚本。
+
+交付文件列表使用 `.ef-chat__artifacts*` 与 `data-theme-part="chat-artifacts"`，复用 Chat 正文、次要文字、表面、边框、主色、焦点和危险色变量，以及 `--agent-ui-control-radius`、`--agent-ui-space-*`，不新增变量。宿主可覆盖 `artifactLabels` 文案和 `artifactStates` 状态，不需要新的主题 token。
 
 ## 消息辅助操作
 

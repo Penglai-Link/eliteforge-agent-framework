@@ -21,7 +21,7 @@ tiktoken-rs = "0.12.1"
 base64 = "0.22"
 unicode-normalization = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
-crab-serverapi = { git = "https://gitee.com/person-ai/person-ai-index-rust-sdk.git", rev = "85a70d4573813596739ec0a9a6c1ce33946f1e98" }
+crab-serverapi = { git = "https://gitee.com/person-ai/person-ai-index-rust-sdk.git", rev = "d29d8ad" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "io-util"] }

@@ -23,6 +23,7 @@ flowchart LR
 | 运行中调整 | `supportsSteer` + `steerMessage`，保留运行上下文 |
 | 用户问题 | `supportsUserInputRequests` + `loadUserInputRequests` / `answerUserInputRequestStream` |
 | 附件 | `uploadAttachment` / `downloadAttachment`；请求、鉴权与存储由宿主处理 |
+| 交付文件 | `supportsArtifacts` + `artifactAction` / `artifactContentUrl`；宿主解析动作与 URL |
 | A2UI | `loadA2uiState` / `sendA2uiActionStream`；宿主恢复状态并路由操作 |
 | 删除历史轮次 | `deleteTurn(sessionId, {rootRunId, expectedVersion}, signal)`；后端保证版本检查及业务删除语义 |
 
@@ -37,7 +38,7 @@ flowchart LR
 - 将宿主错误映射为 `ChatAdapterError`，保留 code/status/details。`rejectedBeforeAdmission` 只有后端保证输入尚未保存或执行时才能设为 true，避免队列重复发送。
 - 问答与恢复请求的 question/option ID 要双向映射，包含 `resume[].payload.answers` 的嵌套字段；metadata 不替代后端权限检查。
 
-源码导航：`packages/chat-core/src/{types,history,a2ui}.ts`、两端 ChatRuntimeWindow、`docs/integration-guide.md`、`docs/chat-a2ui.md`。
+源码导航：`packages/chat-core/src/{types,history,a2ui,artifacts}.ts`、两端 ChatRuntimeWindow、`docs/integration-guide.md`、`docs/chat-a2ui.md`。
 
 ## 独立 Composer
 
@@ -68,6 +69,25 @@ client.apply({ version: 'v0.9.1', createSurface: {
 - `ChatA2uiSession.messages()` 生成的 `channel: "a2ui"` 消息只负责展示 Surface，通常没有 `history`。运行状态由同一 `runId` 的权威历史与当前执行事件决定；不能因这些展示消息缺少历史记录而重开已完成的运行，也不能仅凭 Surface 存在判定完成。该修复目前仅在源码中。
 
 源码导航：`packages/a2ui-core/src/index.ts` 及 schemas、两端 A2UI 导出、`docs/a2ui-client.md`、`docs/chat-a2ui.md`。
+
+## 交付文件（Artifacts）
+
+完成的助手消息可用 `ChatMessage.artifacts` 携带扁平文件列表。宿主负责合并、去重和按客户端计算 `actions`；UI 不接收文件路径或 `source` 对象：
+
+```ts
+interface ChatArtifacts {
+  version: "v1";
+  items: ChatArtifactItem[];
+}
+```
+
+- `actions` 是权威列表，只接受 `preview`、`open`、`reveal`、`save`；`actions[0]` 为主按钮，其余进入溢出菜单。缺省或空数组表示只展示、不显示按钮。
+- `parseArtifacts` 对未知 `version`、非数组 `items` 和缺少 `id` / `display` 的条目返回 `null` 或丢弃条目，从不抛错；空 `items` 不渲染。协议版本 `v1` 与 npm 包版本无关。
+- 超过 `ARTIFACT_COLLAPSED_COUNT`（4）项时折叠。`states` 按条目 id 标记 `pending` / `failed`，失败时 UI 重试上次动作（缺省为主按钮）。
+- React/Vue adapter 实现 `artifactAction(session, { runId, itemId, action }, signal)` 执行 `open` / `reveal` / `save`，以及 `artifactContentUrl(session, { runId, itemId, disposition })` 返回 `inline` / `attachment` URL；仅在后端支持时声明 `supportsArtifacts`。运行时预览用 `inline` URL 打开新标签页，`onArtifactPreview` 可替换。
+- React/Vue 组件 props 一致：`artifacts`、`onAction`、`onPreview`、`labels`、`locale`、`states`。RN 使用 `ArtifactList`，动作是内联按钮行；没有宿主 `onPreview` 时不显示预览，也不自行打开 URL。
+
+源码导航：`packages/chat-core/src/{artifacts,types}.ts`、`packages/chat-react/src/ChatArtifacts.tsx`、`packages/chat-vue/src/components/ChatArtifacts.vue`、`packages/chat-react-native/src/ArtifactList.tsx`、`docs/integration-guide.md`、`docs/react-native.md`。
 
 ## Motion 与主题
 
