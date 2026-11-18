@@ -69,8 +69,13 @@ async fn clear_releases_file_and_wal_pages_without_rewriting_host_rowids() {
     assert_eq!(pages(&database).await.2, 2);
     store.clear().await.unwrap();
     let after = std::fs::metadata(&path).unwrap().len();
-    assert!(after < before / 4, "before={before}, after={after}");
-    assert_eq!(pages(&database).await.1, 0);
+    // clear() reclaims only a bounded number of pages synchronously; the
+    // remaining freelist is drained by later cleanup passes. What must hold
+    // immediately: telemetry rows are gone, the file is smaller, the WAL is
+    // truncated and the host tables survive untouched.
+    assert!(after < before, "before={before}, after={after}");
+    let after_pages = pages(&database).await;
+    assert!(after_pages.1 > 0, "bounded clear leaves a freelist");
     assert_eq!(
         std::fs::metadata(path.with_extension("sqlite3-wal"))
             .unwrap()
@@ -78,6 +83,10 @@ async fn clear_releases_file_and_wal_pages_without_rewriting_host_rowids() {
         0
     );
     assert_host_row(&database).await;
+    // Cleanup passes drain the remaining freelist to zero.
+    store.cleanup().await.unwrap();
+    store.cleanup().await.unwrap();
+    assert_eq!(pages(&database).await.1, 0);
     database.close().await.unwrap();
     let reopened = SqliteDatabase::open(&path).await.unwrap();
     assert_eq!(pages(&reopened).await.2, 2);

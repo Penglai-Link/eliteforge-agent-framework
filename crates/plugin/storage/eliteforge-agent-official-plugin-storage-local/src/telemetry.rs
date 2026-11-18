@@ -49,6 +49,25 @@ impl SqliteTelemetryStore {
         let had_span_attributes:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ef_telemetry_span_attributes')",[],|r|r.get(0))?;
         let had_trace_attributes:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ef_telemetry_trace_attributes')",[],|r|r.get(0))?;
         let had_attributes:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='ef_telemetry_metric_attributes')",[],|r|r.get(0))?;
+        Self::create_schema(c)?;
+        if !had_span_attributes {c.execute_batch("INSERT OR IGNORE INTO ef_telemetry_span_attributes SELECT s.trace_id,s.span_id,json_extract(s.data,'$.name'),a.key,CAST(a.value AS REAL) FROM ef_telemetry_spans s,json_each(s.data,'$.attributes') a;")?;}
+        if !had_trace_attributes {c.execute_batch("INSERT OR IGNORE INTO ef_telemetry_trace_attributes SELECT t.trace_id,a.key,a.value FROM ef_telemetry_traces t,json_each(t.attributes) a WHERE a.type='text';")?;}
+        if !had_attributes {
+            c.execute_batch("INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT p.point_id,a.key,a.value,p.name,p.timestamp FROM ef_telemetry_metric_points p,json_each(p.data,'$.resource') a WHERE a.type='text';
+            INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT p.point_id,json_extract(a.value,'$.key'),json_extract(a.value,'$.value.stringValue'),p.name,p.timestamp FROM ef_telemetry_metric_points p,json_each(p.data,'$.data.attributes') a WHERE json_type(a.value,'$.value.stringValue')='text';")?;
+        }
+        Ok(())}).await.map_err(error)?;
+        database.call(rollups::backfill).await.map_err(error)?;
+        let store = Self {
+            database,
+            retention,
+        };
+        store.cleanup().await?;
+        Ok(store)
+    }
+    /// Host-neutral schema, indexes and triggers. Idempotent; safe to replay
+    /// after a destructive clear. Host-specific indexes are added by the host.
+    pub(super) fn create_schema(c: &Connection) -> rusqlite::Result<()> {
         c.execute_batch("CREATE TABLE IF NOT EXISTS ef_telemetry_traces (trace_id TEXT PRIMARY KEY,started_at INTEGER NOT NULL,ended_at INTEGER,status_code INTEGER NOT NULL,attributes TEXT NOT NULL,abandoned INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS ef_telemetry_trace_attributes(trace_id TEXT NOT NULL REFERENCES ef_telemetry_traces(trace_id) ON DELETE CASCADE,attribute TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(attribute,value,trace_id));
         CREATE INDEX IF NOT EXISTS ef_telemetry_trace_attribute_trace ON ef_telemetry_trace_attributes(trace_id);
@@ -76,21 +95,7 @@ impl SqliteTelemetryStore {
           INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT NEW.point_id,key,value,NEW.name,NEW.timestamp FROM json_each(NEW.data,'$.resource') WHERE type='text';
           INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT NEW.point_id,json_extract(value,'$.key'),json_extract(value,'$.value.stringValue'),NEW.name,NEW.timestamp FROM json_each(NEW.data,'$.data.attributes') WHERE json_type(value,'$.value.stringValue')='text';
         END;
-        UPDATE ef_telemetry_traces SET abandoned=1,ended_at=COALESCE((SELECT MAX(ended_at) FROM ef_telemetry_spans s WHERE s.trace_id=ef_telemetry_traces.trace_id),started_at) WHERE ended_at IS NULL;")?;
-        if !had_span_attributes {c.execute_batch("INSERT OR IGNORE INTO ef_telemetry_span_attributes SELECT s.trace_id,s.span_id,json_extract(s.data,'$.name'),a.key,CAST(a.value AS REAL) FROM ef_telemetry_spans s,json_each(s.data,'$.attributes') a;")?;}
-        if !had_trace_attributes {c.execute_batch("INSERT OR IGNORE INTO ef_telemetry_trace_attributes SELECT t.trace_id,a.key,a.value FROM ef_telemetry_traces t,json_each(t.attributes) a WHERE a.type='text';")?;}
-        if !had_attributes {
-            c.execute_batch("INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT p.point_id,a.key,a.value,p.name,p.timestamp FROM ef_telemetry_metric_points p,json_each(p.data,'$.resource') a WHERE a.type='text';
-            INSERT OR IGNORE INTO ef_telemetry_metric_attributes SELECT p.point_id,json_extract(a.value,'$.key'),json_extract(a.value,'$.value.stringValue'),p.name,p.timestamp FROM ef_telemetry_metric_points p,json_each(p.data,'$.data.attributes') a WHERE json_type(a.value,'$.value.stringValue')='text';")?;
-        }
-        Ok(())}).await.map_err(error)?;
-        database.call(rollups::backfill).await.map_err(error)?;
-        let store = Self {
-            database,
-            retention,
-        };
-        store.cleanup().await?;
-        Ok(store)
+        UPDATE ef_telemetry_traces SET abandoned=1,ended_at=COALESCE((SELECT MAX(ended_at) FROM ef_telemetry_spans s WHERE s.trace_id=ef_telemetry_traces.trace_id),started_at) WHERE ended_at IS NULL;")
     }
     pub(super) fn clean(c: &Connection, retention: &TelemetryRetention) -> rusqlite::Result<()> {
         c.execute("DELETE FROM ef_telemetry_traces WHERE ended_at IS NOT NULL AND COALESCE(ended_at,started_at)<?1",[now().saturating_sub(retention.trace_max_age.as_millis() as i64)])?;
@@ -119,26 +124,31 @@ impl SqliteTelemetryStore {
 #[async_trait]
 impl TelemetryStore for SqliteTelemetryStore {
     async fn clear(&self) -> Result<(), TelemetryError> {
-        self.database.call(|c| {
-            let tx = c.transaction()?;
-            // Delete children in bulk before parents to avoid per-record cascades.
-            tx.execute_batch("DELETE FROM ef_telemetry_metric_attributes;
-                DELETE FROM ef_telemetry_metric_points;
-                DELETE FROM ef_telemetry_span_attributes;
-                DELETE FROM ef_telemetry_span_rollups;
-                DELETE FROM ef_telemetry_trace_rollups;
-                DELETE FROM ef_telemetry_spans;
-                DELETE FROM ef_telemetry_trace_attributes;
-                DELETE FROM ef_telemetry_traces;")?;
-            // An explicit reset should also release its now-unused pages,
-            // including when telemetry shares a database with host tables.
-            // Unlike a full VACUUM, this keeps unrelated live rowids stable.
-            Self::reclaim_free_pages(&tx, 0)?;
-            tx.commit()?;
-            // Readers can keep the WAL pinned. A busy checkpoint leaves it for
-            // normal checkpointing and does not invalidate the committed reset.
-            c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-        }).await.map_err(error)
+        self.database
+            .call(|c| {
+                // Dropping tables frees their pages to the freelist in one bulk
+                // schema operation, then the schema replay rebuilds them empty.
+                // This is far faster than row-by-row DELETE on large stores.
+                c.execute_batch(
+                    "DROP TABLE IF EXISTS ef_telemetry_metric_attributes;
+                DROP TABLE IF EXISTS ef_telemetry_metric_points;
+                DROP TABLE IF EXISTS ef_telemetry_span_attributes;
+                DROP TABLE IF EXISTS ef_telemetry_span_rollups;
+                DROP TABLE IF EXISTS ef_telemetry_trace_rollups;
+                DROP TABLE IF EXISTS ef_telemetry_spans;
+                DROP TABLE IF EXISTS ef_telemetry_trace_attributes;
+                DROP TABLE IF EXISTS ef_telemetry_traces;",
+                )?;
+                Self::create_schema(c)?;
+                // A bounded pass returns most of the freed pages immediately while
+                // staying quick; the periodic reclaimer drains the rest later.
+                Self::reclaim_free_pages(c, 1024)?;
+                // Readers can keep the WAL pinned. A busy checkpoint leaves it for
+                // normal checkpointing and does not invalidate the committed reset.
+                c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            })
+            .await
+            .map_err(error)
     }
 
     async fn register_trace(&self, t: TelemetryTrace) -> Result<(), TelemetryError> {
