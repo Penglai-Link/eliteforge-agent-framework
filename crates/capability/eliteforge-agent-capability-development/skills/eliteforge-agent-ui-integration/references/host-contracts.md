@@ -36,6 +36,7 @@ flowchart LR
 - 保留事件 ID、executionId、sourceSequence、工具调用 ID 与运行身份；不要只按时间戳排序后丢弃源顺序。续跑可有不同 executionId。
 - `TEXT_MESSAGE_END` 只关闭一条消息，不等同于整轮成功。失败、取消、等待输入时保留已收正文，不伪造成功结果。
 - 将宿主错误映射为 `ChatAdapterError`，保留 code/status/details。`rejectedBeforeAdmission` 只有后端保证输入尚未保存或执行时才能设为 true，避免队列重复发送。
+- 失败运行需要可观测入口时，在终止 `RUN_ERROR` 事件上附带 `diagnostic: { traceId, href }`。`traceId` 只接受 `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`；`href` 只接受以单个 `/` 开头的同源路径，绝对 URL、`//host` 与 `javascript:` 会被丢弃。可选 `parseChatRunDiagnostic` 在适配层归一化；`HistoryRun.error` 是字符串，不包含 trace 信息。
 - 问答与恢复请求的 question/option ID 要双向映射，包含 `resume[].payload.answers` 的嵌套字段；metadata 不替代后端权限检查。
 
 源码导航：`packages/chat-core/src/{types,history,a2ui,artifacts}.ts`、两端 ChatRuntimeWindow、`docs/integration-guide.md`、`docs/chat-a2ui.md`。
