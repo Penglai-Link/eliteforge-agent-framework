@@ -41,9 +41,14 @@ impl AgentLoop for ReactAgentLoop {
 pub(crate) struct ToolSet {
     pub(crate) by_name: HashMap<String, ToolBinding>,
     id_to_name: HashMap<String, String>,
-    /// The `tool_execute` gateway binding is installed: the model sees only
-    /// the two stable gateway tools and inner tools run through envelopes.
+    /// The `tool_execute` gateway binding is installed: the model sees the
+    /// three stable gateway tools plus explicitly whitelisted native tools,
+    /// and inner tools run through envelopes.
     pub(crate) gateway: bool,
+    /// Admitted, active tool IDs the run exposes directly beside the gateway
+    /// trio. This is an exposure choice only; the binding keeps its executor
+    /// and still passes policy, approval and audit.
+    pub(crate) native_ids: std::collections::BTreeSet<String>,
 }
 
 impl ToolSet {
@@ -55,6 +60,7 @@ impl ToolSet {
             by_name: HashMap::new(),
             id_to_name: HashMap::new(),
             gateway: false,
+            native_ids: std::collections::BTreeSet::new(),
         };
         let invoker = context
             .extensions
@@ -80,7 +86,7 @@ impl ToolSet {
                 {
                     return Err(AgentError::ToolSetup("tool IDs must be nonempty and call names must use ASCII letters, digits, underscores or hyphens".into()));
                 }
-                // Distinct provider IDs may contribute the same gateway pair;
+                // Distinct provider IDs may contribute the same gateway trio;
                 // merge their descriptors here. Registering the same plugin ID
                 // twice is still an assembly error.
                 if is_gateway_descriptor(descriptor)
@@ -109,15 +115,15 @@ impl ToolSet {
         }
         // Gateway detection: the presence of the `tool_execute` binding turns
         // every other binding into gateway-wrapped inventory. The model sees
-        // only the two stable tools; inner tools are addressed as arguments of
-        // `tool_execute` and unwrapped at admission.
+        // the three stable tools plus the run's native whitelist; all other
+        // inner tools are addressed through the gateway.
         result.gateway = result
             .by_name
             .get(TOOL_EXECUTE_CALL_NAME)
             .is_some_and(|binding| binding.descriptor.id == TOOL_EXECUTE_ID);
         if result.gateway {
             // Preserve host exposure as activation state for inner tools.
-            // Only descriptors() projects that state to the stable gateway pair.
+            // Only descriptors() projects that state to the stable gateway trio.
             let host_labels = context.extensions.get::<ToolGroupLabels>();
             for binding in result.by_name.values_mut() {
                 if binding.domain_code.is_none() {
@@ -129,7 +135,28 @@ impl ToolSet {
                         .map(str::to_owned);
                 }
             }
-            for name in [TOOL_SEARCH_CALL_NAME, TOOL_EXECUTE_CALL_NAME] {
+            // A run may expose already admitted tools directly beside the
+            // gateway. Unknown, excluded, hidden or revoked IDs never enter the
+            // native set, so the whitelist cannot create authority.
+            let requested = context.extensions.get::<NativeToolWhitelist>();
+            if let Some(requested) = requested.as_ref() {
+                result.native_ids = result
+                    .by_name
+                    .values()
+                    .filter(|binding| {
+                        !is_gateway_descriptor(&binding.descriptor)
+                            && binding.exposed
+                            && requested.contains(&binding.descriptor.id)
+                            && !context.is_tool_revoked(&binding.descriptor.id)
+                    })
+                    .map(|binding| binding.descriptor.id.clone())
+                    .collect();
+            }
+            for name in [
+                TOOL_SEARCH_CALL_NAME,
+                TOOL_SCHEMA_CALL_NAME,
+                TOOL_EXECUTE_CALL_NAME,
+            ] {
                 if let Some(binding) = result.by_name.remove(name) {
                     result.id_to_name.remove(&binding.descriptor.id);
                 }
@@ -147,6 +174,18 @@ impl ToolSet {
                 .id_to_name
                 .insert(TOOL_SEARCH_ID.into(), TOOL_SEARCH_CALL_NAME.into());
             result.by_name.insert(
+                TOOL_SCHEMA_CALL_NAME.into(),
+                ToolBinding::new(
+                    schema_descriptor(),
+                    GatewaySchema {
+                        entries: Vec::new(),
+                    },
+                ),
+            );
+            result
+                .id_to_name
+                .insert(TOOL_SCHEMA_ID.into(), TOOL_SCHEMA_CALL_NAME.into());
+            result.by_name.insert(
                 TOOL_EXECUTE_CALL_NAME.into(),
                 ToolBinding::new(execute_descriptor(), GatewayExecute),
             );
@@ -161,8 +200,9 @@ impl ToolSet {
         Ok(result)
     }
 
-    /// Rebuild discovery after activation or checkpoint restoration. Search
-    /// and dispatch use the same host exposure state; model schemas stay fixed.
+    /// Rebuild discovery after activation or checkpoint restoration. Search,
+    /// schema lookup and dispatch use the same host exposure state; model
+    /// schemas stay fixed.
     pub(crate) fn refresh_gateway_search(&mut self) {
         if !self.gateway {
             return;
@@ -170,7 +210,10 @@ impl ToolSet {
         let mut entries: Vec<_> = self
             .by_name
             .values()
-            .filter(|binding| binding.exposed && !is_gateway_descriptor(&binding.descriptor))
+            .filter(|binding| {
+                !is_gateway_descriptor(&binding.descriptor)
+                    && (binding.exposed || self.native_ids.contains(&binding.descriptor.id))
+            })
             .map(|binding| GatewayInventoryEntry {
                 descriptor: batch_tool_descriptor(&binding.descriptor),
                 domain_code: binding.domain_code.clone(),
@@ -180,29 +223,64 @@ impl ToolSet {
         entries.sort_by(|a, b| a.descriptor.call_name.cmp(&b.descriptor.call_name));
         self.by_name.insert(
             TOOL_SEARCH_CALL_NAME.into(),
-            ToolBinding::new(search_descriptor(), GatewaySearch { entries }),
+            ToolBinding::new(
+                search_descriptor(),
+                GatewaySearch {
+                    entries: entries.clone(),
+                },
+            ),
         );
+        self.by_name.insert(
+            TOOL_SCHEMA_CALL_NAME.into(),
+            ToolBinding::new(schema_descriptor(), GatewaySchema { entries }),
+        );
+    }
+
+    /// True when this admitted tool is exposed directly beside the gateway.
+    pub(crate) fn is_native(&self, tool_id: &str) -> bool {
+        self.gateway && self.native_ids.contains(tool_id)
+    }
+
+    /// Structural exposure of a binding: gateway infrastructure and native
+    /// tools are not changed by inner exposure effects; revocation still
+    /// applies at directory and execution time.
+    fn is_structural_exposure(
+        native_ids: &std::collections::BTreeSet<String>,
+        binding: &ToolBinding,
+    ) -> bool {
+        is_gateway_descriptor(&binding.descriptor) || native_ids.contains(&binding.descriptor.id)
     }
 
     pub(crate) fn descriptors(&self) -> Vec<ToolDescriptor> {
         if self.gateway {
-            // Cache-stable invariant: gateway mode always shows exactly the
-            // two stable tools, even after inner tools (e.g. A2UI expand)
-            // produce exposure effects. Inner tools never re-enter the
-            // model-visible list.
-            let mut tools: Vec<_> = [TOOL_SEARCH_CALL_NAME, TOOL_EXECUTE_CALL_NAME]
-                .into_iter()
-                .filter_map(|name| self.by_name.get(name))
-                .map(|binding| batch_tool_descriptor(&binding.descriptor))
-                .collect();
+            // Cache-stable invariant: gateway mode always shows the three
+            // stable tools plus the run's fixed native set, even after inner
+            // tools (e.g. A2UI expand) produce exposure effects. Native tools
+            // keep their full batch or single schema.
+            let mut tools: Vec<_> = [
+                TOOL_SEARCH_CALL_NAME,
+                TOOL_SCHEMA_CALL_NAME,
+                TOOL_EXECUTE_CALL_NAME,
+            ]
+            .into_iter()
+            .filter_map(|name| self.by_name.get(name))
+            .map(|binding| batch_tool_descriptor(&binding.descriptor))
+            .chain(
+                self.by_name
+                    .values()
+                    .filter(|binding| self.native_ids.contains(&binding.descriptor.id))
+                    .map(|binding| batch_tool_descriptor(&binding.descriptor)),
+            )
+            .collect();
             tools.sort_by(|left, right| left.call_name.cmp(&right.call_name));
+            tools.dedup_by(|left, right| left.call_name == right.call_name);
             return tools;
         }
         let mut tools: Vec<_> = self
             .by_name
             .values()
             .filter(|binding| binding.exposed)
-            .map(|binding| binding.descriptor.clone())
+            .map(|binding| model_tool_descriptor(&binding.descriptor))
             .collect();
         tools.sort_by(|left, right| left.call_name.cmp(&right.call_name));
         tools
@@ -218,10 +296,12 @@ impl ToolSet {
         }) {
             return Err("Tool exposure contains an unauthorized ID".into());
         }
+        let gateway = self.gateway;
+        let native_ids = self.native_ids.clone();
         for binding in self.by_name.values_mut() {
-            // The gateway pair is structural: exposure replacement from inner
-            // tool effects must never hide the stable catalog.
-            if self.gateway && is_gateway_descriptor(&binding.descriptor) {
+            // The gateway trio and native whitelist are structural: exposure
+            // replacement from inner tool effects must not hide them.
+            if gateway && Self::is_structural_exposure(&native_ids, binding) {
                 continue;
             }
             binding.exposed = ids.contains(&binding.descriptor.id);
@@ -241,8 +321,8 @@ impl ToolSet {
                 .by_name
                 .get_mut(call_name)
                 .expect("authorized tool binding");
-            // Activation enables discovery and execution of this inner tool;
-            // descriptors() still exposes only the stable gateway pair.
+            // Activation enables discovery and execution of this inner tool.
+            // Native exposure stays a separate, run-level choice.
             binding.exposed = true;
         }
         self.refresh_gateway_search();

@@ -560,17 +560,17 @@ mod tests {
             "done"
         );
         let requests = script.requests.lock().unwrap().clone();
-        // Cache-stability invariant: every request sees exactly the two
+        // Cache-stability invariant: every request sees exactly the three
         // stable gateway tools, even after discovery and execution.
         for (index, request) in requests.iter().enumerate() {
             let names: Vec<_> = request.tools.iter().map(|t| t.call_name.as_str()).collect();
             assert_eq!(
                 names,
-                vec!["tool_execute", "tool_search"],
+                vec!["tool_execute", "tool_schema", "tool_search"],
                 "request {index} must keep the stable gateway catalog"
             );
         }
-        // The search output carries the wrapped tools' schemas as plain text.
+        // Search output carries the wrapped tools' summaries as plain text.
         assert!(
             requests[1]
                 .messages

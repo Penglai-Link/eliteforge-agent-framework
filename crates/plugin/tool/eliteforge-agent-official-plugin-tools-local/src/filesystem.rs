@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     fs,
     path::{Component, Path, PathBuf},
     time::Duration,
@@ -88,10 +87,9 @@ impl FileSystemToolsConfig {
     }
 }
 
-/// Command authority for the system-command capability pack.
+/// Command execution settings for the system-command capability pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemCommandConfig {
-    command_authority: CommandAuthority,
     directory_scope: Option<FileSystemToolsConfig>,
     shell: Option<PathBuf>,
     timeout: Duration,
@@ -99,45 +97,12 @@ pub struct SystemCommandConfig {
     max_output_bytes: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CommandAuthority {
-    All,
-    Restricted(BTreeSet<String>),
-}
-
 impl SystemCommandConfig {
     /// Allow every executable. Selecting this capability pack remains explicit.
     pub fn new() -> Self {
         Self {
-            command_authority: CommandAuthority::All,
             directory_scope: None,
             shell: None,
-            timeout: DEFAULT_COMMAND_TIMEOUT,
-            async_after: DEFAULT_ASYNC_AFTER,
-            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
-        }
-    }
-
-    /// Allow only exact executable names from `allowed_commands`.
-    ///
-    /// An empty collection deliberately denies every command; use [`Self::new`]
-    /// when the selected capability pack should allow every executable.
-    pub fn restricted<I, S>(allowed_commands: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Self {
-            directory_scope: None,
-            shell: None,
-            command_authority: CommandAuthority::Restricted(
-                allowed_commands
-                    .into_iter()
-                    .map(Into::into)
-                    .map(|command: String| command.trim().to_owned())
-                    .filter(|command| !command.is_empty())
-                    .collect(),
-            ),
             timeout: DEFAULT_COMMAND_TIMEOUT,
             async_after: DEFAULT_ASYNC_AFTER,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
@@ -169,16 +134,13 @@ impl SystemCommandConfig {
         self
     }
 
-    /// Opt into shell strings only when `args` is omitted. Explicit `args`,
-    /// including [], always executes the literal program and argument vector.
-    /// The shell is host-selected, never selected by tool arguments.
+    /// Select the shell used for the model-facing complete command string.
+    /// Explicit internal `args`, including [], always executes the literal
+    /// program and argument vector. The shell is host-selected, never selected
+    /// by tool arguments.
     pub fn with_shell(mut self, shell: impl Into<PathBuf>) -> Self {
         self.shell = Some(shell.into());
         self
-    }
-
-    pub(crate) fn uses_shell(&self) -> bool {
-        self.shell.is_some()
     }
 
     pub(crate) fn configured_shell(&self) -> Option<&std::path::Path> {
@@ -191,28 +153,33 @@ impl SystemCommandConfig {
         args: Option<Vec<String>>,
         interactive: bool,
     ) -> Result<(String, Vec<String>), ToolError> {
-        match (&self.shell, args) {
-            (Some(shell), None) => {
-                if !shell.is_absolute() || !shell.is_file() {
-                    return Err(ToolError::Failed(
-                        "configured shell must be an existing absolute executable path".into(),
-                    ));
-                }
-                let shell = shell
-                    .to_str()
-                    .ok_or_else(|| ToolError::Failed("shell path is not UTF-8".into()))?;
-                Ok((
-                    shell.into(),
-                    crate::command_shell::arguments(
-                        std::path::Path::new(shell),
-                        command,
-                        true,
-                        interactive,
-                    ),
-                ))
-            }
-            (_, args) => Ok((command, args.unwrap_or_default())),
+        // Explicit argv stays a direct program invocation. The model-facing
+        // command string always runs through the host shell, using the
+        // host-selected shell or the platform default.
+        if let Some(args) = args {
+            return Ok((command, args));
         }
+        let shell = self
+            .shell
+            .clone()
+            .unwrap_or_else(crate::command_shell::default_shell_program);
+        if !shell.is_absolute() || !shell.is_file() {
+            return Err(ToolError::Failed(
+                "configured shell must be an existing absolute executable path".into(),
+            ));
+        }
+        let shell = shell
+            .to_str()
+            .ok_or_else(|| ToolError::Failed("shell path is not UTF-8".into()))?;
+        Ok((
+            shell.into(),
+            crate::command_shell::arguments(
+                std::path::Path::new(shell),
+                command,
+                true,
+                interactive,
+            ),
+        ))
     }
 
     pub(crate) fn interactive_shell(&self) -> Result<PathBuf, ToolError> {
@@ -222,14 +189,6 @@ impl SystemCommandConfig {
         if !shell.is_absolute() || !shell.is_file() {
             return Err(ToolError::Failed(
                 "configured shell must be an existing absolute executable path".into(),
-            ));
-        }
-        let program = shell
-            .to_str()
-            .ok_or_else(|| ToolError::Failed("shell path is not UTF-8".into()))?;
-        if !self.allows(program) {
-            return Err(ToolError::Failed(
-                "configured shell is not permitted by this Agent configuration".into(),
             ));
         }
         Ok(shell.clone())
@@ -253,11 +212,6 @@ impl SystemCommandConfig {
                 )
             }
         };
-        if !self.allows(&program) {
-            return Err(ToolError::Failed(format!(
-                "command `{program}` is not permitted by this Agent configuration"
-            )));
-        }
         Ok((program, args))
     }
 
@@ -280,13 +234,6 @@ impl SystemCommandConfig {
             self.resolve_cwd(Some(cwd))?;
         }
         Ok(())
-    }
-
-    pub(crate) fn allows(&self, command: &str) -> bool {
-        match &self.command_authority {
-            CommandAuthority::All => true,
-            CommandAuthority::Restricted(allowed_commands) => allowed_commands.contains(command),
-        }
     }
 
     pub(crate) fn timeout(&self) -> Duration {

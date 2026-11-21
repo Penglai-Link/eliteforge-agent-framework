@@ -71,15 +71,31 @@ impl FileArtifactStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(path.as_ref())?.permissions().mode();
+            let metadata = std::fs::metadata(path.as_ref())?;
+            if !metadata.is_dir() {
+                return Err(std::io::Error::from(std::io::ErrorKind::NotADirectory).into());
+            }
+            let mode = metadata.permissions().mode();
             if mode & 0o077 != 0 {
                 return Err(ArtifactError::InvalidLimits(
                     "artifact directory must be private to its owner",
                 ));
             }
+            // `open_ambient_dir` uses O_PATH on Linux, and fsync on an O_PATH
+            // descriptor fails with EBADF. A regular read-only directory handle
+            // keeps directory sync available.
+            Self::from_dir(
+                Dir::from_std_file(std::fs::File::open(path.as_ref())?),
+                limits,
+            )
         }
-        let directory = Dir::open_ambient_dir(path, cap_std::ambient_authority())?;
-        Self::from_dir(directory, limits)
+        #[cfg(not(unix))]
+        {
+            Self::from_dir(
+                Dir::open_ambient_dir(path, cap_std::ambient_authority())?,
+                limits,
+            )
+        }
     }
 
     pub fn from_dir(directory: Dir, limits: FileArtifactLimits) -> Result<Self, ArtifactError> {
@@ -182,8 +198,18 @@ impl Drop for TemporaryArtifact {
     }
 }
 
+#[cfg(unix)]
 fn sync_directory(directory: &Dir) -> Result<(), ArtifactError> {
+    // The store keeps a regular read-only directory handle on Unix, so a
+    // duplicate still supports fsync.
     directory.try_clone()?.into_std_file().sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_directory: &Dir) -> Result<(), ArtifactError> {
+    // Windows cannot flush a directory handle; artifact bytes are synced
+    // before publication and hard-link metadata is durable on NTFS.
     Ok(())
 }
 

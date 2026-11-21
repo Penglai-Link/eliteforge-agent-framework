@@ -332,7 +332,9 @@ impl AgentLoop for ModelExecutionLoop {
                 .fetch_max(state.child_runs, std::sync::atomic::Ordering::AcqRel);
             context.revoke_tools(&state.revoked_tools.iter().cloned().collect::<Vec<_>>())?;
             for binding in tools.by_name.values_mut() {
-                binding.exposed = (tools.gateway && is_gateway_descriptor(&binding.descriptor))
+                binding.exposed = (tools.gateway
+                    && (is_gateway_descriptor(&binding.descriptor)
+                        || tools.native_ids.contains(&binding.descriptor.id)))
                     || state.visible_tools.contains(&binding.descriptor.id);
             }
             tools.refresh_gateway_search();
@@ -362,7 +364,9 @@ impl AgentLoop for ModelExecutionLoop {
             }
             let resumed = apply_resume(&incoming, &mut state, &mut checkpoint, &tools);
             for binding in tools.by_name.values_mut() {
-                binding.exposed = (tools.gateway && is_gateway_descriptor(&binding.descriptor))
+                binding.exposed = (tools.gateway
+                    && (is_gateway_descriptor(&binding.descriptor)
+                        || tools.native_ids.contains(&binding.descriptor.id)))
                     || state.visible_tools.contains(&binding.descriptor.id);
             }
             tools.refresh_gateway_search();

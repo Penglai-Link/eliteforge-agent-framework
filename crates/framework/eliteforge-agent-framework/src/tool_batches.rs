@@ -22,14 +22,24 @@ pub(crate) fn expand_calls(
         let name = envelope
             .as_ref()
             .map_or(call.call_name.as_str(), |e| e.tool.as_str());
+        let binding = tools.by_name.get(name);
+        // The gateway trio's own batch tools and whitelisted native tools use
+        // the same items contract as wrapped tools. Envelopes keep addressing
+        // inner tools by their call name.
+        let gateway_batch_tool = matches!(
+            call.call_name.as_str(),
+            TOOL_SEARCH_CALL_NAME | TOOL_SCHEMA_CALL_NAME
+        );
+        let native_batch_tool = binding.is_some_and(|b| tools.is_native(&b.descriptor.id));
         let batch = tools.gateway
-            && (envelope.is_some() || call.call_name == TOOL_SEARCH_CALL_NAME)
-            && tools
-                .by_name
-                .get(name)
-                .is_some_and(|b| b.descriptor.input_mode == ToolInputMode::Batch);
+            && (envelope.is_some() || gateway_batch_tool || native_batch_tool)
+            && binding.is_some_and(|b| b.descriptor.input_mode == ToolInputMode::Batch);
         if !batch {
-            expanded.push((call.clone(), None, None));
+            let error = (tools.gateway
+                && call.call_name == TOOL_SEARCH_CALL_NAME
+                && call.arguments.get("tool").is_some())
+            .then(|| tool_search_legacy_error().to_owned());
+            expanded.push((call.clone(), None, error));
             continue;
         }
         let arguments = envelope.as_ref().map_or(&call.arguments, |e| &e.arguments);
@@ -44,6 +54,13 @@ pub(crate) fn expand_calls(
                         Some(e) => serde_json::json!({"tool": e.tool, "arguments": arguments}),
                         None => arguments.clone(),
                     };
+                    // The removed search-definition form contained `tool` in
+                    // each item. Preserve the per-item error so valid siblings
+                    // still run while the model learns the new entry point.
+                    let error = (tools.gateway
+                        && call.call_name == TOOL_SEARCH_CALL_NAME
+                        && arguments.get("tool").is_some())
+                    .then(|| tool_search_legacy_error().to_owned());
                     expanded.push((
                         child,
                         Some(ToolBatchItem {
@@ -53,7 +70,7 @@ pub(crate) fn expand_calls(
                             parent_invocation_id: call.invocation_id,
                             index,
                         }),
-                        None,
+                        error,
                     ));
                 }
             }

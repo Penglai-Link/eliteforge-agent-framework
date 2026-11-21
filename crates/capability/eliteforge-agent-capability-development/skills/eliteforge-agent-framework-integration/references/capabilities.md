@@ -126,11 +126,11 @@ let builder = builder
     .capability_pack(PersonAiCapabilityPack::new(connection.clone()));
 ```
 
-此处 builder 尚未安装 official；不要重复安装。选择已同步的真实模型 `ModelRef::new("personai", model_id)`；若用包内工具，选择 `framework.tools.discovery`，模型先调用 `tool_search` 查找 PersonAI 工具。
+此处 builder 尚未安装 official；不要重复安装。选择已同步的真实模型 `ModelRef::new("personai", model_id)`；若用包内工具，选择 `framework.tools.discovery`，模型先调用 `tool_search` 查找 PersonAI 工具，再用 `tool_schema` 取得精确 schema。
 
 包支持 Chat、向量、重排、多媒体、语音、检测等绑定，具体目录取决于服务器和授权。默认工具含搜索、图片提交/查询和文本/图片检测。登录、签到、账户等客户端从 `connection.services()` 给宿主使用，不自动成为 Agent 工具。
 
-首次 connect 必须联网同步成功。多个 Framework 可共享同账号的 Arc 连接，不能跨账号共享；先关闭 Framework，最后 `connection.close().await`。关闭单个 Agent 不关闭共享连接。已有统一 Discovery 时使用 `pack.tools()` 加入它，并安装 `pack.without_tools()`，避免重复 `tool_search`。
+首次 connect 必须联网同步成功。多个 Framework 可共享同账号的 Arc 连接，不能跨账号共享；先关闭 Framework，最后 `connection.close().await`。关闭单个 Agent 不关闭共享连接。已有统一 Discovery 时使用 `pack.tools()` 加入它，并安装 `pack.without_tools()`，避免重复发现。
 
 ## 5. 自动模型路由
 

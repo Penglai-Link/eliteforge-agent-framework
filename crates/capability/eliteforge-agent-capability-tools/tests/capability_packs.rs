@@ -280,8 +280,7 @@ async fn command_task_survives_runs_and_supports_cursor_reads_session_checks_and
             "owner",
             "command_exec",
             json!({
-                "command": "sh",
-                "args": ["-c", "printf 'first\\n'; sleep 0.1; printf 'second\\n'; exec sleep 30"]
+                "command": "echo first; echo second; exec sleep 30"
             }),
         )
         .await
@@ -346,7 +345,7 @@ async fn default_command_handoff_returns_after_ten_seconds() {
         harness.call(
             "owner",
             "command_exec",
-            json!({"command": "sleep", "args": ["30"]}),
+            json!({"command": "sleep 30"}),
         ),
     )
     .await
@@ -373,14 +372,14 @@ async fn default_command_handoff_returns_after_ten_seconds() {
 #[tokio::test]
 async fn closing_framework_terminates_its_background_command() {
     let harness =
-        ToolHarness::new(SystemCommandConfig::new().with_async_after(Duration::from_millis(20)))
+        ToolHarness::new(SystemCommandConfig::new().with_async_after(Duration::from_millis(200)))
             .await;
     let running = harness
         .call(
             "owner",
             "command_exec",
             json!({
-                "command": "sh", "args": ["-c", "echo $$; exec sleep 30"]
+                "command": "echo $$; exec sleep 30"
             }),
         )
         .await
@@ -464,7 +463,7 @@ async fn local_domain_pack_combines_selected_tools_without_duplicate_providers()
             LocalToolsConfig::new()
                 .read_only_filesystem(config.clone())
                 .write_filesystem(config.clone())
-                .system_commands(SystemCommandConfig::restricted(["git"])),
+                .system_commands(SystemCommandConfig::new()),
         )
     };
     let tools = listed_tools(selection()).await;
@@ -565,14 +564,17 @@ async fn media_domain_pack_recreates_reader_and_exposes_image_and_pdf_tools() {
 
 #[cfg(feature = "discovery")]
 #[tokio::test]
-async fn discovery_domain_pack_retains_host_providers_and_exposes_the_gateway_pair() {
+async fn discovery_domain_pack_retains_host_providers_and_exposes_the_gateway_trio() {
     use eliteforge_agent_capability_tools::{ToolDiscoveryPlugin, tool_discovery_pack};
 
     let pack = tool_discovery_pack(ToolDiscoveryPlugin::new());
     assert_eq!(plugin_ids(&pack), ["framework.tools.discovery"]);
-    // With no explicitly wrapped providers the gateway pair is the whole
-    // model-visible catalog: search plus the execution envelope.
-    assert_eq!(listed_tools(pack).await, ["tool_execute", "tool_search"]);
+    // With no explicitly wrapped providers the gateway trio is the whole
+    // model-visible catalog: search, schema and the execution envelope.
+    assert_eq!(
+        listed_tools(pack).await,
+        ["tool_search", "tool_schema", "tool_execute"]
+    );
 }
 
 #[tokio::test]
@@ -605,14 +607,14 @@ async fn filesystem_packs_reject_symbolic_links() {
 #[tokio::test]
 async fn system_command_pack_uses_platform_native_command_runners() {
     #[cfg(windows)]
-    let (command, args) = ("cmd", json!(["/C", "echo", "cross-platform"]));
+    let command = "cmd /C echo cross-platform";
     #[cfg(not(windows))]
-    let (command, args) = ("sh", json!(["-c", "printf cross-platform"]));
+    let command = "printf cross-platform";
 
     let output = invoke(
         system_command_pack(SystemCommandConfig::new()),
         "command_exec",
-        json!({"command":command, "args":args}),
+        json!({"command":command}),
     )
     .await;
     assert_eq!(output["success"], json!(true));
@@ -625,30 +627,29 @@ async fn system_command_pack_uses_platform_native_command_runners() {
 }
 
 #[tokio::test]
-async fn system_command_pack_can_restrict_executable_names() {
+async fn system_command_pack_rejects_legacy_args() {
     let error = invoke_error(
-        system_command_pack(SystemCommandConfig::restricted(["git"])),
+        system_command_pack(SystemCommandConfig::new()),
         "command_exec",
-        json!({"command":"not-allowed"}),
+        json!({"command":"echo ok","args":["legacy"]}),
     )
     .await;
-    assert!(error.contains("not permitted by this Agent configuration"));
+    assert!(error.contains("no longer accepts args"));
 }
 
 #[tokio::test]
 async fn system_command_pack_accepts_an_arbitrary_working_directory() {
     let directory = tempfile::tempdir().unwrap();
     #[cfg(windows)]
-    let (command, args) = ("cmd", json!(["/C", "cd"]));
+    let command = "cmd /C cd";
     #[cfg(not(windows))]
-    let (command, args) = ("sh", json!(["-c", "pwd"]));
+    let command = "pwd";
 
     let output = invoke(
         system_command_pack(SystemCommandConfig::new()),
         "command_exec",
         json!({
             "command":command,
-            "args":args,
             "cwd":directory.path().to_string_lossy(),
         }),
     )
@@ -713,7 +714,7 @@ async fn interactive_command_accepts_multiple_writes_and_eof_with_scoped_command
         ToolHarness::new(SystemCommandConfig::new().with_async_after(Duration::from_millis(30)))
             .await;
     let started = harness.call("owner", "command_exec", json!({
-        "command":"sh", "args":["-c", r#"read first; printf 'first=%s\n' "$first"; cat"#], "interactive":true
+        "command":r#"read first; printf "first=%s\n" "$first"; cat"#, "interactive":true
     })).await.unwrap();
     assert_eq!(started["stdinOpen"], true);
     assert_eq!(started["tty"], false);
@@ -797,7 +798,7 @@ async fn pty_is_a_real_terminal_and_combines_output_and_accepts_input() {
         ToolHarness::new(SystemCommandConfig::new().with_async_after(Duration::from_millis(50)))
             .await;
     let started = harness.call("owner", "command_exec", json!({
-        "command":"sh", "args":["-c", r#"test -t 0 && test -t 1 && test -t 2 || exit 9; stty -echo; stty size; read answer; printf 'answer=%s\n' "$answer"; printf 'error-stream\n' >&2"#],
+        "command":r#"test -t 0 && test -t 1 && test -t 2 || exit 9; stty -echo; stty size; read answer; printf "answer=%s\n" "$answer"; printf "error-stream\n" >&2"#,
         "tty":true,"rows":40,"cols":100
     })).await.unwrap();
     assert_eq!(started["tty"], true);
@@ -833,7 +834,7 @@ async fn stopping_pipe_and_pty_commands_cleans_their_process_groups() {
                 "owner",
                 "command_exec",
                 json!({
-                    "command":"sh", "args":["-c", "sleep 30 & echo $!; wait"], "tty":tty
+                    "command":"sleep 30 & echo $!; wait", "tty":tty
                 }),
             )
             .await
@@ -872,7 +873,7 @@ async fn timeout_and_framework_close_clean_managed_descendants() {
                 "owner",
                 "command_exec",
                 json!({
-                    "command":"sh", "args":["-c", "sleep 30 & echo $!; wait"], "tty":true
+                    "command":"sleep 30 & echo $!; wait", "tty":true
                 }),
             )
             .await
@@ -897,7 +898,7 @@ async fn completed_shell_does_not_leave_background_children_and_plain_stdin_stil
             "owner",
             "command_exec",
             json!({
-                "command":"sh", "args":["-c", "sleep 30 & echo $!"]
+                "command":"sleep 30 & echo $!"
             }),
         )
         .await

@@ -64,12 +64,15 @@ pub(crate) fn system_command_bindings(
         ToolBinding::new(
             {
                 let mut descriptor = system_command_descriptor();
-                if config.uses_shell() {
-                    descriptor.description.push_str(" Host shell mode: omitting args executes command as a shell string; supplying args, even [], executes literal argv. Use the host shell's syntax; commands are not translated between operating systems.");
-                    if let Some(shell) = config.configured_shell() {
-                        descriptor.description.push_str(&format!(" Host OS: {}; shell: {}.", std::env::consts::OS, shell.display()));
-                    }
-                }
+                let shell = config
+                    .configured_shell()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(crate::command_shell::default_shell_program);
+                descriptor.description.push_str(&format!(
+                    " Host shell mode: command is one complete command string interpreted by the host shell; lists, pipes and redirections use that shell's syntax and are not translated between operating systems. Host OS: {}; shell: {}.",
+                    std::env::consts::OS,
+                    shell.display()
+                ));
                 descriptor
             },
             SystemCommandTool {
@@ -205,26 +208,37 @@ fn patch_descriptor() -> ToolDescriptor {
 }
 
 fn system_command_descriptor() -> ToolDescriptor {
+    let input_schema = json!({
+        "type":"object", "additionalProperties":false, "required":["command"],
+        "properties": {
+            "command":{"type":"string", "minLength":1, "description":"Complete command text. The host shell interprets quoting, lists, pipes, redirections and paths with spaces."},
+            "args":{"type":"array", "items":{"type":"string"}, "description":"Removed from the model contract. Kept only so legacy calls fail with an explicit retry message."},
+            "cwd":{"type":"string", "minLength":1},
+            "stdin":{"type":"string", "maxLength":65536},
+            "sudo":{"type":"boolean", "description":"Elevate with sudo using private host password input only when required. Supply the underlying command, without sudo. Passwords must NEVER appear in command, stdin, env or ask_user. Incompatible with stdin, interactive and tty; elevated commands receive EOF after authentication."},
+            "interactive":{"type":"boolean", "description":"Keep stdin open for command_exec_write."},
+            "tty":{"type":"boolean", "description":"Use a PTY; implies interactive input and combines stdout/stderr into stdout."},
+            "rows":{"type":"integer", "minimum":1, "maximum":1000},
+            "cols":{"type":"integer", "minimum":1, "maximum":1000},
+            "env":{"type":"object", "additionalProperties":{"type":"string"}}
+        }
+    });
     ToolDescriptor::new(
         "system.command.exec",
         "command_exec",
-        "Run an executable with literal arguments. If it is still running after 10 seconds, return its taskId and captured output. Use command_exec_read to check status and read more output, or command_exec_stop to stop it. The Agent configuration can restrict executable names. This is not a sandbox. For elevated commands set sudo=true and supply the underlying command without sudo; the host requests passwords privately. Never request a sudo password through ask_user or include one in tool arguments.",
-        json!({
-            "type":"object", "additionalProperties":false, "required":["command"],
-            "properties": {
-                "command":{"type":"string", "minLength":1},
-                "args":{"type":"array", "items":{"type":"string"}},
-                "cwd":{"type":"string", "minLength":1},
-                "stdin":{"type":"string", "maxLength":65536},
-                "sudo":{"type":"boolean", "description":"Elevate with sudo using private host password input only when required. Supply the underlying command, without sudo. Passwords must NEVER appear in command, args, stdin, env or ask_user. Incompatible with stdin, interactive and tty; elevated commands receive EOF after authentication."},
-                "interactive":{"type":"boolean", "description":"Keep stdin open for command_exec_write."},
-                "tty":{"type":"boolean", "description":"Use a PTY; implies interactive input and combines stdout/stderr into stdout."},
-                "rows":{"type":"integer", "minimum":1, "maximum":1000},
-                "cols":{"type":"integer", "minimum":1, "maximum":1000},
-                "env":{"type":"object", "additionalProperties":{"type":"string"}}
-            }
-        }),
-    ).with_display_resource(include_str!("tool-display.json")).with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+        "Run a complete command string in the authorized working directory. The host shell interprets chaining, pipes, redirections, quoting and paths with spaces. Returns taskId and captured output if still running after 10 seconds; use command_exec_read or command_exec_stop for the task. A nonzero exit code is a command result, not a tool failure. This is not a sandbox. For sudo=true supply the command without sudo; never put a password in tool arguments. args is not accepted.",
+        input_schema.clone(),
+    )
+    .with_model_input_schema(command_model_schema(input_schema))
+    .with_display_resource(include_str!("tool-display.json"))
+    .with_operation_kind(eliteforge_agent_core::ToolOperationKind::Command)
+}
+
+fn command_model_schema(mut schema: Value) -> Value {
+    if let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) {
+        properties.remove("args");
+    }
+    schema
 }
 
 fn system_command_task_read_descriptor() -> ToolDescriptor {
@@ -883,25 +897,20 @@ impl Tool for SystemCommandTool {
         if command.is_empty() {
             return Err(ToolError::Failed("command is required".into()));
         }
+        if input.args.as_ref().is_some_and(|args| !args.is_empty()) {
+            return Err(ToolError::Failed(
+                "command_exec no longer accepts args; pass the complete command string in command and retry without args".into(),
+            ));
+        }
         let (command, args) =
             self.config
-                .invocation(command, input.args, input.interactive || input.tty)?;
-        if !self.config.allows(&command) {
-            return Err(ToolError::Failed(format!(
-                "command `{command}` is not permitted by this Agent configuration"
-            )));
-        }
+                .invocation(command, None, input.interactive || input.tty)?;
         let cwd = self.config.resolve_cwd(input.cwd.as_deref())?;
         let (command, args, sudo) = if input.sudo {
             if !cfg!(unix) || input.stdin.is_some() || input.tty || input.interactive {
                 return Err(ToolError::Failed(
                     "sudo requires a Unix host and cannot combine with stdin, interactive or tty"
                         .into(),
-                ));
-            }
-            if !self.config.allows("sudo") {
-                return Err(ToolError::Failed(
-                    "sudo is not permitted by this Agent configuration".into(),
                 ));
             }
             let marker = format!("[framework-sudo-{}]", uuid::Uuid::new_v4());
@@ -1014,10 +1023,10 @@ impl Tool for SystemCommandTool {
             }
         }
         let output = task.view(0, 0, INITIAL_READ_BYTES);
-        let is_error = output.is_error();
-        let output = json_output_with_error(output, is_error)?;
+        // Command status, stderr and a nonzero exit code are result data. The
+        // tool call itself succeeded once the task started and was observed.
         pending.accepted = true;
-        Ok(output)
+        json_output(output)
     }
 }
 
@@ -1065,8 +1074,7 @@ impl Tool for SystemCommandTaskReadTool {
                 .unwrap_or(INITIAL_READ_BYTES)
                 .min(MAX_READ_BYTES),
         );
-        let is_error = output.is_error();
-        json_output_with_error(output, is_error)
+        json_output(output)
     }
 }
 
@@ -1094,13 +1102,8 @@ impl Tool for SystemCommandTaskStopTool {
             task.wait_for_terminal(std::time::Duration::from_secs(3))
                 .await;
         }
-        if self
-            .config
-            .authorize_existing_cwd(task.cwd().and_then(|cwd| cwd.to_str()))
-            .is_err()
-        {
-            return json_output(json!({"taskId":input.task_id,"stopRequested":stop_requested}));
-        }
+        self.config
+            .authorize_existing_cwd(task.cwd().and_then(|cwd| cwd.to_str()))?;
         let output = task
             .view(
                 input.stdout_cursor.unwrap_or(0),
@@ -1111,8 +1114,7 @@ impl Tool for SystemCommandTaskStopTool {
                     .clamp(1, MAX_READ_BYTES),
             )
             .with_stop_requested(stop_requested);
-        let is_error = output.is_error();
-        json_output_with_error(output, is_error)
+        json_output(output)
     }
 }
 
@@ -1162,8 +1164,9 @@ impl Tool for SystemCommandTaskWriteTool {
         )
         .await;
         let output = task.view(stdout, stderr, INITIAL_READ_BYTES);
-        let is_error = output.is_error();
-        json_output_with_error(output, is_error)
+        // A successful stdin write is a successful tool operation even when
+        // the command later exits nonzero or has reached a terminal status.
+        json_output(output)
     }
 }
 

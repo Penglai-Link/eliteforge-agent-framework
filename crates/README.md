@@ -114,7 +114,7 @@ use eliteforge_agent_official_capability_pack::{
 let pack = EliteForgeOfficialCapabilityPack::new("agent.sqlite", "agent-artifacts")
     .read_only_filesystem(FileSystemToolsConfig::new("workspace"))
     .write_filesystem(FileSystemToolsConfig::new("workspace"))
-    .system_commands(SystemCommandConfig::restricted(["git"]));
+    .system_commands(SystemCommandConfig::new());
 
 let framework = FrameworkBuilder::new().capability_pack(pack).build().await?;
 let agent = framework.agent(AgentSelection::default()).build().await?;

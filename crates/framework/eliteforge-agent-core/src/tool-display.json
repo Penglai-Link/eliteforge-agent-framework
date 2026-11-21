@@ -8,7 +8,7 @@
       },
       "zh-CN": {
         "name": "查找工具",
-        "description": "按领域和关键词查找已授权工具，再获取工具的完整参数说明。"
+        "description": "按领域和关键词查找已授权工具，只返回调用名和描述；参数说明用 tool_schema 获取。"
       }
     },
     "framework.tools.execute": {
@@ -19,6 +19,16 @@
       "zh-CN": {
         "name": "执行工具",
         "description": "执行已发现的工具，可批量提交相互独立的操作。"
+      }
+    },
+    "framework.tools.schema": {
+      "en-US": {
+        "name": "Schema",
+        "description": null
+      },
+      "zh-CN": {
+        "name": "查看工具结构",
+        "description": "按精确调用名获取授权工具的完整参数结构。"
       }
     }
   },

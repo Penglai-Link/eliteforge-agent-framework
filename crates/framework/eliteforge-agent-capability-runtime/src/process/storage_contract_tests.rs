@@ -55,7 +55,7 @@ impl RpcHandler for BatchServer {
     }
 }
 fn archive() -> Vec<u8> {
-    let manifest = json!({"manifest_version":1,"id":"test.storage-contract","name":"Storage contract","version":"1.0.0","framework":"^0.1"});
+    let manifest = json!({"manifest_version":1,"id":"test.storage-contract","name":"Storage contract","version":"1.0.0","framework":"^1.0"});
     let data = serde_json::to_vec(&manifest).unwrap();
     let checksums = serde_json::to_vec(&BTreeMap::from([(
         "manifest.json",

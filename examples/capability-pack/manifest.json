@@ -3,7 +3,7 @@
   "id": "demo.pack",
   "name": "Offline SDK demo",
   "version": "1.0.0",
-  "framework": "^0.1",
+  "framework": "^1.0",
   "backend": {
     "executables": {
       "aarch64-macos": "bin/backend",

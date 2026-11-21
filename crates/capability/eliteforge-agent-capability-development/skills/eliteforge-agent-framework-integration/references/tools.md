@@ -45,13 +45,15 @@ let selection = AgentSelection {
 ```rust
 use eliteforge_agent_official_capability_pack::tools::{FileSystemToolsConfig, SystemCommandConfig};
 let official = official.system_commands(
-    SystemCommandConfig::restricted(["git"])
+    SystemCommandConfig::new()
         .with_directory_scope(FileSystemToolsConfig::new("./workspace"))
         .with_timeout(std::time::Duration::from_secs(30)),
 );
 ```
 
-Agent 选择 `framework.system-command.tools`。`restricted` 限制命令名称，不代表允许的程序内部只能执行只读操作；例如 git 子命令仍有写操作，需结合工具策略或宿主命令策略。`SystemCommandConfig::new()` 不是默认安全白名单，不应直接用于未受信任用户。
+Agent 选择 `framework.system-command.tools`。命令权限由宿主工具策略和审批链路控制；`SystemCommandConfig` 不再提供旧的命令名白名单配置。`SystemCommandConfig::new()` 不是安全沙箱，不应直接用于未受信任用户。
+
+模型入口 `command_exec` 只接收一个完整 `command` 字符串，由宿主 Shell 解释命令串联、管道、重定向和含空格路径。底层 `CommandRequest`／`invocation(command, Some(args))` 仍支持直接程序加独立参数，供能力包和内部调用使用；不要把这个旧接口重新暴露成模型字段。需要展示给模型的 schema 更窄时，可用 `ToolDescriptor::with_model_input_schema`，执行和校验仍使用完整 schema。
 
 需要持续终端时，添加同版本 `eliteforge-agent-capability-tools`，构造共享 `PtyService` 并用 `pty_pack(service)` 安装。宿主终端 UI 和 Agent 复用同一个 service，关闭由其 owner 管理。每轮工作目录/权限变化的应用使用 `scoped_local_tools_pack(provider, service)`：`LocalToolScopeProvider` 从已认证的运行上下文返回授权快照；同一 revision 不能表示不同授权。不要让模型提交 root 后直接作为授权目录。
 
@@ -188,4 +190,13 @@ let discovery = ToolDiscoveryPlugin::new().provider(
 let official = official.tool_discovery(discovery);
 ```
 
-此时只选择 `framework.tools.discovery`；模型先看见 `tool_search`，搜索后激活匹配工具。这里的 Web Provider 不再通过 `.web(...)` 安装第二次。发现只改变已授权工具的可见性，不扩大权限。
+此时只选择 `framework.tools.discovery`；模型先看见 `tool_search`、`tool_schema`、`tool_execute` 三个基础入口。`tool_search` 只返回调用名和描述摘要，`tool_schema` 按精确调用名返回执行时使用的完整 schema（批量工具带 `items` 包装，单项工具保持原结构），`tool_execute` 执行网关后的工具。这里的 Web Provider 不再通过 `.web(...)` 安装第二次。发现只改变已授权工具的可见性，不扩大权限。
+
+需要让少数已授权工具直接出现在模型工具列表中时，在 `RunRequest.extensions` 放入运行级白名单。白名单按稳定工具 ID 选择暴露方式，不注册执行器、不授予权限；未准入、隐藏或撤权的工具不会被暴露：
+
+```rust
+request.extensions.insert(eliteforge_agent_core::NativeToolWhitelist::new()
+    .with("system.command.exec"));
+```
+
+原生工具仍走同一 binding、权限、审批、批量拆解和审计链路，调用时沿用 `{"items":[...]}` 契约（单项工具除外）。白名单默认为空，网关工具列表保持“三个基础入口 + 白名单中可用的原生工具”的确定性排序。

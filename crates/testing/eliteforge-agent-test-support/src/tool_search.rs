@@ -27,7 +27,7 @@ impl ChatModel for TwoStageSearchModel {
             ),
             1 => (
                 "definitions",
-                TOOL_SEARCH_CALL_NAME,
+                TOOL_SCHEMA_CALL_NAME,
                 json!({"items":[
                     {"tool":"sample_read"}, {"tool":"sample_edit"}, {"tool":"missing"}, {"tool":"sample_hidden"}
                 ]}),
@@ -100,7 +100,11 @@ pub fn assert_two_stage_requests(model: &TwoStageSearchModel) {
                 .iter()
                 .map(|t| t.call_name.as_str())
                 .collect::<Vec<_>>(),
-            [TOOL_EXECUTE_CALL_NAME, TOOL_SEARCH_CALL_NAME]
+            [
+                TOOL_EXECUTE_CALL_NAME,
+                TOOL_SCHEMA_CALL_NAME,
+                TOOL_SEARCH_CALL_NAME,
+            ]
         );
     }
     let output = |step: usize| -> Value {
@@ -138,16 +142,20 @@ pub fn assert_two_stage_requests(model: &TwoStageSearchModel) {
     assert_eq!(definitions["results"].as_array().unwrap().len(), 4);
     for index in [0, 1] {
         assert_eq!(
-            definitions["results"][index]["result"]["mode"],
-            "definition"
+            definitions["results"][index]["result"]["kind"],
+            "toolSchema"
+        );
+        assert_eq!(
+            definitions["results"][index]["result"]["call_name"],
+            ["sample_read", "sample_edit"][index]
         );
     }
-    let schema = &definitions["results"][0]["result"]["tools"][0]["input_schema"];
+    let schema = &definitions["results"][0]["result"]["input_schema"];
     let validator = compile_schema(schema).unwrap();
     assert!(validator.is_valid(&json!({"items":[{"name":"record"}]})));
     assert!(!validator.is_valid(&json!({"items":[{"name":3}]})));
     assert_eq!(
-        definitions["results"][1]["result"]["tools"][0]["input_schema"]["required"],
+        definitions["results"][1]["result"]["input_schema"]["required"],
         json!(["name"])
     );
     assert_eq!(definitions["results"][2]["isError"], true);

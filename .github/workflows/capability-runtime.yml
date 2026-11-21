@@ -1,7 +1,9 @@
 name: Capability runtime
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 jobs:
   runtime:
     strategy:
@@ -33,7 +35,9 @@ jobs:
       - run: pnpm --dir sdk/page build
       - run: node --check scripts/capability-dev.mjs
   browser:
-    runs-on: ubuntu-latest
+    # Playwright 1.58.2 cannot install its system dependencies on Ubuntu 26.04,
+    # which ubuntu-latest now resolves to; pin the last supported LTS image.
+    runs-on: ubuntu-24.04
     env:
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'

@@ -750,6 +750,8 @@ pub(crate) struct CommandTaskOutput {
     command: String,
     args: Vec<String>,
     cwd: Option<String>,
+    /// Command-process result, not the tool invocation status. `None` while a
+    /// task is still running; `false` is a normal result for a nonzero exit.
     success: Option<bool>,
     exit_code: Option<i32>,
     error: Option<String>,
@@ -779,13 +781,6 @@ impl CommandTaskOutput {
             self.stderr_cursor,
             self.status.is_terminal(),
         )
-    }
-
-    pub(crate) fn is_error(&self) -> bool {
-        matches!(
-            self.status,
-            CommandTaskStatus::Failed | CommandTaskStatus::TimedOut
-        ) || (self.status == CommandTaskStatus::Completed && self.success == Some(false))
     }
 
     pub(crate) fn with_stop_requested(mut self, stop_requested: bool) -> Self {

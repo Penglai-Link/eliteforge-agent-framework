@@ -2097,9 +2097,9 @@ impl ChatModel for GatewayEnvelopeModel {
         if request.messages.iter().any(|m| m.role == Role::Tool) {
             return Ok(ChatResponse::text("done"));
         }
-        // The stable gateway pair is the whole model-visible catalog.
+        // The stable gateway trio is the whole model-visible catalog.
         let names: Vec<_> = request.tools.iter().map(|t| t.call_name.as_str()).collect();
-        assert_eq!(names, vec!["tool_execute", "tool_search"]);
+        assert_eq!(names, vec!["tool_execute", "tool_schema", "tool_search"]);
         Ok(ChatResponse::tool_calls(vec![ToolCall::new(
             "envelope-1",
             "tool_execute",

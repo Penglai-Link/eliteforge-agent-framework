@@ -117,7 +117,7 @@ ModelRecoveryPlugin(ModelRecoveryPolicy {
 
 ## Agent 工具与 Discovery
 
-`PersonAiCapabilityPack::new(connection)` 默认安装 `ToolDiscoveryPlugin`。Agent 初始只看到 `tool_search`，搜索 `personai` 后取得并激活下列工具；执行仍经过 Framework 的参数校验、宿主 `ToolPolicy` 和审计。
+`PersonAiCapabilityPack::new(connection)` 默认安装 `ToolDiscoveryPlugin`。Agent 初始只看到 `tool_search`、`tool_schema`、`tool_execute`；搜索 `personai` 取得摘要，再用 `tool_schema` 取得某个工具的完整 schema，执行仍经过 Framework 的参数校验、宿主 `ToolPolicy` 和审计。
 
 | 工具 | 输入 | 结果 |
 | --- | --- | --- |

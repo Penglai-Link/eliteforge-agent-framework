@@ -147,21 +147,21 @@ fn search(query: &str) -> Result<ChatResponse, ModelError> {
     )]))
 }
 
-/// The cache-stability invariant: every model request carries exactly the two
-/// stable gateway descriptors for the whole run.
+/// The cache-stability invariant: every model request carries exactly the
+/// three stable gateway descriptors (plus any native whitelist) for the run.
 fn assert_stable_gateway_catalog(requests: &[ChatRequest]) {
     for (index, request) in requests.iter().enumerate() {
         let names: Vec<_> = request.tools.iter().map(|t| t.call_name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["tool_execute", "tool_search"],
+            vec!["tool_execute", "tool_schema", "tool_search"],
             "request {index} must keep the stable gateway catalog"
         );
     }
 }
 
 #[tokio::test]
-async fn gateway_keeps_two_stable_tools_and_executes_envelopes() {
+async fn gateway_keeps_three_stable_tools_and_executes_envelopes() {
     let app = CountingTool::returning(ToolOutput::text("app data"));
     let private = CountingTool::returning(ToolOutput::text("private"));
     let model = ScriptedModel::new([
@@ -233,7 +233,7 @@ async fn gateway_keeps_two_stable_tools_and_executes_envelopes() {
 
 #[tokio::test]
 async fn collision_with_gateway_names_is_rejected_before_the_model() {
-    for name in ["tool_search", "tool_execute"] {
+    for name in ["tool_search", "tool_schema", "tool_execute"] {
         let model = ScriptedModel::new([]);
         let tool = CountingTool::returning(ToolOutput::text("unused"));
         let agent = TestBuilder::default()
@@ -410,6 +410,12 @@ async fn invalid_envelopes_fail_with_clear_errors() {
         )])),
         // Unknown inner tool name.
         envelope("ghost", "no_such_tool", json!({})),
+        // The removed search-definition form points at tool_schema.
+        Ok(ChatResponse::tool_calls(vec![ToolCall::new(
+            "legacy-definition",
+            "tool_search",
+            json!({"items":[{"tool":"app_page"}]}),
+        )])),
         text("done"),
     ]);
     let agent = TestBuilder::default()
@@ -443,6 +449,13 @@ async fn invalid_envelopes_fail_with_clear_errors() {
             .iter()
             .any(|m| m.role == Role::Tool && m.content.text().contains("not exposed")),
         "the unknown inner tool must be rejected"
+    );
+    assert!(
+        requests[3]
+            .messages
+            .iter()
+            .any(|m| m.role == Role::Tool && m.content.text().contains("tool_schema")),
+        "the removed search definition form must point at tool_schema"
     );
     assert_stable_gateway_catalog(&requests);
     assert!(agent.framework().close().await.is_success());
@@ -996,7 +1009,13 @@ fn batch_call(items: Value) -> Result<ChatResponse, ModelError> {
 async fn batch_items_keep_policy_schema_errors_order_and_provider_pairing() {
     let tool = BatchEcho(Arc::default());
     let model = ScriptedModel::new([
-        batch_call(json!([{"value":1},{"value":2},{"value":"bad"},{"value":3},{"value":4}])),
+        // A whitelisted native tool is called directly with the same items
+        // contract an enveloped call uses.
+        Ok(ChatResponse::tool_calls(vec![ToolCall::new(
+            "batch",
+            "echo",
+            json!({"items":[{"value":1},{"value":2},{"value":"bad"},{"value":3},{"value":4}]}),
+        )])),
         text("done"),
     ]);
     let agent = TestBuilder::default()
@@ -1009,14 +1028,31 @@ async fn batch_items_keep_policy_schema_errors_order_and_provider_pairing() {
         .build()
         .await
         .unwrap();
-    let result = agent
-        .run(RunRequest::new("batch", "batch requests"))
-        .await
-        .unwrap();
+    let mut request = RunRequest::new("batch", "batch requests");
+    request
+        .extensions
+        .insert(NativeToolWhitelist::new().with("batch.echo"));
+    let result = agent.run(request).await.unwrap();
     assert_eq!(result.tool_calls, 5);
     assert_eq!(*tool.0.lock().unwrap(), vec![1, 3, 4]);
     let requests = model.requests();
     assert_eq!(requests.len(), 2);
+    // The native tool is the only addition to the stable gateway trio, and it
+    // keeps the batch execution schema.
+    assert_eq!(
+        requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.call_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["echo", "tool_execute", "tool_schema", "tool_search"]
+    );
+    let native = requests[0]
+        .tools
+        .iter()
+        .find(|tool| tool.call_name == "echo")
+        .unwrap();
+    assert_eq!(native.input_schema["required"], json!(["items"]));
     let messages: Vec<_> = requests[1]
         .messages
         .iter()
@@ -1120,8 +1156,8 @@ async fn batch_approval_resume_preserves_individual_decisions_and_audit() {
     let model = ScriptedModel::new([
         Ok(ChatResponse::tool_calls(vec![ToolCall::new(
             "batch",
-            TOOL_EXECUTE_CALL_NAME,
-            json!({"tool":"app_page","arguments":{"items":[{},{}]}}),
+            "app_page",
+            json!({"items":[{},{}]}),
         )])),
         text("finished"),
     ]);
@@ -1138,10 +1174,11 @@ async fn batch_approval_resume_preserves_individual_decisions_and_audit() {
         .build()
         .await
         .unwrap();
-    let waiting = agent
-        .run(RunRequest::new("batch-approval", "try"))
-        .await
-        .unwrap();
+    let mut request = RunRequest::new("batch-approval", "try");
+    request
+        .extensions
+        .insert(NativeToolWhitelist::new().with("app.page"));
+    let waiting = agent.run(request).await.unwrap();
     assert_eq!(waiting.interactions.len(), 2);
     let first = agent
         .answer("batch-approval", waiting.interactions[0].id, json!(true))
@@ -1205,8 +1242,8 @@ async fn batch_discovery_returns_only_batch_contracts_and_explicit_single_except
     edit.descriptor = edit.descriptor.with_single_input();
     let model = ScriptedModel::new([
         Ok(ChatResponse::tool_calls(vec![ToolCall::new(
-            "search",
-            TOOL_SEARCH_CALL_NAME,
+            "schema",
+            TOOL_SCHEMA_CALL_NAME,
             json!({"items":[{"tool":"app_read"},{"tool":"file_edit"}]}),
         )])),
         Ok(ChatResponse::tool_calls(vec![ToolCall::new(
@@ -1249,11 +1286,11 @@ async fn batch_discovery_returns_only_batch_contracts_and_explicit_single_except
     )
     .unwrap();
     assert_eq!(
-        result["results"][0]["result"]["tools"][0]["input_schema"]["required"],
+        result["results"][0]["result"]["input_schema"]["required"],
         json!(["items"])
     );
     assert!(
-        result["results"][1]["result"]["tools"][0]["input_schema"]["properties"]
+        result["results"][1]["result"]["input_schema"]["properties"]
             .get("items")
             .is_none()
     );

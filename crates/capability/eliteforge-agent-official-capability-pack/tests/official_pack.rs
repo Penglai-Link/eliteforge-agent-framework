@@ -258,7 +258,7 @@ async fn official_pack_enables_local_tools_only_when_explicitly_configured() {
             pack = pack
                 .read_only_filesystem(FileSystemToolsConfig::new(directory.path()))
                 .write_filesystem(FileSystemToolsConfig::new(directory.path()))
-                .system_commands(SystemCommandConfig::restricted(["git"]));
+                .system_commands(SystemCommandConfig::new());
         }
         let agent = TestBuilder::new()
             .default_models(false)
@@ -266,12 +266,12 @@ async fn official_pack_enables_local_tools_only_when_explicitly_configured() {
             .build()
             .await
             .unwrap();
+        let mut request = RunRequest::new("catalog", "inspect tools");
+        // The local tool schemas intentionally exceed the default 32k test
+        // budget; this assertion is about catalog exposure, not context size.
+        request.limits.max_context_tokens = 64_000;
         assert_eq!(
-            agent
-                .run(RunRequest::new("catalog", "inspect tools"))
-                .await
-                .unwrap()
-                .output,
+            agent.run(request).await.unwrap().output,
             "catalog checked",
         );
         assert!(agent.framework().close().await.is_success());
@@ -353,8 +353,8 @@ impl ChatModel for OptionalCatalog {
         _: &dyn ChatStream,
     ) -> Result<ChatResponse, ModelError> {
         // Gateway semantics: enabling optional packs never changes the stable
-        // two-tool catalog; the wrapped tools appear only in search output.
-        for name in ["tool_search", "tool_execute"] {
+        // three-tool catalog; the wrapped tools appear only in search output.
+        for name in ["tool_search", "tool_schema", "tool_execute"] {
             assert_eq!(
                 request.tools.iter().any(|t| t.call_name == name),
                 self.enabled,
@@ -385,14 +385,14 @@ impl ChatModel for OptionalCatalog {
             return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
                 "find-web",
                 "tool_search",
-                json!({"query":"web","limit":20}),
+                json!({"items":[{"query":"web","limit":20}]}),
             )]));
         }
         if !transcript.contains("media_read_image") {
             return Ok(ChatResponse::tool_calls(vec![ToolCall::new(
                 "find-media",
                 "tool_search",
-                json!({"query":"media","limit":20}),
+                json!({"items":[{"query":"media","limit":20}]}),
             )]));
         }
         // Discovery output proves the optional plugins were actually installed.

@@ -116,7 +116,7 @@ async fn mcp_only_package_owns_an_extra_child_and_unselected_mcp_stays_inert() {
         source.path().join(executable),
     )
     .unwrap();
-    std::fs::write(source.path().join("manifest.json"),serde_json::to_vec(&json!({"manifest_version":1,"id":"demo.mcp","name":"MCP only","version":"1.0.0","framework":"^0.1","mcp":[{"id":"demo.mcp.server","transport":"stdio","program":executable}]})).unwrap()).unwrap();
+    std::fs::write(source.path().join("manifest.json"),serde_json::to_vec(&json!({"manifest_version":1,"id":"demo.mcp","name":"MCP only","version":"1.0.0","framework":"^1.0","mcp":[{"id":"demo.mcp.server","transport":"stdio","program":executable}]})).unwrap()).unwrap();
     manager
         .install_bytes(
             &build_capability_archive(source.path(), None).unwrap(),
@@ -908,7 +908,7 @@ fn signed_archives_validate_trust_and_dependency_solver_backtracks() {
         .trust_key("test", signing.verifying_key().to_bytes())
         .unwrap();
     fn pack(root: &Path, id: &str, version: &str, deps: Value) {
-        std::fs::write(root.join("manifest.json"),serde_json::to_vec(&json!({"manifest_version":1,"id":id,"name":id,"version":version,"framework":"^0.1","dependencies":deps})).unwrap()).unwrap();
+        std::fs::write(root.join("manifest.json"),serde_json::to_vec(&json!({"manifest_version":1,"id":id,"name":id,"version":version,"framework":"^1.0","dependencies":deps})).unwrap()).unwrap();
     }
     let source = tempfile::tempdir().unwrap();
     for (id, version, deps) in [
@@ -1240,7 +1240,7 @@ async fn static_skills_and_resources_package_uses_native_runtime_without_a_backe
     std::fs::create_dir_all(source.path().join("skills/pack-skill")).unwrap();
     std::fs::write(source.path().join("skills/pack-skill/SKILL.md"),"---\nname: pack-skill\ndescription: A packaged static skill\n---\n# Static skill body\nUse packaged instructions.").unwrap();
     std::fs::write(source.path().join("facts.txt"), "packaged resource").unwrap();
-    std::fs::write(source.path().join("manifest.json"),serde_json::to_vec(&json!({"manifest_version":1,"id":"static.pack","name":"Static","version":"1.0.0","framework":"^0.1","skills":["skills"],"resources":["facts.txt"]})).unwrap()).unwrap();
+    std::fs::write(source.path().join("manifest.json"),serde_json::to_vec(&json!({"manifest_version":1,"id":"static.pack","name":"Static","version":"1.0.0","framework":"^1.0","skills":["skills"],"resources":["facts.txt"]})).unwrap()).unwrap();
     manager
         .install_bytes(
             &build_capability_archive(source.path(), None).unwrap(),

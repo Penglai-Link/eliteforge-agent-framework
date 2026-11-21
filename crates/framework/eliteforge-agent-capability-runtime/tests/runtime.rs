@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, io::Write, sync::Arc, time::Duration};
 
 fn manifest(version: &str) -> Value {
-    json!({"manifest_version":1,"id":"test.pack","name":"Test","version":version,"framework":"^0.1","pages":[{"id":"test.page","title":"Page","plugin":"test.plugin","entry":"ui/index.html","topics":["chart"]}]})
+    json!({"manifest_version":1,"id":"test.pack","name":"Test","version":version,"framework":"^1.0","pages":[{"id":"test.page","title":"Page","plugin":"test.plugin","entry":"ui/index.html","topics":["chart"]}]})
 }
 #[test]
 fn portable_manifest_paths_and_mcp_transport_are_validated() {

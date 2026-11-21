@@ -13,8 +13,13 @@ pub trait TokenEstimator: Send + Sync {
         tools: &[ToolDescriptor],
     ) -> Result<usize, ModelError> {
         Ok(tools.iter().fold(0usize, |sum, tool| {
+            // model_input_schema is executor metadata already folded into the
+            // projected input_schema; counting it would charge the model twice.
+            let mut projected = tool.clone();
+            projected.model_input_schema = None;
             sum.saturating_add(
-                serde_json::to_vec(tool).map_or(usize::MAX, |v| v.len().saturating_add(16)),
+                serde_json::to_vec(&projected)
+                    .map_or(usize::MAX, |v| v.len().saturating_add(16)),
             )
         }))
     }
@@ -152,9 +157,15 @@ impl TokenEstimator for UnicodeTokenEstimator {
     }
     async fn tools(&self, _: &ModelRef, tools: &[ToolDescriptor]) -> Result<usize, ModelError> {
         Ok(tools.iter().fold(0usize, |tokens, tool| {
-            tokens.saturating_add(serde_json::to_string(tool).map_or(usize::MAX, |text| {
-                estimate_unicode_text_tokens(&text).saturating_add(16)
-            }))
+            // model_input_schema is executor metadata already folded into the
+            // projected input_schema; counting it would charge the model twice.
+            let mut projected = tool.clone();
+            projected.model_input_schema = None;
+            tokens.saturating_add(
+                serde_json::to_string(&projected).map_or(usize::MAX, |text| {
+                    estimate_unicode_text_tokens(&text).saturating_add(16)
+                }),
+            )
         }))
     }
     async fn options(

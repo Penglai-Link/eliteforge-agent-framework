@@ -228,11 +228,16 @@ impl ModelInvoker {
         &self,
         catalog: &ModelCatalog,
         model: &ModelRef,
-        request: ChatRequest,
+        mut request: ChatRequest,
         stage: &str,
         limits: &RunLimits,
         context: &RunContext,
     ) -> Result<ChatResponse, AgentError> {
+        request.tools = request
+            .tools
+            .into_iter()
+            .map(|tool| model_tool_descriptor(&tool))
+            .collect();
         limits.validate()?;
         context.check_cancelled()?;
         if catalog.get(model).is_none() {
@@ -382,6 +387,18 @@ impl ModelInvoker {
         memory: &mut dyn ConversationSession,
         context: &RunContext,
     ) -> Result<ChatResponse, AgentError> {
+        // This is the last shared stop before every direct, workflow, retry and
+        // Agent-loop model request. Authorization keeps the original descriptors
+        // above this boundary; only the model-facing schemas are projected.
+        let projected_tools = call
+            .tools
+            .iter()
+            .map(model_tool_descriptor)
+            .collect::<Vec<_>>();
+        let call = ModelCall {
+            tools: &projected_tools,
+            ..call
+        };
         call.limits.validate()?;
         call.options.validate()?;
         let runtime_snapshot = self.runtime.as_ref().map(|runtime| runtime.snapshot());

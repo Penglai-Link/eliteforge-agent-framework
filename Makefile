@@ -20,6 +20,19 @@ _NULL := /dev/null
 _FAIL := exit 1
 endif
 
+# sccache 只用于本地编译缓存；缺少时直接使用 rustc，CI 不依赖它。
+# 用 /dev/null 区分真实主机，避免在 POSIX 上静态检查 Windows 分支时创建 NUL 文件。
+ifndef RUSTC_WRAPPER
+ifneq ($(wildcard /dev/null),)
+_SCCACHE := $(strip $(shell command -v sccache 2>/dev/null))
+else
+_SCCACHE := $(strip $(shell where sccache 2>NUL))
+endif
+ifneq ($(_SCCACHE),)
+export RUSTC_WRAPPER := sccache
+endif
+endif
+
 # pkgid 只读取本地清单和锁文件；不改版本，不解析远程依赖。
 # 不重定向到 NUL，便于在 POSIX 上静态检查 OS=Windows_NT 分支。
 _HASH := \#
@@ -88,13 +101,13 @@ doctor:
 ifeq ($(OS),Windows_NT)
 	@where cargo >$(_NULL) 2>&1 || (echo 错误：缺少 cargo，请准备 Rust 工具链 & $(_FAIL))
 	@where rustc >$(_NULL) 2>&1 || (echo 错误：缺少 rustc，请准备 Rust 工具链 & $(_FAIL))
-	@where sccache >$(_NULL) 2>&1 || (echo 错误：缺少 sccache，请安装编译缓存工具 & $(_FAIL))
+	@where sccache >$(_NULL) 2>&1 || (echo 提示：未找到 sccache，构建不使用编译缓存)
 	@rustc -vV | findstr /c:"-pc-windows-msvc" >$(_NULL) && (where cl >$(_NULL) 2>&1 && where lib >$(_NULL) 2>&1 && where link >$(_NULL) 2>&1) || (rustc -vV | findstr /c:"-pc-windows-gnu" >$(_NULL) && where gcc >$(_NULL) 2>&1 && where ar >$(_NULL) 2>&1) || (echo 错误：MSVC 需要 cl、lib、link；GNU 需要 gcc、ar，请准备匹配的 Windows C 工具链 & $(_FAIL))
 	@if not exist Cargo.lock (echo 错误：缺少 Cargo.lock，不能执行锁定构建 & $(_FAIL))
 else
 	@command -v cargo >$(_NULL) 2>&1 || { echo 错误：缺少 cargo，请准备 Rust 工具链; $(_FAIL); }
 	@command -v rustc >$(_NULL) 2>&1 || { echo 错误：缺少 rustc，请准备 Rust 工具链; $(_FAIL); }
-	@command -v sccache >$(_NULL) 2>&1 || { echo 错误：缺少 sccache，请安装编译缓存工具; $(_FAIL); }
+	@command -v sccache >$(_NULL) 2>&1 || { echo 提示：未找到 sccache，构建不使用编译缓存; }
 	@command -v cc >$(_NULL) 2>&1 || { echo 错误：SQLite bundled 构建需要 C 编译器 cc; $(_FAIL); }
 	@command -v ar >$(_NULL) 2>&1 || { echo 错误：SQLite bundled 构建需要归档工具 ar; $(_FAIL); }
 	@test -f Cargo.lock || { echo 错误：缺少 Cargo.lock，不能执行锁定构建; $(_FAIL); }

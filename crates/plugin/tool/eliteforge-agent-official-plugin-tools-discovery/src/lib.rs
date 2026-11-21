@@ -1,7 +1,8 @@
-//! Installs the stable two-tool gateway: `tool_search` discovers the wrapped
-//! inventory as plain output; `tool_execute` addresses any wrapped tool as
-//! arguments, and the execution loop unwraps envelopes at admission so wrapped
-//! tools keep their own schemas, policies, middleware and executors.
+//! Installs the stable gateway: `tool_search` discovers the wrapped inventory
+//! as compact summaries; `tool_schema` returns one exact execution schema;
+//! `tool_execute` addresses any wrapped tool as arguments, and the execution
+//! loop unwraps envelopes at admission so wrapped tools keep their own
+//! schemas, policies, middleware and executors.
 //!
 //! With no explicit providers the plugin wraps the host's whole tool catalog
 //! (the execution loop re-mints the search binding with the complete leased
@@ -52,31 +53,44 @@ impl Plugin for ToolDiscoveryPlugin {
 #[async_trait]
 impl ToolProvider for ToolDiscoveryPlugin {
     fn descriptors(&self) -> Option<Vec<ToolDescriptor>> {
-        Some(vec![search_descriptor(), execute_descriptor()])
+        Some(vec![
+            search_descriptor(),
+            schema_descriptor(),
+            execute_descriptor(),
+        ])
     }
 
     fn catalog_metadata(&self) -> Option<Vec<ToolCatalogEntry>> {
         Some(
-            vec![search_descriptor(), execute_descriptor()]
-                .into_iter()
-                .map(|descriptor| ToolCatalogEntry {
-                    descriptor,
-                    domain_code: Some("tool".into()),
-                    category: Some(ToolCategory::localized(
-                        "execution",
-                        "执行工具",
-                        "Execution tools",
-                    )),
-                })
-                .collect(),
+            vec![
+                search_descriptor(),
+                schema_descriptor(),
+                execute_descriptor(),
+            ]
+            .into_iter()
+            .map(|descriptor| ToolCatalogEntry {
+                descriptor,
+                domain_code: Some("tool".into()),
+                category: Some(ToolCategory::localized(
+                    "execution",
+                    "执行工具",
+                    "Execution tools",
+                )),
+            })
+            .collect(),
         )
     }
 
     async fn lease(&self, context: &RunContext) -> Result<ToolLease, AgentError> {
         let mut tools = Vec::new();
-        let mut ids = BTreeSet::from([TOOL_SEARCH_ID.to_owned(), TOOL_EXECUTE_ID.to_owned()]);
+        let mut ids = BTreeSet::from([
+            TOOL_SEARCH_ID.to_owned(),
+            TOOL_SCHEMA_ID.to_owned(),
+            TOOL_EXECUTE_ID.to_owned(),
+        ]);
         let mut names = BTreeSet::from([
             TOOL_SEARCH_CALL_NAME.to_owned(),
+            TOOL_SCHEMA_CALL_NAME.to_owned(),
             TOOL_EXECUTE_CALL_NAME.to_owned(),
         ]);
         let mut bytes = 0usize;
@@ -110,10 +124,10 @@ impl ToolProvider for ToolDiscoveryPlugin {
                 tools.push(binding);
             }
         }
-        // Contribute the gateway pair. The execution loop re-mints the search
-        // binding with the complete leased inventory, so the fallback executor
-        // here only covers hosts that dispatch it without the loop's help.
-        let entries = tools
+        // Contribute the gateway trio. The execution loop re-mints discovery
+        // with the complete leased inventory, so these fallback executors only
+        // cover hosts that dispatch them without the loop's help.
+        let entries: Vec<GatewayInventoryEntry> = tools
             .iter()
             .filter(|binding| binding.exposed)
             .map(|binding| {
@@ -128,7 +142,21 @@ impl ToolProvider for ToolDiscoveryPlugin {
             })
             .collect();
         tools.push(
-            ToolBinding::new(search_descriptor(), GatewaySearch { entries })
+            ToolBinding::new(
+                search_descriptor(),
+                GatewaySearch {
+                    entries: entries.clone(),
+                },
+            )
+            .with_domain_code("tool")
+            .with_category(ToolCategory::localized(
+                "execution",
+                "执行工具",
+                "Execution tools",
+            )),
+        );
+        tools.push(
+            ToolBinding::new(schema_descriptor(), GatewaySchema { entries })
                 .with_domain_code("tool")
                 .with_category(ToolCategory::localized(
                     "execution",

@@ -19,14 +19,27 @@ pub struct ToolBatchItem {
     pub index: usize,
 }
 
+/// Project the optional narrower model schema without changing the execution
+/// mode. Used for non-gateway descriptors that are already model-facing.
+pub fn model_tool_descriptor(descriptor: &ToolDescriptor) -> ToolDescriptor {
+    let mut result = descriptor.clone();
+    if let Some(model_schema) = &descriptor.model_input_schema {
+        result.input_schema = model_schema.clone();
+        // Mark the descriptor as projected so a second pass cannot replace an
+        // existing batch wrapper with the atomic item schema.
+        result.model_input_schema = None;
+    }
+    result
+}
+
 /// Project only at the model boundary. Policies and executors keep the original
 /// descriptor and receive one item's arguments, never the batch wrapper.
 pub fn batch_tool_descriptor(descriptor: &ToolDescriptor) -> ToolDescriptor {
+    let mut result = model_tool_descriptor(descriptor);
     if descriptor.input_mode == ToolInputMode::Single {
-        return descriptor.clone();
+        return result;
     }
-    let mut result = descriptor.clone();
-    let mut item_schema = descriptor.input_schema.clone();
+    let mut item_schema = result.input_schema.clone();
     rebase_local_refs(&mut item_schema);
     result.input_schema = json!({
         "type": "object", "additionalProperties": false, "required": ["items"],

@@ -202,7 +202,7 @@
       "content": [
         {
           "type": "text",
-          "text": "{\"results\":[{\"index\":0,\"status\":\"Completed\",\"isError\":false,\"result\":{\"kind\":\"toolSearch\",\"mode\":\"definition\",\"tools\":[{\"call_name\":\"sample_read\",\"description\":\"Read a sample record\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"items\"],\"properties\":{\"items\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"object\",\"required\":[\"name\"],\"additionalProperties\":false,\"$defs\":{\"name\":{\"type\":\"string\",\"minLength\":1}},\"properties\":{\"name\":{\"$ref\":\"#/properties/items/items/$defs/name\"}},\"examples\":[{\"name\":\"record\"}]}}}}}],\"matched\":1,\"truncated\":false}},{\"index\":1,\"status\":\"Completed\",\"isError\":false,\"result\":{\"kind\":\"toolSearch\",\"mode\":\"definition\",\"tools\":[{\"call_name\":\"sample_edit\",\"description\":\"Edit a sample record\",\"input_schema\":{\"type\":\"object\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"}}}}],\"matched\":1,\"truncated\":false}},{\"index\":2,\"status\":\"Failed\",\"isError\":true,\"result\":\"Tool definition unavailable; search the authorized inventory for an exact call_name\"},{\"index\":3,\"status\":\"Failed\",\"isError\":true,\"result\":\"Tool definition unavailable; search the authorized inventory for an exact call_name\"}]}"
+          "text": "{\"results\":[{\"index\":0,\"status\":\"Completed\",\"isError\":false,\"result\":{\"kind\":\"toolSchema\",\"call_name\":\"sample_read\",\"description\":\"Read a sample record\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"items\"],\"properties\":{\"items\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"object\",\"required\":[\"name\"],\"additionalProperties\":false,\"$defs\":{\"name\":{\"type\":\"string\",\"minLength\":1}},\"properties\":{\"name\":{\"$ref\":\"#/properties/items/items/$defs/name\"}},\"examples\":[{\"name\":\"record\"}]}}}}}},{\"index\":1,\"status\":\"Completed\",\"isError\":false,\"result\":{\"kind\":\"toolSchema\",\"call_name\":\"sample_edit\",\"description\":\"Edit a sample record\",\"input_schema\":{\"type\":\"object\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"}}}}},{\"index\":2,\"status\":\"Failed\",\"isError\":true,\"result\":\"Tool definition unavailable; use tool_search to confirm the exact authorized call_name\"},{\"index\":3,\"status\":\"Failed\",\"isError\":true,\"result\":\"Tool definition unavailable; use tool_search to confirm the exact authorized call_name\"}]}"
         }
       ],
       "structured": {
@@ -218,106 +218,92 @@
             "content": [
               {
                 "type": "text",
-                "text": "{\"kind\":\"toolSearch\",\"mode\":\"definition\",\"tools\":[{\"call_name\":\"sample_read\",\"description\":\"Read a sample record\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"items\"],\"properties\":{\"items\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"object\",\"required\":[\"name\"],\"additionalProperties\":false,\"$defs\":{\"name\":{\"type\":\"string\",\"minLength\":1}},\"properties\":{\"name\":{\"$ref\":\"#/properties/items/items/$defs/name\"}},\"examples\":[{\"name\":\"record\"}]}}}}}],\"matched\":1,\"truncated\":false}"
+                "text": "{\"kind\":\"toolSchema\",\"call_name\":\"sample_read\",\"description\":\"Read a sample record\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"items\"],\"properties\":{\"items\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"object\",\"required\":[\"name\"],\"additionalProperties\":false,\"$defs\":{\"name\":{\"type\":\"string\",\"minLength\":1}},\"properties\":{\"name\":{\"$ref\":\"#/properties/items/items/$defs/name\"}},\"examples\":[{\"name\":\"record\"}]}}}}}"
               }
             ],
             "structured": {
-              "kind": "toolSearch",
-              "mode": "definition",
-              "tools": [
-                {
-                  "call_name": "sample_read",
-                  "description": "Read a sample record",
-                  "input_schema": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "items"
-                    ],
-                    "properties": {
-                      "items": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 32,
-                        "items": {
-                          "type": "object",
-                          "required": [
-                            "name"
-                          ],
-                          "additionalProperties": false,
-                          "$defs": {
-                            "name": {
-                              "type": "string",
-                              "minLength": 1
-                            }
-                          },
-                          "properties": {
-                            "name": {
-                              "$ref": "#/properties/items/items/$defs/name"
-                            }
-                          },
-                          "examples": [
-                            {
-                              "name": "record"
-                            }
-                          ]
+              "kind": "toolSchema",
+              "call_name": "sample_read",
+              "description": "Read a sample record",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name"
+                      ],
+                      "additionalProperties": false,
+                      "$defs": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
                         }
-                      }
+                      },
+                      "properties": {
+                        "name": {
+                          "$ref": "#/properties/items/items/$defs/name"
+                        }
+                      },
+                      "examples": [
+                        {
+                          "name": "record"
+                        }
+                      ]
                     }
                   }
                 }
-              ],
-              "matched": 1,
-              "truncated": false
+              }
             },
             "result": {
-              "kind": "toolSearch",
-              "mode": "definition",
-              "tools": [
-                {
-                  "call_name": "sample_read",
-                  "description": "Read a sample record",
-                  "input_schema": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "items"
-                    ],
-                    "properties": {
-                      "items": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 32,
-                        "items": {
-                          "type": "object",
-                          "required": [
-                            "name"
-                          ],
-                          "additionalProperties": false,
-                          "$defs": {
-                            "name": {
-                              "type": "string",
-                              "minLength": 1
-                            }
-                          },
-                          "properties": {
-                            "name": {
-                              "$ref": "#/properties/items/items/$defs/name"
-                            }
-                          },
-                          "examples": [
-                            {
-                              "name": "record"
-                            }
-                          ]
+              "kind": "toolSchema",
+              "call_name": "sample_read",
+              "description": "Read a sample record",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name"
+                      ],
+                      "additionalProperties": false,
+                      "$defs": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
                         }
-                      }
+                      },
+                      "properties": {
+                        "name": {
+                          "$ref": "#/properties/items/items/$defs/name"
+                        }
+                      },
+                      "examples": [
+                        {
+                          "name": "record"
+                        }
+                      ]
                     }
                   }
                 }
-              ],
-              "matched": 1,
-              "truncated": false
+              }
             },
             "isError": false
           },
@@ -331,54 +317,40 @@
             "content": [
               {
                 "type": "text",
-                "text": "{\"kind\":\"toolSearch\",\"mode\":\"definition\",\"tools\":[{\"call_name\":\"sample_edit\",\"description\":\"Edit a sample record\",\"input_schema\":{\"type\":\"object\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"}}}}],\"matched\":1,\"truncated\":false}"
+                "text": "{\"kind\":\"toolSchema\",\"call_name\":\"sample_edit\",\"description\":\"Edit a sample record\",\"input_schema\":{\"type\":\"object\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"}}}}"
               }
             ],
             "structured": {
-              "kind": "toolSearch",
-              "mode": "definition",
-              "tools": [
-                {
-                  "call_name": "sample_edit",
-                  "description": "Edit a sample record",
-                  "input_schema": {
-                    "type": "object",
-                    "required": [
-                      "name"
-                    ],
-                    "properties": {
-                      "name": {
-                        "type": "string"
-                      }
-                    }
+              "kind": "toolSchema",
+              "call_name": "sample_edit",
+              "description": "Edit a sample record",
+              "input_schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
                   }
                 }
-              ],
-              "matched": 1,
-              "truncated": false
+              }
             },
             "result": {
-              "kind": "toolSearch",
-              "mode": "definition",
-              "tools": [
-                {
-                  "call_name": "sample_edit",
-                  "description": "Edit a sample record",
-                  "input_schema": {
-                    "type": "object",
-                    "required": [
-                      "name"
-                    ],
-                    "properties": {
-                      "name": {
-                        "type": "string"
-                      }
-                    }
+              "kind": "toolSchema",
+              "call_name": "sample_edit",
+              "description": "Edit a sample record",
+              "input_schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
                   }
                 }
-              ],
-              "matched": 1,
-              "truncated": false
+              }
             },
             "isError": false
           },
@@ -392,10 +364,10 @@
             "content": [
               {
                 "type": "text",
-                "text": "Tool definition unavailable; search the authorized inventory for an exact call_name"
+                "text": "Tool definition unavailable; use tool_search to confirm the exact authorized call_name"
               }
             ],
-            "result": "Tool definition unavailable; search the authorized inventory for an exact call_name",
+            "result": "Tool definition unavailable; use tool_search to confirm the exact authorized call_name",
             "isError": true
           },
           {
@@ -408,10 +380,10 @@
             "content": [
               {
                 "type": "text",
-                "text": "Tool definition unavailable; search the authorized inventory for an exact call_name"
+                "text": "Tool definition unavailable; use tool_search to confirm the exact authorized call_name"
               }
             ],
-            "result": "Tool definition unavailable; search the authorized inventory for an exact call_name",
+            "result": "Tool definition unavailable; use tool_search to confirm the exact authorized call_name",
             "isError": true
           }
         ]
@@ -423,7 +395,7 @@
     "history": {
       "id": "00000000-0000-0000-0000-000000000001",
       "callId": "definitions",
-      "toolName": "tool_search",
+      "toolName": "tool_schema",
       "arguments": {
         "items": [
           {
@@ -444,7 +416,7 @@
       "content": [
         {
           "type": "Text",
-          "text": "{\"results\":[{\"index\":0,\"status\":\"Completed\",\"isError\":false,\"result\":{\"kind\":\"toolSearch\",\"mode\":\"definition\",\"tools\":[{\"call_name\":\"sample_read\",\"description\":\"Read a sample record\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"items\"],\"properties\":{\"items\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"object\",\"required\":[\"name\"],\"additionalProperties\":false,\"$defs\":{\"name\":{\"type\":\"string\",\"minLength\":1}},\"properties\":{\"name\":{\"$ref\":\"#/properties/items/items/$defs/name\"}},\"examples\":[{\"name\":\"record\"}]}}}}}],\"matched\":1,\"truncated\":false}},{\"index\":1,\"status\":\"Completed\",\"isError\":false,\"result\":{\"kind\":\"toolSearch\",\"mode\":\"definition\",\"tools\":[{\"call_name\":\"sample_edit\",\"description\":\"Edit a sample record\",\"input_schema\":{\"type\":\"object\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"}}}}],\"matched\":1,\"truncated\":false}},{\"index\":2,\"status\":\"Failed\",\"isError\":true,\"result\":\"Tool definition unavailable; search the authorized inventory for an exact call_name\"},{\"index\":3,\"status\":\"Failed\",\"isError\":true,\"result\":\"Tool definition unavailable; search the authorized inventory for an exact call_name\"}]}"
+          "text": "{\"results\":[{\"index\":0,\"status\":\"Completed\",\"isError\":false,\"result\":{\"kind\":\"toolSchema\",\"call_name\":\"sample_read\",\"description\":\"Read a sample record\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"items\"],\"properties\":{\"items\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"object\",\"required\":[\"name\"],\"additionalProperties\":false,\"$defs\":{\"name\":{\"type\":\"string\",\"minLength\":1}},\"properties\":{\"name\":{\"$ref\":\"#/properties/items/items/$defs/name\"}},\"examples\":[{\"name\":\"record\"}]}}}}}},{\"index\":1,\"status\":\"Completed\",\"isError\":false,\"result\":{\"kind\":\"toolSchema\",\"call_name\":\"sample_edit\",\"description\":\"Edit a sample record\",\"input_schema\":{\"type\":\"object\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"}}}}},{\"index\":2,\"status\":\"Failed\",\"isError\":true,\"result\":\"Tool definition unavailable; use tool_search to confirm the exact authorized call_name\"},{\"index\":3,\"status\":\"Failed\",\"isError\":true,\"result\":\"Tool definition unavailable; use tool_search to confirm the exact authorized call_name\"}]}"
         }
       ],
       "structured": {
@@ -460,106 +432,92 @@
             "content": [
               {
                 "type": "text",
-                "text": "{\"kind\":\"toolSearch\",\"mode\":\"definition\",\"tools\":[{\"call_name\":\"sample_read\",\"description\":\"Read a sample record\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"items\"],\"properties\":{\"items\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"object\",\"required\":[\"name\"],\"additionalProperties\":false,\"$defs\":{\"name\":{\"type\":\"string\",\"minLength\":1}},\"properties\":{\"name\":{\"$ref\":\"#/properties/items/items/$defs/name\"}},\"examples\":[{\"name\":\"record\"}]}}}}}],\"matched\":1,\"truncated\":false}"
+                "text": "{\"kind\":\"toolSchema\",\"call_name\":\"sample_read\",\"description\":\"Read a sample record\",\"input_schema\":{\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"items\"],\"properties\":{\"items\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32,\"items\":{\"type\":\"object\",\"required\":[\"name\"],\"additionalProperties\":false,\"$defs\":{\"name\":{\"type\":\"string\",\"minLength\":1}},\"properties\":{\"name\":{\"$ref\":\"#/properties/items/items/$defs/name\"}},\"examples\":[{\"name\":\"record\"}]}}}}}"
               }
             ],
             "structured": {
-              "kind": "toolSearch",
-              "mode": "definition",
-              "tools": [
-                {
-                  "call_name": "sample_read",
-                  "description": "Read a sample record",
-                  "input_schema": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "items"
-                    ],
-                    "properties": {
-                      "items": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 32,
-                        "items": {
-                          "type": "object",
-                          "required": [
-                            "name"
-                          ],
-                          "additionalProperties": false,
-                          "$defs": {
-                            "name": {
-                              "type": "string",
-                              "minLength": 1
-                            }
-                          },
-                          "properties": {
-                            "name": {
-                              "$ref": "#/properties/items/items/$defs/name"
-                            }
-                          },
-                          "examples": [
-                            {
-                              "name": "record"
-                            }
-                          ]
+              "kind": "toolSchema",
+              "call_name": "sample_read",
+              "description": "Read a sample record",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name"
+                      ],
+                      "additionalProperties": false,
+                      "$defs": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
                         }
-                      }
+                      },
+                      "properties": {
+                        "name": {
+                          "$ref": "#/properties/items/items/$defs/name"
+                        }
+                      },
+                      "examples": [
+                        {
+                          "name": "record"
+                        }
+                      ]
                     }
                   }
                 }
-              ],
-              "matched": 1,
-              "truncated": false
+              }
             },
             "result": {
-              "kind": "toolSearch",
-              "mode": "definition",
-              "tools": [
-                {
-                  "call_name": "sample_read",
-                  "description": "Read a sample record",
-                  "input_schema": {
-                    "type": "object",
-                    "additionalProperties": false,
-                    "required": [
-                      "items"
-                    ],
-                    "properties": {
-                      "items": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 32,
-                        "items": {
-                          "type": "object",
-                          "required": [
-                            "name"
-                          ],
-                          "additionalProperties": false,
-                          "$defs": {
-                            "name": {
-                              "type": "string",
-                              "minLength": 1
-                            }
-                          },
-                          "properties": {
-                            "name": {
-                              "$ref": "#/properties/items/items/$defs/name"
-                            }
-                          },
-                          "examples": [
-                            {
-                              "name": "record"
-                            }
-                          ]
+              "kind": "toolSchema",
+              "call_name": "sample_read",
+              "description": "Read a sample record",
+              "input_schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "items"
+                ],
+                "properties": {
+                  "items": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 32,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "name"
+                      ],
+                      "additionalProperties": false,
+                      "$defs": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
                         }
-                      }
+                      },
+                      "properties": {
+                        "name": {
+                          "$ref": "#/properties/items/items/$defs/name"
+                        }
+                      },
+                      "examples": [
+                        {
+                          "name": "record"
+                        }
+                      ]
                     }
                   }
                 }
-              ],
-              "matched": 1,
-              "truncated": false
+              }
             },
             "isError": false
           },
@@ -573,54 +531,40 @@
             "content": [
               {
                 "type": "text",
-                "text": "{\"kind\":\"toolSearch\",\"mode\":\"definition\",\"tools\":[{\"call_name\":\"sample_edit\",\"description\":\"Edit a sample record\",\"input_schema\":{\"type\":\"object\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"}}}}],\"matched\":1,\"truncated\":false}"
+                "text": "{\"kind\":\"toolSchema\",\"call_name\":\"sample_edit\",\"description\":\"Edit a sample record\",\"input_schema\":{\"type\":\"object\",\"required\":[\"name\"],\"properties\":{\"name\":{\"type\":\"string\"}}}}"
               }
             ],
             "structured": {
-              "kind": "toolSearch",
-              "mode": "definition",
-              "tools": [
-                {
-                  "call_name": "sample_edit",
-                  "description": "Edit a sample record",
-                  "input_schema": {
-                    "type": "object",
-                    "required": [
-                      "name"
-                    ],
-                    "properties": {
-                      "name": {
-                        "type": "string"
-                      }
-                    }
+              "kind": "toolSchema",
+              "call_name": "sample_edit",
+              "description": "Edit a sample record",
+              "input_schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
                   }
                 }
-              ],
-              "matched": 1,
-              "truncated": false
+              }
             },
             "result": {
-              "kind": "toolSearch",
-              "mode": "definition",
-              "tools": [
-                {
-                  "call_name": "sample_edit",
-                  "description": "Edit a sample record",
-                  "input_schema": {
-                    "type": "object",
-                    "required": [
-                      "name"
-                    ],
-                    "properties": {
-                      "name": {
-                        "type": "string"
-                      }
-                    }
+              "kind": "toolSchema",
+              "call_name": "sample_edit",
+              "description": "Edit a sample record",
+              "input_schema": {
+                "type": "object",
+                "required": [
+                  "name"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string"
                   }
                 }
-              ],
-              "matched": 1,
-              "truncated": false
+              }
             },
             "isError": false
           },
@@ -634,10 +578,10 @@
             "content": [
               {
                 "type": "text",
-                "text": "Tool definition unavailable; search the authorized inventory for an exact call_name"
+                "text": "Tool definition unavailable; use tool_search to confirm the exact authorized call_name"
               }
             ],
-            "result": "Tool definition unavailable; search the authorized inventory for an exact call_name",
+            "result": "Tool definition unavailable; use tool_search to confirm the exact authorized call_name",
             "isError": true
           },
           {
@@ -650,10 +594,10 @@
             "content": [
               {
                 "type": "text",
-                "text": "Tool definition unavailable; search the authorized inventory for an exact call_name"
+                "text": "Tool definition unavailable; use tool_search to confirm the exact authorized call_name"
               }
             ],
-            "result": "Tool definition unavailable; search the authorized inventory for an exact call_name",
+            "result": "Tool definition unavailable; use tool_search to confirm the exact authorized call_name",
             "isError": true
           }
         ]

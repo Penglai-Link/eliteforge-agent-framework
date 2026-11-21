@@ -1,3 +1,4 @@
+use crate::manager::VersionLock;
 use crate::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -43,7 +44,7 @@ pub struct BackendInstance {
     configuration: Value,
     session: Mutex<Option<ProcessSession>>,
     selection: std::sync::Mutex<Option<UsageLease>>,
-    version_lock: Arc<std::sync::Mutex<Option<std::fs::File>>>,
+    version_lock: Arc<std::sync::Mutex<Option<VersionLock>>>,
     retired: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) data_scope: std::sync::Mutex<String>,
     pub selected_implementations: std::collections::BTreeSet<String>,
@@ -494,7 +495,9 @@ impl BackendInstance {
             finished,
             exited,
         };
-        let handshake = peer.request("initialize", json!({"protocol":CAPABILITY_PROTOCOL_VERSION,"instance":self.identity,"configuration":self.configuration,"selected":self.selected_implementations,"contributions":contributions}), Duration::from_secs(15)).await;
+        // A packaged backend can take a while to start on a loaded Windows
+        // runner, where the extracted executable is scanned before execution.
+        let handshake = peer.request("initialize", json!({"protocol":CAPABILITY_PROTOCOL_VERSION,"instance":self.identity,"configuration":self.configuration,"selected":self.selected_implementations,"contributions":contributions}), Duration::from_secs(60)).await;
         let handshake: BackendHandshake =
             match handshake.and_then(|value| Ok(serde_json::from_value(value)?)) {
                 Ok(handshake) => handshake,

@@ -96,7 +96,7 @@ async fn gateway_discovers_and_executes_a2ui_in_each_new_run() {
     assert_eq!(requests.len(), 6);
     for request in requests.iter() {
         let names: Vec<_> = request.tools.iter().map(|t| t.call_name.as_str()).collect();
-        assert_eq!(names, ["tool_execute", "tool_search"]);
+        assert_eq!(names, ["tool_execute", "tool_schema", "tool_search"]);
     }
     for index in [1, 4] {
         let history = serde_json::to_string(&requests[index].messages).unwrap();
@@ -183,7 +183,7 @@ async fn gateway_form_suspends_and_resumes_without_activation() {
             .iter()
             .map(|t| t.call_name.as_str())
             .collect::<Vec<_>>()
-            == ["tool_execute", "tool_search"]
+            == ["tool_execute", "tool_schema", "tool_search"]
     }));
     drop(requests);
     assert!(framework.close().await.is_success());

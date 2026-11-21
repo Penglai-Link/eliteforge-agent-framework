@@ -273,6 +273,11 @@ pub struct ToolDescriptor {
     pub call_name: String,
     pub description: String,
     pub input_schema: Value,
+    /// Optional model-facing projection of `input_schema`. Executors and
+    /// validation keep using `input_schema`, so a host can hide a legacy field
+    /// from new model calls while still detecting and rejecting it explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_input_schema: Option<Value>,
     /// Human-facing plugin resources; excluded from model function projections.
     #[serde(default)]
     pub display: Option<crate::ToolDisplayMetadata>,
@@ -297,11 +302,19 @@ impl ToolDescriptor {
             call_name: call_name.into(),
             description: description.into(),
             input_schema,
+            model_input_schema: None,
             display: None,
             operation_kind: ToolOperationKind::Unknown,
             timeout_scope: ToolTimeoutScope::Tool,
             input_mode: ToolInputMode::Batch,
         }
+    }
+
+    /// Use a narrower schema only for model-facing tool lists and `tool_schema`.
+    /// Admission, validation and the executor continue to use `input_schema`.
+    pub fn with_model_input_schema(mut self, schema: Value) -> Self {
+        self.model_input_schema = Some(schema);
+        self
     }
 
     pub fn with_single_input(mut self) -> Self {

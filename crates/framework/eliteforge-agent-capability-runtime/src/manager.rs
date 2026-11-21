@@ -5,10 +5,10 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 const MAX_PACKAGE_BYTES: usize = 128 * 1024 * 1024;
@@ -53,6 +53,48 @@ pub struct ExtensionCatalogEntry {
     pub defining_package: String,
     pub implementations: Vec<(String, semver::Version, ExtensionImplementation)>,
 }
+type VersionLockKey = (PathBuf, String, String);
+
+fn shared_version_locks() -> &'static Mutex<HashMap<VersionLockKey, usize>> {
+    static LOCKS: OnceLock<Mutex<HashMap<VersionLockKey, usize>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Keeps a version lock file alive and tracks in-process shared holders.
+/// Windows file locks are per-process, so a second manager in the same process
+/// must consult this registry to detect a live shared lock.
+pub(crate) struct VersionLock {
+    _file: std::fs::File,
+    shared: Option<VersionLockKey>,
+}
+
+impl Drop for VersionLock {
+    fn drop(&mut self) {
+        let Some(key) = self.shared.take() else {
+            return;
+        };
+        let mut locks = shared_version_locks()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = locks.get_mut(&key) {
+            *count -= 1;
+            if *count == 0 {
+                locks.remove(&key);
+            }
+        }
+    }
+}
+
+fn version_busy(package: &str, version: &semver::Version) -> RuntimeError {
+    RuntimeError::Busy(vec![UsageBlocker {
+        package: package.into(),
+        version: version.to_string(),
+        scope: "shared version repository".into(),
+        kind: "version_lock".into(),
+        label: "version is referenced by another runtime or repository operation".into(),
+    }])
+}
+
 #[derive(Clone)]
 pub struct CapabilityPackManager {
     root: Arc<PathBuf>,
@@ -118,7 +160,7 @@ impl CapabilityPackManager {
         package: &str,
         version: &semver::Version,
         exclusive: bool,
-    ) -> RuntimeResult<std::fs::File> {
+    ) -> RuntimeResult<VersionLock> {
         validate_id(package)?;
         let directory = self.root.join("locks");
         std::fs::create_dir_all(&directory)?;
@@ -128,6 +170,19 @@ impl CapabilityPackManager {
             .read(true)
             .write(true)
             .open(directory.join(format!("{package}@{version}.lock")))?;
+        let key = (
+            self.root.as_ref().clone(),
+            package.to_owned(),
+            version.to_string(),
+        );
+        // Serialize the in-process check with lock acquisition so a shared
+        // holder cannot appear between the check and the exclusive lock.
+        let mut held = shared_version_locks()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if exclusive && held.get(&key).copied().unwrap_or(0) != 0 {
+            return Err(version_busy(package, version));
+        }
         let result = if exclusive {
             FileExt::try_lock_exclusive(&file)
         } else {
@@ -135,18 +190,18 @@ impl CapabilityPackManager {
         };
         if let Err(error) = result {
             if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Err(RuntimeError::Busy(vec![UsageBlocker {
-                    package: package.into(),
-                    version: version.to_string(),
-                    scope: "shared version repository".into(),
-                    kind: "version_lock".into(),
-                    label: "version is referenced by another runtime or repository operation"
-                        .into(),
-                }]));
+                return Err(version_busy(package, version));
             }
             return Err(error.into());
         }
-        Ok(file)
+        if !exclusive {
+            *held.entry(key.clone()).or_insert(0) += 1;
+        }
+        drop(held);
+        Ok(VersionLock {
+            _file: file,
+            shared: (!exclusive).then_some(key),
+        })
     }
     pub(crate) fn process_exited(&self, package: String, scope: String) {
         let _ = self

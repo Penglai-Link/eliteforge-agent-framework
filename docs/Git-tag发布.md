@@ -28,7 +28,9 @@ python3 scripts/release.py tag
 git push gitee refs/tags/1.0.0
 ```
 
-推送 tag 会同时上传其指向的提交，但不会更新远端分支。需要同步主分支时单独执行 `git push gitee main`。已经发布的 tag 不应移动；修复后应升级版本并创建新 tag。
+推送 tag 会同时上传其指向的提交，但不会更新远端分支。需要同步主分支时单独执行 `git push gitee main`。一般情况下已经发布的 tag 不应移动；修复后应升级版本并创建新 tag。
+
+仅在明确要求重建同名 tag 时，先核对 GitHub、Gitee 的旧 tag 仍指向预期提交，再强制更新两个远端的同名附注 tag。重建不会更新其他消费者已有的 `Cargo.lock`：它们仍固定旧提交，必须重新解析依赖并核对锁文件中的来源提交。
 
 ## 在其他项目中引用
 
@@ -42,4 +44,4 @@ eliteforge-agent-official-plugin-storage-local = { git = "https://gitee.com/pers
 
 同一项目引用的框架和插件应使用完全相同的仓库 URL 和 tag，避免不同 Git 来源导致重复类型。主仓库及使用到的 Git 依赖必须允许使用者访问；`model-http` 和 PersonAI 能力包使用的 `crab-serverapi` 仍从固定 Git 提交获取。
 
-SQLite 扩展与 tokenizer 资源保持内置，不需要拆分资源包或在运行时下载。直接克隆本仓库开发时，需满足本仓库 `.cargo/config.toml` 的 `sccache` 配置；作为其他项目的 Git 依赖时，由调用方的 Cargo 配置控制构建。
+SQLite 扩展与 tokenizer 资源保持内置，不需要拆分资源包或在运行时下载。直接克隆本仓库开发时，`make` 会在检测到本机 `sccache` 时启用编译缓存，未安装时直接使用 `rustc`；作为其他项目的 Git 依赖时，由调用方的 Cargo 配置控制构建。
